@@ -1,4 +1,5 @@
 import os
+import asyncio
 import asyncpg
 import logging
 from pathlib import Path
@@ -8,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 _analyzer_pool: asyncpg.Pool | None = None
 _collector_pool: asyncpg.Pool | None = None
+
+RETRY_DELAYS = [5, 10, 20, 40, 60]
 
 
 def _get_env(key: str) -> str:
@@ -31,6 +34,28 @@ def _parse_dsn(dsn: str) -> dict:
     }
 
 
+async def _create_pool_with_retry(params: dict, max_size: int, label: str) -> asyncpg.Pool:
+    attempt = 0
+    while True:
+        try:
+            pool = await asyncpg.create_pool(
+                **params,
+                min_size=2,
+                max_size=max_size,
+                ssl="disable",
+                command_timeout=300,
+            )
+            if attempt > 0:
+                logger.info("Connected to %s after %d retries", label, attempt)
+            return pool
+        except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError, ConnectionError) as e:
+            if attempt == 0:
+                logger.warning("Waiting for %s database (%s). Will retry quietly...", label, e.__class__.__name__)
+            delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+            await asyncio.sleep(delay)
+            attempt += 1
+
+
 async def init_pools() -> None:
     global _analyzer_pool, _collector_pool
 
@@ -39,20 +64,8 @@ async def init_pools() -> None:
     analyzer_params = _parse_dsn(_get_env("ANALYZER_DATABASE_URL"))
     collector_params = _parse_dsn(_get_env("COLLECTOR_DATABASE_URL"))
 
-    _analyzer_pool = await asyncpg.create_pool(
-        **analyzer_params,
-        min_size=2,
-        max_size=max_size,
-        ssl="disable",
-        command_timeout=300,
-    )
-    _collector_pool = await asyncpg.create_pool(
-        **collector_params,
-        min_size=2,
-        max_size=max_size,
-        ssl="disable",
-        command_timeout=300,
-    )
+    _analyzer_pool = await _create_pool_with_retry(analyzer_params, max_size, "analyzer")
+    _collector_pool = await _create_pool_with_retry(collector_params, max_size, "collector")
 
     await apply_schema()
     logger.info("Database pools initialized")
@@ -86,3 +99,16 @@ def get_collector_pool() -> asyncpg.Pool:
     if _collector_pool is None:
         raise RuntimeError("Collector pool not initialized — call init_pools() first")
     return _collector_pool
+
+
+async def check_db_connectivity() -> bool:
+    try:
+        if _analyzer_pool is None or _collector_pool is None:
+            return False
+        async with _analyzer_pool.acquire(timeout=5) as conn:
+            await conn.fetchval("SELECT 1")
+        async with _collector_pool.acquire(timeout=5) as conn:
+            await conn.fetchval("SELECT 1")
+        return True
+    except Exception:
+        return False

@@ -3,6 +3,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+from src.db.connection import check_db_connectivity
 from src.pipeline.incremental_runner import run_incremental, run_full_resolution
 
 logger = logging.getLogger(__name__)
@@ -21,8 +22,20 @@ async def start_scheduler() -> None:
                 interval // 60, full_hour)
 
     last_full_date: str | None = None
+    was_offline = False
 
     while _running:
+        if not await check_db_connectivity():
+            if not was_offline:
+                logger.warning("Database unreachable — scheduler pausing until connectivity returns")
+                was_offline = True
+            await asyncio.sleep(30)
+            continue
+
+        if was_offline:
+            logger.info("Database connectivity restored — scheduler resuming")
+            was_offline = False
+
         now = datetime.now(timezone.utc)
 
         if now.hour == full_hour and last_full_date != now.strftime("%Y-%m-%d"):

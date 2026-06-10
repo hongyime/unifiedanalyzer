@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 async def _is_run_locked() -> bool:
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
+        cleaned = await conn.fetchval("""
+            UPDATE analysis_runs
+            SET status = 'failed', finished_at = NOW(),
+                error_message = 'Stale lock — cleaned up automatically'
+            WHERE status = 'running'
+              AND started_at < NOW() - INTERVAL '30 minutes'
+            RETURNING id
+        """)
+        if cleaned:
+            logger.warning("Cleaned up stale run lock: %s", cleaned)
         row = await conn.fetchval("""
             SELECT id FROM analysis_runs WHERE status = 'running' LIMIT 1
         """)

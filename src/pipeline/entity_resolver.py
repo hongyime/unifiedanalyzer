@@ -405,14 +405,22 @@ async def resolve_entities() -> dict:
 
     # Phase 5: Persist to analyzer DB
     pool = get_analyzer_pool()
-    stats = {"entities": 0, "links": 0, "signals": 0}
+    stats = {"entities_created": 0, "entities_updated": 0, "links": 0, "signals": 0}
 
     async with pool.acquire() as conn:
+        # Load existing links so we can reuse entity IDs
+        existing_links = {}
+        for row in await conn.fetch(
+            "SELECT entity_id, source, platform_id FROM entity_platform_links"
+        ):
+            existing_links[(row["source"], row["platform_id"])] = row["entity_id"]
+
+        seen_entity_ids: set = set()
+
         for candidate in entities:
             confidence, independent_count = compute_confidence(candidate.signals)
             is_confirmed = confidence >= CONFIDENCE_THRESHOLD and independent_count >= MIN_SIGNALS
 
-            # Pick canonical name: prefer strava, then any non-null name
             canonical = None
             for p in candidate.profiles:
                 if p.source == "strava" and p.name:
@@ -429,12 +437,31 @@ async def resolve_entities() -> dict:
                         canonical = p.username
                         break
 
-            entity_id = await conn.fetchval("""
-                INSERT INTO entities (tier, canonical_name, confidence_score, signal_count)
-                VALUES ('primary', $1, $2, $3)
-                RETURNING id
-            """, canonical, confidence, independent_count)
-            stats["entities"] += 1
+            # Check if any profile already has an entity
+            entity_id = None
+            for p in candidate.profiles:
+                eid = existing_links.get((p.source, p.platform_id))
+                if eid and eid not in seen_entity_ids:
+                    entity_id = eid
+                    break
+
+            if entity_id:
+                await conn.execute("""
+                    UPDATE entities SET
+                        canonical_name = $1, confidence_score = $2,
+                        signal_count = $3, updated_at = NOW()
+                    WHERE id = $4
+                """, canonical, confidence, independent_count, entity_id)
+                stats["entities_updated"] += 1
+            else:
+                entity_id = await conn.fetchval("""
+                    INSERT INTO entities (tier, canonical_name, confidence_score, signal_count)
+                    VALUES ('primary', $1, $2, $3)
+                    RETURNING id
+                """, canonical, confidence, independent_count)
+                stats["entities_created"] += 1
+
+            seen_entity_ids.add(entity_id)
 
             for p in candidate.profiles:
                 await conn.execute("""
@@ -453,6 +480,10 @@ async def resolve_entities() -> dict:
                     confidence, is_confirmed)
                 stats["links"] += 1
 
+            # Replace signals for this entity (idempotent)
+            await conn.execute(
+                "DELETE FROM identity_signals WHERE entity_id = $1", entity_id
+            )
             for s in candidate.signals:
                 await conn.execute("""
                     INSERT INTO identity_signals
@@ -463,5 +494,15 @@ async def resolve_entities() -> dict:
                     s.target_platform, s.target_record_id, s.value, s.confidence)
                 stats["signals"] += 1
 
+        # Clean up orphaned entities (no platform links pointing to them)
+        orphaned = await conn.fetchval("""
+            DELETE FROM entities
+            WHERE id NOT IN (SELECT DISTINCT entity_id FROM entity_platform_links)
+            RETURNING COUNT(*)
+        """)
+        if orphaned:
+            logger.info("Cleaned up %d orphaned entities", orphaned)
+
+    stats["entities"] = stats["entities_created"] + stats["entities_updated"]
     logger.info("Entity resolution complete: %s", stats)
     return stats
