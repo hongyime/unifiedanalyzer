@@ -119,6 +119,18 @@ CREATE TABLE IF NOT EXISTS behavioral_profiles (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+ALTER TABLE entities ADD COLUMN IF NOT EXISTS silence_threshold_days FLOAT;
+ALTER TABLE entities ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS entity_merge_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    action VARCHAR(10) NOT NULL, -- 'merge' or 'split'
+    source_entity_ids UUID[] NOT NULL,
+    target_entity_id UUID,
+    reason TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS entity_relationships (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     entity_a_id UUID REFERENCES entities(id) ON DELETE CASCADE,

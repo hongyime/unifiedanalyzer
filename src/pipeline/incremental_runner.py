@@ -5,6 +5,7 @@ from src.db.connection import get_analyzer_pool
 from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.timeline_builder import build_timeline
 from src.pipeline.alert_engine import run_alerts
+from src.pipeline.behavioral_profiler import compute_behavioral_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,8 @@ async def run_incremental() -> dict:
         alert_stats = await run_alerts()
         stats["alerts"] = sum(alert_stats.values())
 
+        await compute_behavioral_profiles()
+
         await _finish_run(run_id, stats)
         logger.info("Incremental run complete: %s", stats)
 
@@ -128,6 +131,8 @@ async def run_full_resolution() -> dict:
 
         alert_stats = await run_alerts()
         stats["alerts"] = sum(alert_stats.values())
+
+        await compute_behavioral_profiles()
 
         await _finish_run(run_id, stats)
         logger.info("Full resolution run complete: %s", stats)

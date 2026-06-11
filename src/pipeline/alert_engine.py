@@ -50,7 +50,7 @@ async def _detect_silence_gaps() -> int:
 
     async with pool.acquire() as conn:
         entities = await conn.fetch("""
-            SELECT e.id, e.canonical_name
+            SELECT e.id, e.canonical_name, e.silence_threshold_days
             FROM entities e
             WHERE e.tier = 'primary'
         """)
@@ -75,7 +75,10 @@ async def _detect_silence_gaps() -> int:
             event_count = row["event_count"]
             history_days = (now - first_event).days if first_event else 0
 
-            if dynamic and history_days >= min_history and event_count >= 2:
+            custom_threshold = entity["silence_threshold_days"]
+            if custom_threshold and custom_threshold > 0:
+                threshold_days = custom_threshold
+            elif dynamic and history_days >= min_history and event_count >= 2:
                 span = (last_event - first_event).total_seconds() / 86400.0
                 avg_interval = span / (event_count - 1) if event_count > 1 else span
                 threshold_days = avg_interval * multiplier
