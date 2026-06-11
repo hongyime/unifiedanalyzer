@@ -40,14 +40,22 @@ class EntityCandidate:
     signals: list[SignalMatch] = field(default_factory=list)
 
 
+DEFAULT_USERNAME_RE = re.compile(r"^user\d*$", re.IGNORECASE)
+MIN_NORMALIZED_LENGTH = 3
+
+
 def normalize_username(username: str | None) -> str | None:
     if not username:
+        return None
+    if DEFAULT_USERNAME_RE.match(username):
         return None
     u = username.lower().strip()
     for ch in USERNAME_STRIP_CHARS:
         u = u.replace(ch, "")
     u = re.sub(r"\d+$", "", u)
-    return u if u else None
+    if not u or len(u) < MIN_NORMALIZED_LENGTH:
+        return None
+    return u
 
 
 def parse_whatsapp_phone(jid: str) -> str | None:
