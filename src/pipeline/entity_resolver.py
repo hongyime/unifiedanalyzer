@@ -76,8 +76,10 @@ async def load_collection_targets() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def load_platform_profiles() -> dict[str, list[PlatformProfile]]:
-    """Load all profiles from collector DB, grouped by normalized username."""
+async def load_platform_profiles() -> tuple[dict[str, list[PlatformProfile]], list[PlatformProfile]]:
+    """Load all profiles from collector DB, grouped by normalized username.
+    Returns (by_username, no_username) — the second list holds profiles
+    without usernames (WhatsApp) that need special handling."""
     pool = get_collector_pool()
     profiles: list[PlatformProfile] = []
 
@@ -160,23 +162,31 @@ async def load_platform_profiles() -> dict[str, list[PlatformProfile]]:
         for row in await conn.fetch(
             "SELECT platform_user_id, name, pushname FROM whatsapp_users"
         ):
+            puid = row["platform_user_id"]
+            if not puid or "@lid" in puid or puid.startswith("status@"):
+                continue
+            if "@newsletter" in puid or "@g.us" in puid or "@broadcast" in puid:
+                continue
             display = row["name"] or row["pushname"] or ""
-            phone = parse_whatsapp_phone(row["platform_user_id"])
+            phone = parse_whatsapp_phone(puid)
             profiles.append(PlatformProfile(
                 source="whatsapp",
-                platform_id=row["platform_user_id"],
+                platform_id=puid,
                 username=None,
                 name=display if display.strip() else None,
                 phone=phone,
             ))
 
     by_username: dict[str, list[PlatformProfile]] = {}
+    no_username: list[PlatformProfile] = []
     for p in profiles:
         norm = normalize_username(p.username)
         if norm:
             by_username.setdefault(norm, []).append(p)
+        else:
+            no_username.append(p)
 
-    return by_username
+    return by_username, no_username
 
 
 async def load_commit_emails() -> dict[str, list[str]]:
@@ -237,7 +247,7 @@ def compute_confidence(signals: list[SignalMatch]) -> tuple[float, int]:
 async def resolve_entities() -> dict:
     """Main identity resolution pipeline. Returns run stats."""
     targets = await load_collection_targets()
-    profiles_by_username = await load_platform_profiles()
+    profiles_by_username, no_username_profiles = await load_platform_profiles()
     commit_emails = await load_commit_emails()
     photo_hashes = await load_profile_photo_hashes()
 
@@ -411,6 +421,67 @@ async def resolve_entities() -> dict:
 
     entities = [e for e in entities if e.profiles]
 
+    # Phase 4.5: Link username-less profiles (WhatsApp) to entities.
+    # Pre-build (name, candidate, profile) tuples for O(n) lookup per wp.
+    unassigned_wp = [wp for wp in no_username_profiles if (wp.source, wp.platform_id) not in assigned]
+    logger.info("Phase 4.5: %d username-less profiles to process", len(unassigned_wp))
+
+    entity_names: list[tuple[str, EntityCandidate, PlatformProfile]] = []
+    for candidate in entities:
+        for p in candidate.profiles:
+            if p.name:
+                entity_names.append((p.name, candidate, p))
+                break
+
+    matched_count = 0
+    for wp in unassigned_wp:
+        if wp.name:
+            best_match: EntityCandidate | None = None
+            best_profile: PlatformProfile | None = None
+            best_score = 0
+            for ename, candidate, eprofile in entity_names:
+                score = fuzz.token_sort_ratio(wp.name, ename)
+                if score >= NAME_FUZZY_MIN_SCORE and score > best_score:
+                    best_score = score
+                    best_match = candidate
+                    best_profile = eprofile
+
+            if best_match and best_profile:
+                best_match.profiles.append(wp)
+                best_match.signals.append(SignalMatch(
+                    signal_type="real_name_fuzzy",
+                    source_platform=wp.source,
+                    target_platform=best_profile.source,
+                    source_record_id=wp.platform_id,
+                    target_record_id=best_profile.platform_id,
+                    value=f"{wp.name} ~ {best_profile.name} ({best_score}%)",
+                    confidence=15.0,
+                ))
+                if wp.phone:
+                    best_match.signals.append(SignalMatch(
+                        signal_type="whatsapp_phone",
+                        source_platform="whatsapp",
+                        target_platform=best_profile.source,
+                        source_record_id=wp.platform_id,
+                        target_record_id=best_profile.platform_id,
+                        value=wp.phone,
+                        confidence=40.0,
+                    ))
+                assigned.add((wp.source, wp.platform_id))
+                matched_count += 1
+                continue
+
+        if wp.source == "whatsapp":
+            entities.append(EntityCandidate(profiles=[wp]))
+            assigned.add((wp.source, wp.platform_id))
+
+    secondary_count = sum(
+        1 for e in entities
+        if len(e.profiles) == 1 and e.profiles[0].source == "whatsapp" and not e.signals
+    )
+    logger.info("Phase 4.5: %d matched to existing entities, %d new WhatsApp secondary entities",
+                matched_count, secondary_count)
+
     # Phase 5: Persist to analyzer DB
     pool = get_analyzer_pool()
     stats = {"entities_created": 0, "entities_updated": 0, "links": 0, "signals": 0}
@@ -453,20 +524,27 @@ async def resolve_entities() -> dict:
                     entity_id = eid
                     break
 
+            is_secondary = (
+                len(candidate.profiles) == 1
+                and candidate.profiles[0].source == "whatsapp"
+                and not candidate.signals
+            )
+            tier = "secondary" if is_secondary else "primary"
+
             if entity_id:
                 await conn.execute("""
                     UPDATE entities SET
                         canonical_name = $1, confidence_score = $2,
-                        signal_count = $3, updated_at = NOW()
-                    WHERE id = $4
-                """, canonical, confidence, independent_count, entity_id)
+                        signal_count = $3, tier = $4, updated_at = NOW()
+                    WHERE id = $5
+                """, canonical, confidence, independent_count, tier, entity_id)
                 stats["entities_updated"] += 1
             else:
                 entity_id = await conn.fetchval("""
                     INSERT INTO entities (tier, canonical_name, confidence_score, signal_count)
-                    VALUES ('primary', $1, $2, $3)
+                    VALUES ($1, $2, $3, $4)
                     RETURNING id
-                """, canonical, confidence, independent_count)
+                """, tier, canonical, confidence, independent_count)
                 stats["entities_created"] += 1
 
             seen_entity_ids.add(entity_id)
