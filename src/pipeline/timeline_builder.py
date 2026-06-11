@@ -228,5 +228,6 @@ async def _insert_batch(pool, batch: list[tuple]) -> None:
             INSERT INTO timeline_events
                 (entity_id, source, event_type, source_record_id, occurred_at, title)
             VALUES ($1::uuid, $2, $3, $4, $5, $6)
-            ON CONFLICT (source, event_type, source_record_id) DO NOTHING
+            ON CONFLICT (source, event_type, source_record_id)
+            DO UPDATE SET entity_id = EXCLUDED.entity_id
         """, batch)
