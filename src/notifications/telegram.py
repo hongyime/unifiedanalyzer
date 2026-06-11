@@ -1,7 +1,10 @@
 import os
+import json
 import logging
+import asyncio
 import subprocess
-import httpx
+import urllib.request
+import urllib.error
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +48,7 @@ def get_dashboard_url() -> str:
     return f"http://{host}:{_API_PORT}"
 
 
-async def send(text: str, parse_mode: str = "HTML") -> bool:
-    if not _BOT_TOKEN:
-        if not _get_config():
-            return False
-
+def _send_sync(text: str, parse_mode: str = "HTML") -> bool:
     url = f"https://api.telegram.org/bot{_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": _CHAT_ID,
@@ -60,13 +59,25 @@ async def send(text: str, parse_mode: str = "HTML") -> bool:
     if _THREAD_ID:
         payload["message_thread_id"] = _THREAD_ID
 
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+    )
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code != 200:
-                logger.warning("Telegram send failed: %s %s", resp.status_code, resp.text[:200])
-                return False
-            return True
+        resp = urllib.request.urlopen(req, timeout=15)
+        return resp.status == 200
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:200]
+        logger.warning("Telegram send failed: %s %s", e.code, body)
+        return False
     except Exception:
         logger.debug("Telegram send failed (network)", exc_info=True)
         return False
+
+
+async def send(text: str, parse_mode: str = "HTML") -> bool:
+    if not _BOT_TOKEN:
+        if not _get_config():
+            return False
+    return await asyncio.to_thread(_send_sync, text, parse_mode)
