@@ -8,6 +8,8 @@ from src.pipeline.alert_engine import run_alerts
 from src.pipeline.behavioral_profiler import compute_behavioral_profiles
 from src.pipeline.group_graph import build_whatsapp_group_graph
 from src.pipeline.strava_patterns import analyze_strava_patterns
+from src.pipeline.bio_nlp import analyze_bios
+from src.pipeline.graph_analytics import compute_graph_analytics
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
 logger = logging.getLogger(__name__)
@@ -119,6 +121,16 @@ async def run_incremental() -> dict:
         except Exception:
             logger.exception("Strava pattern analysis failed (non-fatal)")
 
+        try:
+            await analyze_bios()
+        except Exception:
+            logger.exception("Bio NLP analysis failed (non-fatal)")
+
+        try:
+            await compute_graph_analytics()
+        except Exception:
+            logger.exception("Graph analytics failed (non-fatal)")
+
         await _finish_run(run_id, stats)
         logger.info("Incremental run complete: %s", stats)
         await notify_run_summary("incremental", stats)
@@ -174,6 +186,16 @@ async def run_full_resolution() -> dict:
             await analyze_strava_patterns()
         except Exception:
             logger.exception("Strava pattern analysis failed (non-fatal)")
+
+        try:
+            await analyze_bios()
+        except Exception:
+            logger.exception("Bio NLP analysis failed (non-fatal)")
+
+        try:
+            await compute_graph_analytics()
+        except Exception:
+            logger.exception("Graph analytics failed (non-fatal)")
 
         await _finish_run(run_id, stats)
         logger.info("Full resolution run complete: %s", stats)

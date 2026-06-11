@@ -118,8 +118,28 @@ export interface BehaviorProfile {
   timezone_confidence: string
   last_computed_at: string | null
   strava_patterns: StravaPatterns | null
+  bio_nlp: BioNlp | null
+  graph_analytics: GraphAnalytics | null
   source_breakdown: { source: string; count: number }[]
   type_breakdown: { event_type: string; count: number }[]
+}
+
+export interface BioNlp {
+  keywords: { word: string; count: number }[]
+  hashtags: { tag: string; count: number }[]
+  categories: Record<string, number>
+  top_emojis: { emoji: string; count: number }[]
+  language_hints: string[]
+  bio_sources: string[]
+  bio_count: number
+}
+
+export interface GraphAnalytics {
+  degree: number
+  strength: number
+  betweenness: number
+  clustering: number
+  component_size: number
 }
 
 export interface CollectorInfo {

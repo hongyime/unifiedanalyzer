@@ -440,6 +440,82 @@ export default function EntityDetailPage() {
                   )}
                 </div>
               )}
+
+              {behavior.bio_nlp && (
+                <div className="card">
+                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>
+                    Bio Analysis ({behavior.bio_nlp.bio_count} bio(s) from {behavior.bio_nlp.bio_sources.join(', ')})
+                  </div>
+                  {Object.keys(behavior.bio_nlp.categories).length > 0 && (
+                    <div style={{ marginBottom: '0.75rem' }}>
+                      <div className="text-sm text-muted mb-1">Categories</div>
+                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+                        {Object.entries(behavior.bio_nlp.categories)
+                          .sort((a, b) => b[1] - a[1])
+                          .map(([cat, score]) => (
+                            <span key={cat} className="badge badge-green">{cat} ({score})</span>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                  {behavior.bio_nlp.keywords.length > 0 && (
+                    <div style={{ marginBottom: '0.75rem' }}>
+                      <div className="text-sm text-muted mb-1">Keywords</div>
+                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+                        {behavior.bio_nlp.keywords.slice(0, 15).map(k => (
+                          <span key={k.word} className="badge badge-gray">{k.word} ({k.count})</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {behavior.bio_nlp.hashtags.length > 0 && (
+                    <div style={{ marginBottom: '0.75rem' }}>
+                      <div className="text-sm text-muted mb-1">Hashtags</div>
+                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+                        {behavior.bio_nlp.hashtags.map(h => (
+                          <span key={h.tag} className="badge badge-blue">#{h.tag} ({h.count})</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {behavior.bio_nlp.top_emojis.length > 0 && (
+                    <div>
+                      <div className="text-sm text-muted mb-1">Top Emojis</div>
+                      <div className="flex gap-1">
+                        {behavior.bio_nlp.top_emojis.map((e, i) => (
+                          <span key={i} style={{ fontSize: '1.5rem' }} title={`${e.count}x`}>{e.emoji}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {behavior.graph_analytics && (
+                <div className="card">
+                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Graph Position</div>
+                  <div className="flex-between mb-1">
+                    <span className="text-sm text-muted">Connections (degree)</span>
+                    <span style={{ fontWeight: 600 }}>{behavior.graph_analytics.degree}</span>
+                  </div>
+                  <div className="flex-between mb-1">
+                    <span className="text-sm text-muted">Connection strength</span>
+                    <span style={{ fontWeight: 600 }}>{behavior.graph_analytics.strength}</span>
+                  </div>
+                  <div className="flex-between mb-1">
+                    <span className="text-sm text-muted">Betweenness centrality</span>
+                    <span style={{ fontWeight: 600 }}>{behavior.graph_analytics.betweenness.toFixed(4)}</span>
+                  </div>
+                  <div className="flex-between mb-1">
+                    <span className="text-sm text-muted">Clustering coefficient</span>
+                    <span style={{ fontWeight: 600 }}>{behavior.graph_analytics.clustering.toFixed(4)}</span>
+                  </div>
+                  <div className="flex-between">
+                    <span className="text-sm text-muted">Community size</span>
+                    <span style={{ fontWeight: 600 }}>{behavior.graph_analytics.component_size}</span>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </>

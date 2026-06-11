@@ -42,6 +42,8 @@ async def get_behavior(entity_id: str):
         "timezone_confidence": bp["timezone_confidence"],
         "last_computed_at": bp["last_computed_at"].isoformat() if bp["last_computed_at"] else None,
         "strava_patterns": meta.get("strava_patterns"),
+        "bio_nlp": meta.get("bio_nlp"),
+        "graph_analytics": meta.get("graph_analytics"),
         "source_breakdown": [
             {"source": r["source"], "count": r["count"]} for r in source_breakdown
         ],
