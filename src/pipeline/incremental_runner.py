@@ -8,6 +8,7 @@ from src.pipeline.alert_engine import run_alerts
 from src.pipeline.behavioral_profiler import compute_behavioral_profiles
 from src.pipeline.group_graph import build_whatsapp_group_graph
 from src.pipeline.strava_patterns import analyze_strava_patterns
+from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,18 @@ async def _create_run(run_type: str) -> str:
         return await conn.fetchval("""
             INSERT INTO analysis_runs (run_type, status) VALUES ($1, 'running') RETURNING id::text
         """, run_type)
+
+
+async def _get_recent_alerts(since_minutes: int = 5) -> list[dict]:
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT alert_type, severity, title
+            FROM alerts
+            WHERE detected_at > NOW() - INTERVAL '%s minutes'
+            ORDER BY detected_at DESC
+        """ % since_minutes)
+    return [dict(r) for r in rows]
 
 
 async def _finish_run(run_id: str, stats: dict, error: str | None = None) -> None:
@@ -108,10 +121,16 @@ async def run_incremental() -> dict:
 
         await _finish_run(run_id, stats)
         logger.info("Incremental run complete: %s", stats)
+        await notify_run_summary("incremental", stats)
+
+        if stats["alerts"] > 0:
+            new_alerts = await _get_recent_alerts()
+            await notify_new_alerts(new_alerts)
 
     except Exception as e:
         logger.exception("Incremental run failed")
         await _finish_run(run_id, stats, error=str(e))
+        await notify_error("incremental", str(e))
         raise
 
     return stats
@@ -158,10 +177,16 @@ async def run_full_resolution() -> dict:
 
         await _finish_run(run_id, stats)
         logger.info("Full resolution run complete: %s", stats)
+        await notify_run_summary("full resolution", stats)
+
+        if stats["alerts"] > 0:
+            new_alerts = await _get_recent_alerts()
+            await notify_new_alerts(new_alerts)
 
     except Exception as e:
         logger.exception("Full resolution run failed")
         await _finish_run(run_id, stats, error=str(e))
+        await notify_error("full resolution", str(e))
         raise
 
     return stats

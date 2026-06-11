@@ -9,6 +9,7 @@ from pathlib import Path
 
 from src.db.connection import init_pools, close_pools
 from src.scheduler.scheduler import start_scheduler, stop_scheduler
+from src.notifications.alerts import notify_startup, notify_shutdown
 from src.api.routes.entities import router as entities_router
 from src.api.routes.timeline import router as timeline_router
 from src.api.routes.alerts import router as alerts_router
@@ -60,10 +61,12 @@ async def startup():
     await init_pools()
     _scheduler_task = asyncio.create_task(start_scheduler())
     logging.getLogger(__name__).info("UnifiedAnalyzer started")
+    asyncio.create_task(notify_startup())
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    await notify_shutdown()
     stop_scheduler()
     if _scheduler_task:
         _scheduler_task.cancel()
