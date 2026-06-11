@@ -108,11 +108,45 @@ export interface HealthInfo {
   alert_count_unread: number
 }
 
+export interface BehaviorProfile {
+  entity_id: string
+  posting_hour_dist: Record<string, number>
+  posting_dow_dist: Record<string, number>
+  avg_post_interval_days: number
+  total_events: number
+  inferred_timezone: string | null
+  timezone_confidence: string
+  last_computed_at: string | null
+  source_breakdown: { source: string; count: number }[]
+  type_breakdown: { event_type: string; count: number }[]
+}
+
+export interface CollectorInfo {
+  source: string
+  last_started: string | null
+  last_completed: string | null
+  items_24h: number
+  failed_24h: number
+  runs_24h: number
+  latest_status: string | null
+  targets: { status: string; count: number; last_collection: string | null }[]
+}
+
 export interface Paginated<T> {
   data: T[]
   total: number
   page: number
   per_page: number
+}
+
+async function patch<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json()
 }
 
 export const api = {
@@ -138,4 +172,19 @@ export const api = {
   triggerRun: () => post<{ ok: boolean; stats: Record<string, number> }>('/runs/trigger'),
 
   getHealth: () => get<HealthInfo>('/health'),
+
+  getBehavior: (entityId: string) => get<BehaviorProfile>(`/entities/${entityId}/behavior`),
+
+  getCollectorHealth: () => get<{ collectors: CollectorInfo[] }>('/collector/health'),
+
+  mergeEntities: (ids: string[], reason = '') =>
+    post<{ ok: boolean; target_entity_id: string }>('/entities/merge', { source_entity_ids: ids, reason }),
+
+  splitEntity: (entityId: string, linkIds: string[], reason = '') =>
+    post<{ ok: boolean; new_entity_id: string }>(`/entities/${entityId}/split`, { link_ids: linkIds, reason }),
+
+  updateEntitySettings: (entityId: string, settings: { silence_threshold_days?: number | null; notes?: string }) =>
+    patch<{ ok: boolean }>(`/entities/${entityId}/settings`, settings),
+
+  exportEntity: (entityId: string) => `${BASE}/entities/${entityId}/export`,
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
-import { api, EntityDetail, TimelineEvent } from '../api'
+import { useParams, Link, useNavigate } from 'react-router-dom'
+import { api, EntityDetail, TimelineEvent, BehaviorProfile } from '../api'
 
 function PlatformBadge({ source }: { source: string }) {
   return <span className={`platform-icon p-${source}`}>{source}</span>
@@ -18,19 +18,88 @@ function formatDate(iso: string) {
   return new Date(iso).toLocaleString()
 }
 
+const DOW_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+function HeatmapGrid({ hourDist, dowDist }: { hourDist: Record<string, number>; dowDist: Record<string, number> }) {
+  const maxH = Math.max(1, ...Object.values(hourDist))
+  const maxD = Math.max(1, ...Object.values(dowDist))
+
+  return (
+    <div>
+      <div style={{ marginBottom: '1.5rem' }}>
+        <div className="text-sm text-muted mb-1">Activity by Hour (UTC)</div>
+        <div style={{ display: 'flex', gap: '2px', alignItems: 'flex-end', height: '80px' }}>
+          {Array.from({ length: 24 }, (_, h) => {
+            const val = hourDist[String(h)] || 0
+            const pct = val / maxH
+            return (
+              <div key={h} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <div
+                  style={{
+                    width: '100%',
+                    height: `${Math.max(2, pct * 70)}px`,
+                    background: `rgba(99, 102, 241, ${0.2 + pct * 0.8})`,
+                    borderRadius: '2px',
+                  }}
+                  title={`${h}:00 — ${val} events`}
+                />
+                {h % 3 === 0 && <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', marginTop: '2px' }}>{h}</span>}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+      <div>
+        <div className="text-sm text-muted mb-1">Activity by Day</div>
+        <div style={{ display: 'flex', gap: '4px', alignItems: 'flex-end', height: '60px' }}>
+          {Array.from({ length: 7 }, (_, d) => {
+            const val = dowDist[String(d)] || 0
+            const pct = val / maxD
+            return (
+              <div key={d} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <div
+                  style={{
+                    width: '100%',
+                    height: `${Math.max(2, pct * 50)}px`,
+                    background: `rgba(99, 102, 241, ${0.2 + pct * 0.8})`,
+                    borderRadius: '2px',
+                  }}
+                  title={`${DOW_LABELS[d]} — ${val} events`}
+                />
+                <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '2px' }}>{DOW_LABELS[d]}</span>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function EntityDetailPage() {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
   const [entity, setEntity] = useState<EntityDetail | null>(null)
   const [events, setEvents] = useState<TimelineEvent[]>([])
   const [eventsTotal, setEventsTotal] = useState(0)
   const [eventsPage, setEventsPage] = useState(1)
-  const [tab, setTab] = useState<'identity' | 'timeline'>('identity')
+  const [tab, setTab] = useState<'identity' | 'timeline' | 'behavior' | 'settings'>('identity')
   const [loading, setLoading] = useState(true)
+  const [behavior, setBehavior] = useState<BehaviorProfile | null>(null)
+  const [selectedLinks, setSelectedLinks] = useState<Set<string>>(new Set())
+  const [silenceThreshold, setSilenceThreshold] = useState('')
+  const [notes, setNotes] = useState('')
+  const [mergeTarget, setMergeTarget] = useState('')
+  const [actionMsg, setActionMsg] = useState('')
 
   useEffect(() => {
     if (!id) return
     setLoading(true)
-    api.getEntity(id).then(setEntity).finally(() => setLoading(false))
+    api.getEntity(id).then(e => {
+      setEntity(e)
+      setSilenceThreshold('')
+      setNotes('')
+    }).finally(() => setLoading(false))
   }, [id])
 
   useEffect(() => {
@@ -40,6 +109,48 @@ export default function EntityDetailPage() {
       setEventsTotal(r.total)
     })
   }, [id, tab, eventsPage])
+
+  useEffect(() => {
+    if (!id || tab !== 'behavior') return
+    api.getBehavior(id).then(setBehavior).catch(() => setBehavior(null))
+  }, [id, tab])
+
+  const handleSplit = async () => {
+    if (!id || selectedLinks.size === 0) return
+    try {
+      const result = await api.splitEntity(id, Array.from(selectedLinks), 'Manual split from UI')
+      setActionMsg(`Split done — new entity created`)
+      setSelectedLinks(new Set())
+      navigate(`/entities/${result.new_entity_id}`)
+    } catch (e: any) {
+      setActionMsg(`Split failed: ${e.message}`)
+    }
+  }
+
+  const handleMerge = async () => {
+    if (!id || !mergeTarget.trim()) return
+    try {
+      const result = await api.mergeEntities([id, mergeTarget.trim()], 'Manual merge from UI')
+      setActionMsg(`Merged into entity`)
+      navigate(`/entities/${result.target_entity_id}`)
+    } catch (e: any) {
+      setActionMsg(`Merge failed: ${e.message}`)
+    }
+  }
+
+  const handleSaveSettings = async () => {
+    if (!id) return
+    try {
+      const threshold = silenceThreshold ? parseFloat(silenceThreshold) : null
+      await api.updateEntitySettings(id, {
+        silence_threshold_days: threshold,
+        notes: notes || undefined,
+      })
+      setActionMsg('Settings saved')
+    } catch (e: any) {
+      setActionMsg(`Save failed: ${e.message}`)
+    }
+  }
 
   if (loading) return <div className="empty-state">Loading...</div>
   if (!entity) return <div className="empty-state">Entity not found</div>
@@ -62,13 +173,28 @@ export default function EntityDetailPage() {
               <span style={{ fontWeight: 600 }}>{Math.round(entity.confidence_score * 100)}%</span>
             </div>
             <div className="text-sm text-muted">{entity.signal_count} signals</div>
+            <a
+              href={api.exportEntity(entity.id)}
+              className="text-sm"
+              style={{ marginTop: '0.25rem', display: 'inline-block' }}
+            >
+              Export JSON
+            </a>
           </div>
         </div>
       </div>
 
+      {actionMsg && (
+        <div className="card" style={{ background: 'var(--bg-hover)', padding: '0.75rem' }}>
+          <div className="text-sm">{actionMsg}</div>
+        </div>
+      )}
+
       <div className="flex gap-1 mb-2">
         <button className={tab === 'identity' ? 'primary' : ''} onClick={() => setTab('identity')}>Identity</button>
         <button className={tab === 'timeline' ? 'primary' : ''} onClick={() => setTab('timeline')}>Timeline</button>
+        <button className={tab === 'behavior' ? 'primary' : ''} onClick={() => setTab('behavior')}>Behavior</button>
+        <button className={tab === 'settings' ? 'primary' : ''} onClick={() => setTab('settings')}>Settings</button>
       </div>
 
       {tab === 'identity' && (
@@ -77,6 +203,7 @@ export default function EntityDetailPage() {
           <table>
             <thead>
               <tr>
+                <th style={{ width: '30px' }}></th>
                 <th>Platform</th>
                 <th>Username</th>
                 <th>Name</th>
@@ -87,6 +214,17 @@ export default function EntityDetailPage() {
             <tbody>
               {entity.platform_links.map(l => (
                 <tr key={l.id}>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={selectedLinks.has(l.id)}
+                      onChange={e => {
+                        const next = new Set(selectedLinks)
+                        e.target.checked ? next.add(l.id) : next.delete(l.id)
+                        setSelectedLinks(next)
+                      }}
+                    />
+                  </td>
                   <td><PlatformBadge source={l.source} /></td>
                   <td>{l.platform_username || l.platform_id}</td>
                   <td>{l.platform_name || '-'}</td>
@@ -100,6 +238,25 @@ export default function EntityDetailPage() {
               ))}
             </tbody>
           </table>
+
+          {selectedLinks.size > 0 && (
+            <div className="flex gap-1" style={{ marginTop: '0.75rem' }}>
+              <button onClick={handleSplit} style={{ borderColor: 'var(--orange)', color: 'var(--orange)' }}>
+                Split {selectedLinks.size} selected into new entity
+              </button>
+            </div>
+          )}
+
+          <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <input
+              type="text"
+              placeholder="Paste entity ID to merge with..."
+              value={mergeTarget}
+              onChange={e => setMergeTarget(e.target.value)}
+              style={{ maxWidth: '340px' }}
+            />
+            <button onClick={handleMerge} disabled={!mergeTarget.trim()}>Merge</button>
+          </div>
 
           <h3 style={{ fontSize: '1.1rem', margin: '1.5rem 0 0.75rem' }}>Identity Signals</h3>
           {entity.identity_signals.length === 0 ? (
@@ -161,6 +318,101 @@ export default function EntityDetailPage() {
             </>
           )}
         </>
+      )}
+
+      {tab === 'behavior' && (
+        <>
+          {!behavior ? (
+            <div className="empty-state">No behavioral data yet — run an analysis first</div>
+          ) : (
+            <>
+              <div className="card">
+                <div className="flex-between mb-1">
+                  <span className="text-sm text-muted">Total events analyzed</span>
+                  <span style={{ fontWeight: 600 }}>{behavior.total_events.toLocaleString()}</span>
+                </div>
+                <div className="flex-between mb-1">
+                  <span className="text-sm text-muted">Avg posting interval</span>
+                  <span style={{ fontWeight: 600 }}>
+                    {behavior.avg_post_interval_days < 1
+                      ? `${Math.round(behavior.avg_post_interval_days * 24)}h`
+                      : `${behavior.avg_post_interval_days.toFixed(1)} days`}
+                  </span>
+                </div>
+                {behavior.last_computed_at && (
+                  <div className="flex-between">
+                    <span className="text-sm text-muted">Last computed</span>
+                    <span className="text-sm">{formatDate(behavior.last_computed_at)}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="card">
+                <HeatmapGrid hourDist={behavior.posting_hour_dist} dowDist={behavior.posting_dow_dist} />
+              </div>
+
+              <div className="card">
+                <div className="text-sm text-muted mb-1">Activity by Platform</div>
+                {behavior.source_breakdown.map(s => {
+                  const pct = s.count / behavior.total_events
+                  return (
+                    <div key={s.source} className="flex gap-1" style={{ alignItems: 'center', marginBottom: '0.5rem' }}>
+                      <PlatformBadge source={s.source} />
+                      <div style={{ flex: 1 }}>
+                        <div style={{
+                          height: '6px', borderRadius: '3px', background: 'var(--border)',
+                        }}>
+                          <div style={{
+                            height: '100%', borderRadius: '3px', width: `${pct * 100}%`,
+                            background: 'var(--accent)',
+                          }} />
+                        </div>
+                      </div>
+                      <span className="text-sm" style={{ minWidth: '60px', textAlign: 'right' }}>
+                        {s.count.toLocaleString()}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {tab === 'settings' && (
+        <div className="card">
+          <h3 style={{ fontSize: '1.1rem', marginBottom: '1rem' }}>Alert Tuning</h3>
+          <div style={{ marginBottom: '1rem' }}>
+            <label className="text-sm text-muted" style={{ display: 'block', marginBottom: '0.25rem' }}>
+              Custom silence threshold (days) — leave empty for automatic
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. 14"
+              value={silenceThreshold}
+              onChange={e => setSilenceThreshold(e.target.value)}
+              style={{ maxWidth: '200px' }}
+            />
+          </div>
+          <div style={{ marginBottom: '1rem' }}>
+            <label className="text-sm text-muted" style={{ display: 'block', marginBottom: '0.25rem' }}>
+              Notes
+            </label>
+            <textarea
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              rows={3}
+              style={{
+                width: '100%', maxWidth: '500px', padding: '0.5rem 0.75rem',
+                borderRadius: '6px', border: '1px solid var(--border)',
+                background: 'var(--bg)', color: 'var(--text)', fontSize: '0.875rem',
+                resize: 'vertical',
+              }}
+            />
+          </div>
+          <button className="primary" onClick={handleSaveSettings}>Save Settings</button>
+        </div>
       )}
     </div>
   )
