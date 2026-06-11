@@ -21,12 +21,22 @@ async def build_whatsapp_group_graph() -> dict:
             WHERE c.is_group = true AND m.sender_id IS NOT NULL
         """)
 
+        lid_map = {}
+        lid_rows = await conn.fetch(
+            "SELECT lid, phone_jid FROM whatsapp_lid_map"
+        )
+        for lr in lid_rows:
+            lid_map[lr["lid"]] = lr["phone_jid"]
+
     groups: dict[str, set[str]] = defaultdict(set)
     group_names: dict[str, str] = {}
 
     for r in rows:
         chat_id = str(r["chat_id"])
-        groups[chat_id].add(r["platform_user_id"])
+        puid = r["platform_user_id"]
+        if "@lid" in (puid or ""):
+            puid = lid_map.get(puid, puid)
+        groups[chat_id].add(puid)
         group_names[chat_id] = r["chat_name"] or chat_id
 
     entity_lookup: dict[str, str] = {}

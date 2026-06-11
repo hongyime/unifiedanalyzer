@@ -49,6 +49,8 @@ def normalize_username(username: str | None) -> str | None:
         return None
     if DEFAULT_USERNAME_RE.match(username):
         return None
+    if " " in username.strip():
+        return None
     u = username.lower().strip()
     for ch in USERNAME_STRIP_CHARS:
         u = u.replace(ch, "")

@@ -13,7 +13,8 @@ async def analyze_strava_patterns() -> dict:
 
     async with collector.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT a.athlete_id, ath.username, a.name, a.type, a.sport_type,
+            SELECT a.athlete_id, ath.username, ath.platform_athlete_id::text AS platform_id,
+                   a.name, a.type, a.sport_type,
                    a.distance, a.moving_time, a.elapsed_time, a.start_date,
                    a.total_elevation_gain, a.average_speed, a.average_heartrate
             FROM strava_activities a
@@ -23,28 +24,36 @@ async def analyze_strava_patterns() -> dict:
         """)
 
     athletes: dict[str, list] = defaultdict(list)
+    athlete_platform_ids: dict[str, str] = {}
     athlete_usernames: dict[str, str] = {}
     for r in rows:
         aid = str(r["athlete_id"]) if r["athlete_id"] else "unknown"
         athletes[aid].append(r)
+        if r["platform_id"]:
+            athlete_platform_ids[aid] = r["platform_id"]
         if r["username"]:
             athlete_usernames[aid] = r["username"]
 
-    entity_lookup: dict[str, str] = {}
+    entity_by_id: dict[str, str] = {}
+    entity_by_username: dict[str, str] = {}
     async with analyzer.acquire() as conn:
         links = await conn.fetch(
-            "SELECT entity_id::text, platform_username FROM entity_platform_links WHERE source = 'strava'"
+            "SELECT entity_id::text, platform_id, platform_username FROM entity_platform_links WHERE source = 'strava'"
         )
         for l in links:
+            entity_by_id[l["platform_id"]] = l["entity_id"]
             if l["platform_username"]:
-                entity_lookup[l["platform_username"]] = l["entity_id"]
+                entity_by_username[l["platform_username"]] = l["entity_id"]
 
     stats = {"athletes_analyzed": 0, "patterns_found": 0}
 
     async with analyzer.acquire() as conn:
         for aid, activities in athletes.items():
-            username = athlete_usernames.get(aid)
-            entity_id = entity_lookup.get(username) if username else None
+            platform_id = athlete_platform_ids.get(aid)
+            entity_id = entity_by_id.get(platform_id) if platform_id else None
+            if not entity_id:
+                username = athlete_usernames.get(aid)
+                entity_id = entity_by_username.get(username) if username else None
 
             if len(activities) < 3:
                 continue
