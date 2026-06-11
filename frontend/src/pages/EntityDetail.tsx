@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { api, EntityDetail, TimelineEvent, BehaviorProfile } from '../api'
+import { api, EntityDetail, TimelineEvent, BehaviorProfile, Relationship } from '../api'
 
 function PlatformBadge({ source }: { source: string }) {
   return <span className={`platform-icon p-${source}`}>{source}</span>
@@ -83,13 +83,14 @@ export default function EntityDetailPage() {
   const [events, setEvents] = useState<TimelineEvent[]>([])
   const [eventsTotal, setEventsTotal] = useState(0)
   const [eventsPage, setEventsPage] = useState(1)
-  const [tab, setTab] = useState<'identity' | 'timeline' | 'behavior' | 'settings'>('identity')
+  const [tab, setTab] = useState<'identity' | 'timeline' | 'behavior' | 'relationships' | 'settings'>('identity')
   const [loading, setLoading] = useState(true)
   const [behavior, setBehavior] = useState<BehaviorProfile | null>(null)
   const [selectedLinks, setSelectedLinks] = useState<Set<string>>(new Set())
   const [silenceThreshold, setSilenceThreshold] = useState('')
   const [notes, setNotes] = useState('')
   const [mergeTarget, setMergeTarget] = useState('')
+  const [relationships, setRelationships] = useState<Relationship[]>([])
   const [actionMsg, setActionMsg] = useState('')
 
   useEffect(() => {
@@ -113,6 +114,11 @@ export default function EntityDetailPage() {
   useEffect(() => {
     if (!id || tab !== 'behavior') return
     api.getBehavior(id).then(setBehavior).catch(() => setBehavior(null))
+  }, [id, tab])
+
+  useEffect(() => {
+    if (!id || tab !== 'relationships') return
+    api.getRelationships(id).then(r => setRelationships(r.data)).catch(() => setRelationships([]))
   }, [id, tab])
 
   const handleSplit = async () => {
@@ -194,6 +200,7 @@ export default function EntityDetailPage() {
         <button className={tab === 'identity' ? 'primary' : ''} onClick={() => setTab('identity')}>Identity</button>
         <button className={tab === 'timeline' ? 'primary' : ''} onClick={() => setTab('timeline')}>Timeline</button>
         <button className={tab === 'behavior' ? 'primary' : ''} onClick={() => setTab('behavior')}>Behavior</button>
+        <button className={tab === 'relationships' ? 'primary' : ''} onClick={() => setTab('relationships')}>Relationships</button>
         <button className={tab === 'settings' ? 'primary' : ''} onClick={() => setTab('settings')}>Settings</button>
       </div>
 
@@ -375,7 +382,102 @@ export default function EntityDetailPage() {
                   )
                 })}
               </div>
+
+              {behavior.strava_patterns && (
+                <div className="card">
+                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Strava Patterns</div>
+                  <div className="flex-between mb-1">
+                    <span className="text-sm text-muted">Total activities</span>
+                    <span style={{ fontWeight: 600 }}>{behavior.strava_patterns.total_activities}</span>
+                  </div>
+                  {behavior.strava_patterns.avg_distance_km != null && (
+                    <div className="flex-between mb-1">
+                      <span className="text-sm text-muted">Avg distance</span>
+                      <span style={{ fontWeight: 600 }}>{behavior.strava_patterns.avg_distance_km} km</span>
+                    </div>
+                  )}
+                  {behavior.strava_patterns.avg_duration_min != null && (
+                    <div className="flex-between mb-1">
+                      <span className="text-sm text-muted">Avg duration</span>
+                      <span style={{ fontWeight: 600 }}>{behavior.strava_patterns.avg_duration_min} min</span>
+                    </div>
+                  )}
+                  {behavior.strava_patterns.preferred_hour != null && (
+                    <div className="flex-between mb-1">
+                      <span className="text-sm text-muted">Preferred hour</span>
+                      <span style={{ fontWeight: 600 }}>{behavior.strava_patterns.preferred_hour}:00</span>
+                    </div>
+                  )}
+                  {behavior.strava_patterns.preferred_day != null && (
+                    <div className="flex-between mb-1">
+                      <span className="text-sm text-muted">Preferred day</span>
+                      <span style={{ fontWeight: 600 }}>{DOW_LABELS[behavior.strava_patterns.preferred_day]}</span>
+                    </div>
+                  )}
+                  {Object.keys(behavior.strava_patterns.activity_types).length > 0 && (
+                    <div style={{ marginTop: '0.75rem' }}>
+                      <div className="text-sm text-muted mb-1">Activity types</div>
+                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+                        {Object.entries(behavior.strava_patterns.activity_types)
+                          .sort((a, b) => b[1] - a[1])
+                          .map(([type, count]) => (
+                            <span key={type} className="badge badge-blue">{type}: {count}</span>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                  {behavior.strava_patterns.route_count > 0 && (
+                    <div style={{ marginTop: '0.75rem' }}>
+                      <div className="text-sm text-muted mb-1">Repeated routes ({behavior.strava_patterns.route_count})</div>
+                      {Object.entries(behavior.strava_patterns.repeated_routes)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([name, count]) => (
+                          <div key={name} className="text-sm" style={{ marginBottom: '0.25rem' }}>
+                            {name} <span className="text-muted">({count}x)</span>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </>
+          )}
+        </>
+      )}
+
+      {tab === 'relationships' && (
+        <>
+          {relationships.length === 0 ? (
+            <div className="empty-state">No relationships found</div>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Connected Entity</th>
+                  <th>Type</th>
+                  <th>Weight</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                {relationships.map(r => (
+                  <tr key={r.id}>
+                    <td>
+                      <Link to={`/entities/${r.other_entity_id}`}>
+                        {r.other_name || r.other_entity_id.slice(0, 8)}
+                      </Link>
+                    </td>
+                    <td><span className="badge badge-blue">{r.relationship_type}</span></td>
+                    <td style={{ fontWeight: 600 }}>{r.weight}</td>
+                    <td className="text-sm text-muted">
+                      {r.sources && typeof r.sources === 'object' && 'groups' in r.sources
+                        ? (r.sources as { groups: string[] }).groups.join(', ')
+                        : ''}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </>
       )}

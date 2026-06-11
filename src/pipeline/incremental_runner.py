@@ -6,6 +6,8 @@ from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.timeline_builder import build_timeline
 from src.pipeline.alert_engine import run_alerts
 from src.pipeline.behavioral_profiler import compute_behavioral_profiles
+from src.pipeline.group_graph import build_whatsapp_group_graph
+from src.pipeline.strava_patterns import analyze_strava_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,16 @@ async def run_incremental() -> dict:
 
         await compute_behavioral_profiles()
 
+        try:
+            await build_whatsapp_group_graph()
+        except Exception:
+            logger.exception("WhatsApp group graph failed (non-fatal)")
+
+        try:
+            await analyze_strava_patterns()
+        except Exception:
+            logger.exception("Strava pattern analysis failed (non-fatal)")
+
         await _finish_run(run_id, stats)
         logger.info("Incremental run complete: %s", stats)
 
@@ -133,6 +145,16 @@ async def run_full_resolution() -> dict:
         stats["alerts"] = sum(alert_stats.values())
 
         await compute_behavioral_profiles()
+
+        try:
+            await build_whatsapp_group_graph()
+        except Exception:
+            logger.exception("WhatsApp group graph failed (non-fatal)")
+
+        try:
+            await analyze_strava_patterns()
+        except Exception:
+            logger.exception("Strava pattern analysis failed (non-fatal)")
 
         await _finish_run(run_id, stats)
         logger.info("Full resolution run complete: %s", stats)

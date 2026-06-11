@@ -30,6 +30,8 @@ async def get_behavior(entity_id: str):
             GROUP BY event_type ORDER BY count DESC
         """, entity_id)
 
+    meta = bp["metadata"] if isinstance(bp["metadata"], dict) else {}
+
     return {
         "entity_id": entity_id,
         "posting_hour_dist": bp["posting_hour_dist"],
@@ -39,6 +41,7 @@ async def get_behavior(entity_id: str):
         "inferred_timezone": bp["inferred_timezone"],
         "timezone_confidence": bp["timezone_confidence"],
         "last_computed_at": bp["last_computed_at"].isoformat() if bp["last_computed_at"] else None,
+        "strava_patterns": meta.get("strava_patterns"),
         "source_breakdown": [
             {"source": r["source"], "count": r["count"]} for r in source_breakdown
         ],

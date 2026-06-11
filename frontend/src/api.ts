@@ -117,6 +117,7 @@ export interface BehaviorProfile {
   inferred_timezone: string | null
   timezone_confidence: string
   last_computed_at: string | null
+  strava_patterns: StravaPatterns | null
   source_breakdown: { source: string; count: number }[]
   type_breakdown: { event_type: string; count: number }[]
 }
@@ -130,6 +131,26 @@ export interface CollectorInfo {
   runs_24h: number
   latest_status: string | null
   targets: { status: string; count: number; last_collection: string | null }[]
+}
+
+export interface Relationship {
+  id: string
+  other_entity_id: string
+  other_name: string | null
+  relationship_type: string
+  weight: number
+  sources: Record<string, unknown>
+}
+
+export interface StravaPatterns {
+  total_activities: number
+  activity_types: Record<string, number>
+  preferred_hour: number | null
+  preferred_day: number | null
+  avg_distance_km: number | null
+  avg_duration_min: number | null
+  repeated_routes: Record<string, number>
+  route_count: number
 }
 
 export interface Paginated<T> {
@@ -192,4 +213,19 @@ export const api = {
     patch<{ ok: boolean }>(`/entities/${entityId}/settings`, settings),
 
   exportEntity: (entityId: string) => `${BASE}/entities/${entityId}/export`,
+
+  getRelationships: (entityId: string) =>
+    get<{ data: Relationship[] }>(`/entities/${entityId}/relationships`),
+
+  getGraphOverview: () => get<{
+    total_relationships: number
+    entities_in_graph: number
+    whatsapp_co_members: number
+    top_connections: {
+      entity_a: { id: string; name: string | null }
+      entity_b: { id: string; name: string | null }
+      weight: number
+      type: string
+    }[]
+  }>('/graph/overview'),
 }
