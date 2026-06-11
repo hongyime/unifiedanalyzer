@@ -6,12 +6,25 @@ from src.db.connection import get_analyzer_pool
 router = APIRouter(tags=["entities"])
 
 
+SORT_COLUMNS = {
+    "name": "e.canonical_name",
+    "confidence": "e.confidence_score",
+    "signals": "e.signal_count",
+    "platforms": "platform_count",
+    "created": "e.created_at",
+}
+
+
 @router.get("/entities")
 async def list_entities(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     search: str | None = None,
     tier: str | None = None,
+    platform: str | None = None,
+    min_platforms: int | None = None,
+    sort: str = "confidence",
+    order: str = "desc",
 ):
     pool = get_analyzer_pool()
     offset = (page - 1) * per_page
@@ -21,7 +34,14 @@ async def list_entities(
     idx = 1
 
     if search:
-        conditions.append(f"e.canonical_name ILIKE ${idx}")
+        conditions.append(f"""(
+            e.canonical_name ILIKE ${idx}
+            OR EXISTS (
+                SELECT 1 FROM entity_platform_links epl
+                WHERE epl.entity_id = e.id
+                AND (epl.platform_username ILIKE ${idx} OR epl.platform_name ILIKE ${idx})
+            )
+        )""")
         params.append(f"%{search}%")
         idx += 1
 
@@ -30,9 +50,27 @@ async def list_entities(
         params.append(tier)
         idx += 1
 
+    if platform:
+        conditions.append(f"""EXISTS (
+            SELECT 1 FROM entity_platform_links epl
+            WHERE epl.entity_id = e.id AND epl.source = ${idx}
+        )""")
+        params.append(platform)
+        idx += 1
+
+    if min_platforms and min_platforms > 1:
+        conditions.append(f"""(
+            SELECT COUNT(*) FROM entity_platform_links epl WHERE epl.entity_id = e.id
+        ) >= ${idx}""")
+        params.append(min_platforms)
+        idx += 1
+
     where = ""
     if conditions:
         where = "WHERE " + " AND ".join(conditions)
+
+    sort_col = SORT_COLUMNS.get(sort, "e.confidence_score")
+    sort_dir = "ASC" if order.lower() == "asc" else "DESC"
 
     async with pool.acquire() as conn:
         total = await conn.fetchval(
@@ -47,7 +85,7 @@ async def list_entities(
                    (SELECT array_agg(DISTINCT epl.source) FROM entity_platform_links epl WHERE epl.entity_id = e.id) AS platforms
             FROM entities e
             {where}
-            ORDER BY e.confidence_score DESC, e.canonical_name
+            ORDER BY {sort_col} {sort_dir} NULLS LAST, e.canonical_name
             LIMIT ${idx} OFFSET ${idx + 1}
         """, *params)
 

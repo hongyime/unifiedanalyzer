@@ -14,20 +14,45 @@ function ConfidenceBar({ score }: { score: number }) {
   )
 }
 
+const PLATFORMS = ['github', 'instagram', 'telegram', 'strava', 'youtube', 'tiktok', 'lemon8', 'whatsapp', 'website']
+const SORT_OPTIONS = [
+  { value: 'confidence', label: 'Confidence' },
+  { value: 'name', label: 'Name' },
+  { value: 'signals', label: 'Signals' },
+  { value: 'platforms', label: 'Platforms' },
+  { value: 'created', label: 'Created' },
+]
+
 export default function EntitiesPage() {
   const [entities, setEntities] = useState<Entity[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
+  const [sort, setSort] = useState('confidence')
+  const [order, setOrder] = useState('desc')
+  const [platform, setPlatform] = useState('')
+  const [minPlatforms, setMinPlatforms] = useState(0)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     setLoading(true)
-    api.getEntities(page, search)
+    api.getEntities(page, search, sort, order, platform, minPlatforms)
       .then(r => { setEntities(r.data); setTotal(r.total) })
       .catch(() => {})
       .finally(() => setLoading(false))
-  }, [page, search])
+  }, [page, search, sort, order, platform, minPlatforms])
+
+  const toggleSort = (col: string) => {
+    if (sort === col) {
+      setOrder(o => o === 'desc' ? 'asc' : 'desc')
+    } else {
+      setSort(col)
+      setOrder('desc')
+    }
+    setPage(1)
+  }
+
+  const sortArrow = (col: string) => sort === col ? (order === 'desc' ? ' v' : ' ^') : ''
 
   return (
     <div>
@@ -35,27 +60,67 @@ export default function EntitiesPage() {
         <h2>Entities</h2>
         <input
           type="search"
-          placeholder="Search by name..."
+          placeholder="Search name or username..."
           value={search}
           onChange={e => { setSearch(e.target.value); setPage(1) }}
         />
+      </div>
+
+      <div className="flex gap-1 mb-2" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+        <select
+          value={platform}
+          onChange={e => { setPlatform(e.target.value); setPage(1) }}
+          style={{
+            padding: '0.4rem 0.6rem', borderRadius: '6px', border: '1px solid var(--border)',
+            background: 'var(--bg)', color: 'var(--text)', fontSize: '0.8rem',
+          }}
+        >
+          <option value="">All platforms</option>
+          {PLATFORMS.map(p => <option key={p} value={p}>{p}</option>)}
+        </select>
+
+        <select
+          value={minPlatforms}
+          onChange={e => { setMinPlatforms(Number(e.target.value)); setPage(1) }}
+          style={{
+            padding: '0.4rem 0.6rem', borderRadius: '6px', border: '1px solid var(--border)',
+            background: 'var(--bg)', color: 'var(--text)', fontSize: '0.8rem',
+          }}
+        >
+          <option value={0}>Any # platforms</option>
+          <option value={2}>2+ platforms</option>
+          <option value={3}>3+ platforms</option>
+          <option value={4}>4+ platforms</option>
+        </select>
+
+        <span className="text-sm text-muted" style={{ marginLeft: '0.5rem' }}>
+          {total} entities
+        </span>
       </div>
 
       {loading ? (
         <div className="empty-state">Loading...</div>
       ) : entities.length === 0 ? (
         <div className="empty-state">
-          No entities found. Run an analysis first.
+          No entities found.
         </div>
       ) : (
         <>
           <table>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Platforms</th>
-                <th>Confidence</th>
-                <th>Signals</th>
+                <th onClick={() => toggleSort('name')} style={{ cursor: 'pointer' }}>
+                  Name{sortArrow('name')}
+                </th>
+                <th onClick={() => toggleSort('platforms')} style={{ cursor: 'pointer' }}>
+                  Platforms{sortArrow('platforms')}
+                </th>
+                <th onClick={() => toggleSort('confidence')} style={{ cursor: 'pointer' }}>
+                  Confidence{sortArrow('confidence')}
+                </th>
+                <th onClick={() => toggleSort('signals')} style={{ cursor: 'pointer' }}>
+                  Signals{sortArrow('signals')}
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -82,7 +147,7 @@ export default function EntitiesPage() {
             </tbody>
           </table>
           <div className="flex-between" style={{ marginTop: '1rem' }}>
-            <span className="text-sm text-muted">{total} entities</span>
+            <span className="text-sm text-muted">Page {page} of {Math.ceil(total / 50)}</span>
             <div className="flex gap-1">
               <button disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Prev</button>
               <button disabled={page * 50 >= total} onClick={() => setPage(p => p + 1)}>Next</button>

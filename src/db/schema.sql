@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS behavioral_profiles (
 
 ALTER TABLE entities ADD COLUMN IF NOT EXISTS silence_threshold_days FLOAT;
 ALTER TABLE entities ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
+ALTER TABLE behavioral_profiles ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS entity_merge_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

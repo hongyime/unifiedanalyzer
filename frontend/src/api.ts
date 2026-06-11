@@ -150,8 +150,13 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const api = {
-  getEntities: (page = 1, search = '') =>
-    get<Paginated<Entity>>(`/entities?page=${page}&per_page=50${search ? `&search=${encodeURIComponent(search)}` : ''}`),
+  getEntities: (page = 1, search = '', sort = 'confidence', order = 'desc', platform = '', minPlatforms = 0) => {
+    let q = `/entities?page=${page}&per_page=50&sort=${sort}&order=${order}`
+    if (search) q += `&search=${encodeURIComponent(search)}`
+    if (platform) q += `&platform=${platform}`
+    if (minPlatforms > 1) q += `&min_platforms=${minPlatforms}`
+    return get<Paginated<Entity>>(q)
+  },
 
   getEntity: (id: string) => get<EntityDetail>(`/entities/${id}`),
 
