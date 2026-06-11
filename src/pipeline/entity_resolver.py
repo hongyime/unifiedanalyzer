@@ -495,13 +495,12 @@ async def resolve_entities() -> dict:
                 stats["signals"] += 1
 
         # Clean up orphaned entities (no platform links pointing to them)
-        orphaned = await conn.fetchval("""
+        orphaned = await conn.execute("""
             DELETE FROM entities
             WHERE id NOT IN (SELECT DISTINCT entity_id FROM entity_platform_links)
-            RETURNING COUNT(*)
         """)
-        if orphaned:
-            logger.info("Cleaned up %d orphaned entities", orphaned)
+        if orphaned and orphaned != "DELETE 0":
+            logger.info("Cleaned up orphaned entities: %s", orphaned)
 
     stats["entities"] = stats["entities_created"] + stats["entities_updated"]
     logger.info("Entity resolution complete: %s", stats)
