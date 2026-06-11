@@ -38,9 +38,10 @@ async def _create_pool_with_retry(params: dict, max_size: int, label: str) -> as
     attempt = 0
     while True:
         try:
+            min_size = max(1, max_size // 4)
             pool = await asyncpg.create_pool(
                 **params,
-                min_size=2,
+                min_size=min_size,
                 max_size=max_size,
                 ssl="disable",
                 command_timeout=300,

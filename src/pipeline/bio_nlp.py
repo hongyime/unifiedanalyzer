@@ -1,5 +1,6 @@
 import re
 import json
+import hashlib
 import logging
 from collections import Counter
 
@@ -145,10 +146,27 @@ async def analyze_bios() -> dict:
             if entity_id:
                 entity_bios.setdefault(entity_id, []).append((source, bio_text))
 
-    stats = {"entities_analyzed": 0, "bios_processed": 0}
+    stats = {"entities_analyzed": 0, "bios_processed": 0, "skipped_unchanged": 0}
+
+    async with analyzer.acquire() as conn:
+        existing_meta_rows = await conn.fetch(
+            "SELECT entity_id::text, metadata FROM behavioral_profiles"
+        )
+        existing_meta: dict[str, dict] = {}
+        for row in existing_meta_rows:
+            meta = row["metadata"]
+            if isinstance(meta, dict):
+                existing_meta[str(row["entity_id"])] = meta
 
     async with analyzer.acquire() as conn:
         for entity_id, bio_list in entity_bios.items():
+            combined = "|".join(f"{s}:{t}" for s, t in sorted(bio_list))
+            bio_hash = hashlib.md5(combined.encode()).hexdigest()[:16]
+            prev_meta = existing_meta.get(entity_id, {})
+            if prev_meta.get("bio_nlp", {}).get("bio_hash") == bio_hash:
+                stats["skipped_unchanged"] += 1
+                continue
+
             all_tokens: list[str] = []
             all_hashtags: list[str] = []
             all_emojis: list[str] = []
@@ -179,6 +197,7 @@ async def analyze_bios() -> dict:
                 "language_hints": list(set(languages)),
                 "bio_sources": list(bio_texts.keys()),
                 "bio_count": len(bio_list),
+                "bio_hash": bio_hash,
             }
 
             existing = await conn.fetchrow(
