@@ -57,7 +57,24 @@ async def build_whatsapp_group_graph() -> dict:
                     pair_weights[pair] = []
                 pair_weights[pair].append(group_names[chat_id])
 
-    stats = {"relationships": 0, "groups_processed": len(groups)}
+    stats = {"relationships": 0, "groups_processed": len(groups), "group_cooccurrence_signals": 0}
+
+    # Phase 4F: persistent identity_signals for pairs sharing >= 2 groups
+    new_signals: list[tuple] = []
+    for (a, b), shared_groups in pair_weights.items():
+        count = len(shared_groups)
+        if count >= 2:
+            confidence = round(min(0.15 + count * 0.10, 0.70), 3)
+            new_signals.append((
+                a,
+                "group_cooccurrence",
+                "whatsapp",
+                None, None, None,
+                "whatsapp",
+                b,
+                f"shared_groups:{count}",
+                confidence,
+            ))
 
     async with analyzer.acquire() as conn:
         await conn.execute(
@@ -70,6 +87,16 @@ async def build_whatsapp_group_graph() -> dict:
                 VALUES ($1::uuid, $2::uuid, 'whatsapp_group_co_member', $3, false, $4::jsonb)
             """, a, b, len(shared_groups), json.dumps({"groups": shared_groups}))
             stats["relationships"] += 1
+
+        await conn.execute("DELETE FROM identity_signals WHERE signal_type = 'group_cooccurrence'")
+        if new_signals:
+            await conn.executemany("""
+                INSERT INTO identity_signals
+                    (entity_id, signal_type, source_platform, source_table, source_column,
+                     source_record_id, target_platform, target_record_id, value, confidence)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """, new_signals)
+            stats["group_cooccurrence_signals"] = len(new_signals)
 
     logger.info("WhatsApp group graph: %s", stats)
     return stats

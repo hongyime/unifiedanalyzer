@@ -124,6 +124,45 @@ async def compute_graph_analytics() -> dict:
                     triangles += 1
         clustering[node] = (2.0 * triangles) / (k * (k - 1))
 
+    # --- Label propagation community detection ---
+    # Initialize each node's label to its own entity_id.
+    labels: dict[str, str] = {node: node for node in nodes}
+    sorted_nodes = sorted(nodes)
+
+    for _ in range(20):
+        changed = False
+        for node in sorted_nodes:
+            neighbors = adj[node]
+            if not neighbors:
+                continue
+            label_weights: dict[str, int] = defaultdict(int)
+            for neighbor, w in neighbors:
+                label_weights[labels[neighbor]] += w
+
+            max_weight = max(label_weights.values())
+            best_labels = [lbl for lbl, w in label_weights.items() if w == max_weight]
+            new_label = min(best_labels)
+
+            if new_label != labels[node]:
+                labels[node] = new_label
+                changed = True
+
+        if not changed:
+            break
+
+    # Group nodes by final label; communities are groups with >= 2 members.
+    label_groups: dict[str, list[str]] = defaultdict(list)
+    for node, label in labels.items():
+        label_groups[label].append(node)
+
+    communities = {
+        label: members for label, members in label_groups.items() if len(members) >= 2
+    }
+    community_id_for: dict[str, str] = {}
+    for label, members in communities.items():
+        for node in members:
+            community_id_for[node] = label
+
     # Store per-entity analytics in behavioral_profiles.metadata
     async with pool.acquire() as conn:
         for node in nodes:
@@ -137,6 +176,8 @@ async def compute_graph_analytics() -> dict:
                 ),
             }
 
+            community_id = community_id_for.get(node)
+
             existing = await conn.fetchrow(
                 "SELECT id, metadata FROM behavioral_profiles WHERE entity_id = $1::uuid",
                 node,
@@ -144,18 +185,25 @@ async def compute_graph_analytics() -> dict:
             if existing:
                 meta = _decode_meta(existing["metadata"])
                 meta["graph_analytics"] = analytics
+                if community_id is not None:
+                    meta["community_id"] = community_id
+                else:
+                    meta.pop("community_id", None)
                 await conn.execute("""
                     UPDATE behavioral_profiles
                     SET metadata = $1::jsonb, updated_at = NOW()
                     WHERE entity_id = $2::uuid
                 """, json.dumps(meta, default=str), node)
             else:
+                meta = {"graph_analytics": analytics}
+                if community_id is not None:
+                    meta["community_id"] = community_id
                 await conn.execute("""
                     INSERT INTO behavioral_profiles (entity_id, metadata)
                     VALUES ($1::uuid, $2::jsonb)
                     ON CONFLICT (entity_id) DO UPDATE SET
                         metadata = $2::jsonb, updated_at = NOW()
-                """, node, json.dumps({"graph_analytics": analytics}, default=str))
+                """, node, json.dumps(meta, default=str))
 
     stats = {
         "nodes": n,
@@ -163,6 +211,8 @@ async def compute_graph_analytics() -> dict:
         "components": len(components),
         "largest_component": max(len(c) for c in components) if components else 0,
         "avg_clustering": round(sum(clustering.values()) / n, 4) if n else 0,
+        "communities_found": len(communities),
+        "largest_community_size": max((len(m) for m in communities.values()), default=0),
     }
     logger.info("Graph analytics: %s", stats)
     return stats

@@ -69,3 +69,36 @@ async def graph_overview():
             for r in top
         ],
     }
+
+
+@router.get("/graph/communities")
+async def graph_communities():
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT bp.entity_id, bp.metadata->>'community_id' AS community_id,
+                   e.canonical_name
+            FROM behavioral_profiles bp
+            JOIN entities e ON e.id = bp.entity_id
+            WHERE bp.metadata->>'community_id' IS NOT NULL
+        """)
+
+    grouped: dict[str, list[dict]] = {}
+    for r in rows:
+        grouped.setdefault(r["community_id"], []).append({
+            "entity_id": str(r["entity_id"]),
+            "canonical_name": r["canonical_name"],
+        })
+
+    communities = [
+        {
+            "community_id": community_id,
+            "member_count": len(members),
+            "members": members,
+        }
+        for community_id, members in grouped.items()
+        if len(members) >= 2
+    ]
+    communities.sort(key=lambda c: c["member_count"], reverse=True)
+
+    return {"data": communities}
