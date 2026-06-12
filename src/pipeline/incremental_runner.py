@@ -14,6 +14,7 @@ from src.pipeline.bio_mention import detect_bio_mentions
 from src.pipeline.location_inference import infer_locations
 from src.pipeline.content_fingerprint import fingerprint_content
 from src.pipeline.temporal_correlation import correlate_activity
+from src.pipeline.identity_scorer import compute_identity_scores
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
 logger = logging.getLogger(__name__)
@@ -155,6 +156,11 @@ async def run_incremental() -> dict:
         except Exception:
             logger.exception("Temporal correlation failed (non-fatal)")
 
+        try:
+            await compute_identity_scores()
+        except Exception:
+            logger.exception("Identity scoring failed (non-fatal)")
+
         await _finish_run(run_id, stats)
         logger.info("Incremental run complete: %s", stats)
         await notify_run_summary("incremental", stats)
@@ -241,6 +247,11 @@ async def run_full_resolution() -> dict:
             await correlate_activity()
         except Exception:
             logger.exception("Temporal correlation failed (non-fatal)")
+
+        try:
+            await compute_identity_scores()
+        except Exception:
+            logger.exception("Identity scoring failed (non-fatal)")
 
         await _finish_run(run_id, stats)
         logger.info("Full resolution run complete: %s", stats)
