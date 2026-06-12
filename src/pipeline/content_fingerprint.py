@@ -18,9 +18,10 @@ from src.db.connection import get_analyzer_pool, get_collector_pool
 
 logger = logging.getLogger(__name__)
 
-_MIN_TOKENS = 50     # skip entities with too little text
-_SIM_THRESHOLD = 0.80  # cosine similarity for same-person signal
-_MIN_SHARED_VOCAB = 8  # minimum shared vocab words for meaningful comparison
+_MIN_TOKENS = 50            # skip entities with too little text
+_SIM_THRESHOLD = 0.80       # cosine similarity for same-person signal
+_MIN_SHARED_VOCAB = 8       # minimum shared vocab words for meaningful comparison
+_MIN_VOCAB_RICHNESS = 0.06  # both entities must have vocab_richness ≥ this; filters out boilerplate template content
 
 STOPWORDS = frozenset({
     "i", "me", "my", "we", "our", "you", "your", "he", "him", "his", "she",
@@ -253,6 +254,9 @@ async def fingerprint_content() -> dict:
         for eid_b in entity_ids[i + 1:]:
             vocab_a = fingerprints[eid_a]["_vocab_counter"]
             vocab_b = fingerprints[eid_b]["_vocab_counter"]
+            # Skip pairs where either entity has low vocab diversity — template/boilerplate false positive risk
+            if fingerprints[eid_a]["vocab_richness"] < _MIN_VOCAB_RICHNESS or fingerprints[eid_b]["vocab_richness"] < _MIN_VOCAB_RICHNESS:
+                continue
             shared = set(vocab_a) & set(vocab_b)
             if len(shared) < _MIN_SHARED_VOCAB:
                 continue
