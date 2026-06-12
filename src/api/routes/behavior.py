@@ -51,6 +51,8 @@ async def get_behavior(entity_id: str):
         "strava_patterns": meta.get("strava_patterns"),
         "bio_nlp": meta.get("bio_nlp"),
         "graph_analytics": meta.get("graph_analytics"),
+        "location_inference": meta.get("location_inference"),
+        "content_fingerprint": meta.get("content_fingerprint"),
         "source_breakdown": [
             {"source": r["source"], "count": r["count"]} for r in source_breakdown
         ],
