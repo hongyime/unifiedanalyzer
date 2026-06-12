@@ -14,6 +14,7 @@ from src.pipeline.bio_mention import detect_bio_mentions
 from src.pipeline.location_inference import infer_locations
 from src.pipeline.content_fingerprint import fingerprint_content
 from src.pipeline.temporal_correlation import correlate_activity
+from src.pipeline.contact_extraction import extract_contacts
 from src.pipeline.identity_scorer import compute_identity_scores
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
@@ -157,6 +158,11 @@ async def run_incremental() -> dict:
             logger.exception("Temporal correlation failed (non-fatal)")
 
         try:
+            await extract_contacts()
+        except Exception:
+            logger.exception("Contact extraction failed (non-fatal)")
+
+        try:
             await compute_identity_scores()
         except Exception:
             logger.exception("Identity scoring failed (non-fatal)")
@@ -191,7 +197,7 @@ async def run_full_resolution() -> dict:
         # Preserve bio_mention signals — they are rebuilt by detect_bio_mentions() below
         pool = get_analyzer_pool()
         async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM identity_signals WHERE signal_type NOT IN ('bio_mention', 'content_similarity', 'temporal_copost', 'group_cooccurrence')")
+            await conn.execute("DELETE FROM identity_signals WHERE signal_type NOT IN ('bio_mention', 'content_similarity', 'temporal_copost', 'group_cooccurrence', 'email_match', 'cross_platform_link')")
             await conn.execute("DELETE FROM entity_platform_links")
             await conn.execute("DELETE FROM entities")
 
@@ -247,6 +253,11 @@ async def run_full_resolution() -> dict:
             await correlate_activity()
         except Exception:
             logger.exception("Temporal correlation failed (non-fatal)")
+
+        try:
+            await extract_contacts()
+        except Exception:
+            logger.exception("Contact extraction failed (non-fatal)")
 
         try:
             await compute_identity_scores()

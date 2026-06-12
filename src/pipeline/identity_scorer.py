@@ -4,14 +4,16 @@ Phase 5A: Identity confidence scorer.
 Aggregates all identity_signals rows per (entity_a, entity_b) pair into a
 single "same person" probability score, combining heterogeneous weak
 signals (bio mentions, content fingerprint similarity, temporal co-posting,
-WhatsApp group co-occurrence) via probabilistic OR.
+WhatsApp group co-occurrence, shared emails, cross-platform profile links)
+via probabilistic OR.
 
 Note on target_record_id conventions across signal types:
   - bio_mention: target_record_id is a *platform_id* (raw username/pid) on
     target_platform — NOT an entity_id. Must be resolved via
     entity_platform_links (source, platform_id) -> entity_id.
-  - content_similarity, temporal_copost, group_cooccurrence: target_record_id
-    is the *other entity's UUID* as text directly.
+  - content_similarity, temporal_copost, group_cooccurrence, email_match,
+    cross_platform_link: target_record_id is the *other entity's UUID* as
+    text directly.
 
 Results are stored in entity_relationships as 'same_person_probability',
 following the delete-then-executemany pattern used by
@@ -25,7 +27,9 @@ from src.db.connection import get_analyzer_pool
 logger = logging.getLogger(__name__)
 
 _TYPE_WEIGHT = {
+    "email_match": 0.60,
     "bio_mention": 0.40,
+    "cross_platform_link": 0.40,
     "content_similarity": 0.30,
     "temporal_copost": 0.30,
     "group_cooccurrence": 0.20,
