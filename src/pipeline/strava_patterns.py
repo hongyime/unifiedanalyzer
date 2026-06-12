@@ -7,6 +7,18 @@ from src.db.connection import get_analyzer_pool, get_collector_pool
 logger = logging.getLogger(__name__)
 
 
+def _decode_meta(raw) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (str, bytes)):
+        try:
+            result = json.loads(raw)
+            return result if isinstance(result, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
 async def analyze_strava_patterns() -> dict:
     collector = get_collector_pool()
     analyzer = get_analyzer_pool()
@@ -99,7 +111,7 @@ async def analyze_strava_patterns() -> dict:
                 )
                 strava_json = json.dumps({"strava_patterns": pattern})
                 if existing:
-                    meta = existing["metadata"] if isinstance(existing["metadata"], dict) else {}
+                    meta = _decode_meta(existing["metadata"])
                     meta["strava_patterns"] = pattern
                     await conn.execute("""
                         UPDATE behavioral_profiles

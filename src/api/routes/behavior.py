@@ -1,3 +1,4 @@
+import json
 from fastapi import APIRouter, HTTPException
 
 from src.db.connection import get_analyzer_pool
@@ -30,7 +31,13 @@ async def get_behavior(entity_id: str):
             GROUP BY event_type ORDER BY count DESC
         """, entity_id)
 
-    meta = bp["metadata"] if isinstance(bp["metadata"], dict) else {}
+    raw_meta = bp["metadata"]
+    if isinstance(raw_meta, str):
+        try:
+            raw_meta = json.loads(raw_meta)
+        except (json.JSONDecodeError, TypeError):
+            raw_meta = {}
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
 
     return {
         "entity_id": entity_id,

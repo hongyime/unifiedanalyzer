@@ -8,6 +8,18 @@ from src.db.connection import get_analyzer_pool, get_collector_pool
 
 logger = logging.getLogger(__name__)
 
+
+def _decode_meta(raw) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (str, bytes)):
+        try:
+            result = json.loads(raw)
+            return result if isinstance(result, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
 STOPWORDS = frozenset({
     "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your",
     "yours", "yourself", "yourselves", "he", "him", "his", "himself", "she",
@@ -154,8 +166,8 @@ async def analyze_bios() -> dict:
         )
         existing_meta: dict[str, dict] = {}
         for row in existing_meta_rows:
-            meta = row["metadata"]
-            if isinstance(meta, dict):
+            meta = _decode_meta(row["metadata"])
+            if meta:
                 existing_meta[str(row["entity_id"])] = meta
 
     async with analyzer.acquire() as conn:
@@ -205,7 +217,7 @@ async def analyze_bios() -> dict:
                 entity_id,
             )
             if existing:
-                meta = existing["metadata"] if isinstance(existing["metadata"], dict) else {}
+                meta = _decode_meta(existing["metadata"])
                 meta["bio_nlp"] = nlp_data
                 await conn.execute("""
                     UPDATE behavioral_profiles

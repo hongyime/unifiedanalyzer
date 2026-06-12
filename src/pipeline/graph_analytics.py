@@ -7,6 +7,18 @@ from src.db.connection import get_analyzer_pool
 logger = logging.getLogger(__name__)
 
 
+def _decode_meta(raw) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (str, bytes)):
+        try:
+            result = json.loads(raw)
+            return result if isinstance(result, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
 async def compute_graph_analytics() -> dict:
     pool = get_analyzer_pool()
 
@@ -130,7 +142,7 @@ async def compute_graph_analytics() -> dict:
                 node,
             )
             if existing:
-                meta = existing["metadata"] if isinstance(existing["metadata"], dict) else {}
+                meta = _decode_meta(existing["metadata"])
                 meta["graph_analytics"] = analytics
                 await conn.execute("""
                     UPDATE behavioral_profiles
