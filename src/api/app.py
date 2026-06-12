@@ -19,6 +19,7 @@ from src.api.routes.behavior import router as behavior_router
 from src.api.routes.export import router as export_router
 from src.api.routes.collector_health import router as collector_health_router
 from src.api.routes.graph import router as graph_router
+from src.api.routes.intelligence import router as intelligence_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +52,7 @@ app.include_router(behavior_router, prefix="/api")
 app.include_router(export_router, prefix="/api")
 app.include_router(collector_health_router, prefix="/api")
 app.include_router(graph_router, prefix="/api")
+app.include_router(intelligence_router, prefix="/api")
 
 _scheduler_task: asyncio.Task | None = None
 

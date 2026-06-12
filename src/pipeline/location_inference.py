@@ -128,7 +128,8 @@ async def infer_locations() -> dict:
     def _ensure(eid: str) -> dict:
         if eid not in signals:
             signals[eid] = {"countries": Counter(), "timezones": Counter(),
-                            "cities": [], "regions": Counter(), "location_names": []}
+                            "cities": [], "regions": Counter(), "location_names": [],
+                            "source_countries": {}}
         return signals[eid]
 
     async with collector.acquire() as conn:
@@ -147,6 +148,7 @@ async def infer_locations() -> dict:
                 s = _ensure(eid)
                 if r["country"]:
                     s["countries"][r["country"]] += 2
+                    s["source_countries"]["strava"] = r["country"]
                 city_parts = [p for p in [r["city"], r["state"]] if p]
                 if city_parts:
                     s["cities"].append(", ".join(city_parts))
@@ -191,7 +193,9 @@ async def infer_locations() -> dict:
                 eid = pid_to_entity.get(("youtube", r["platform_channel_id"]))
                 if not eid:
                     continue
-                _ensure(eid)["countries"][r["country"]] += 1
+                s = _ensure(eid)
+                s["countries"][r["country"]] += 1
+                s["source_countries"]["youtube"] = r["country"]
         except Exception:
             logger.debug("YouTube channel country failed", exc_info=True)
 
@@ -256,6 +260,7 @@ async def infer_locations() -> dict:
                 "home_cities": unique_cities,
                 "country_votes": dict(s["countries"].most_common(5)),
                 "timezone_votes": dict(s["timezones"].most_common(5)),
+                "source_countries": s["source_countries"],
             }
 
             existing = await conn.fetchrow(
