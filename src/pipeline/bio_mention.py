@@ -43,14 +43,21 @@ SOURCE_TABLE = {
 
 
 def _normalize_mention(raw: str) -> str | None:
-    """Normalize a captured @handle the same way entity_resolver normalizes usernames."""
+    """Normalize a @handle for cross-platform matching.
+
+    Strips leading @ (platform_username fields often include it),
+    then applies same rules as entity_resolver: strip ._-, lowercase,
+    drop trailing digits, reject spaces/short/generic values.
+    """
     if not raw:
         return None
-    if _DEFAULT_USERNAME_RE.match(raw):
+    if _DEFAULT_USERNAME_RE.match(raw.lstrip("@")):
         return None
     if " " in raw.strip():
         return None
     u = raw.lower().strip()
+    if u.startswith("@"):
+        u = u[1:]
     for ch in _STRIP_CHARS:
         u = u.replace(ch, "")
     u = re.sub(r"\d+$", "", u)
