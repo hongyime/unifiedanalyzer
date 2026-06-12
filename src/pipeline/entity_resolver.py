@@ -604,7 +604,8 @@ async def resolve_entities() -> dict:
         # Single DELETE for all signals, then batch INSERT
         all_eids = [eid for _, eid, *_ in resolved]
         await conn.execute(
-            "DELETE FROM identity_signals WHERE entity_id = ANY($1::uuid[])", all_eids
+            "DELETE FROM identity_signals WHERE entity_id = ANY($1::uuid[]) AND signal_type != 'bio_mention'",
+            all_eids,
         )
         signal_rows = []
         for candidate, eid, *_ in resolved:

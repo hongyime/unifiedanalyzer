@@ -10,6 +10,7 @@ from src.pipeline.group_graph import build_whatsapp_group_graph
 from src.pipeline.strava_patterns import analyze_strava_patterns
 from src.pipeline.bio_nlp import analyze_bios
 from src.pipeline.graph_analytics import compute_graph_analytics
+from src.pipeline.bio_mention import detect_bio_mentions
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
 logger = logging.getLogger(__name__)
@@ -131,6 +132,11 @@ async def run_incremental() -> dict:
         except Exception:
             logger.exception("Graph analytics failed (non-fatal)")
 
+        try:
+            await detect_bio_mentions()
+        except Exception:
+            logger.exception("Bio mention detection failed (non-fatal)")
+
         await _finish_run(run_id, stats)
         logger.info("Incremental run complete: %s", stats)
         await notify_run_summary("incremental", stats)
@@ -158,9 +164,10 @@ async def run_full_resolution() -> dict:
 
     try:
         # Full resolution: clear and rebuild entities
+        # Preserve bio_mention signals — they are rebuilt by detect_bio_mentions() below
         pool = get_analyzer_pool()
         async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM identity_signals")
+            await conn.execute("DELETE FROM identity_signals WHERE signal_type != 'bio_mention'")
             await conn.execute("DELETE FROM entity_platform_links")
             await conn.execute("DELETE FROM entities")
 
@@ -196,6 +203,11 @@ async def run_full_resolution() -> dict:
             await compute_graph_analytics()
         except Exception:
             logger.exception("Graph analytics failed (non-fatal)")
+
+        try:
+            await detect_bio_mentions()
+        except Exception:
+            logger.exception("Bio mention detection failed (non-fatal)")
 
         await _finish_run(run_id, stats)
         logger.info("Full resolution run complete: %s", stats)
