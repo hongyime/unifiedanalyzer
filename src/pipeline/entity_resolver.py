@@ -1,4 +1,5 @@
 import re
+import uuid as uuid_module
 import logging
 from dataclasses import dataclass, field
 from rapidfuzz import fuzz
@@ -484,20 +485,20 @@ async def resolve_entities() -> dict:
     logger.info("Phase 4.5: %d matched to existing entities, %d new WhatsApp secondary entities",
                 matched_count, secondary_count)
 
-    # Phase 5: Persist to analyzer DB
+    # Phase 5: Persist to analyzer DB — batched to avoid N×round-trip overhead
     pool = get_analyzer_pool()
     stats = {"entities_created": 0, "entities_updated": 0, "links": 0, "signals": 0}
 
     async with pool.acquire() as conn:
-        # Load existing links so we can reuse entity IDs
         existing_links = {}
         for row in await conn.fetch(
             "SELECT entity_id, source, platform_id FROM entity_platform_links"
         ):
             existing_links[(row["source"], row["platform_id"])] = row["entity_id"]
 
+        # Pre-compute all entity attributes and assign IDs in Python
+        resolved: list[tuple] = []
         seen_entity_ids: set = set()
-
         for candidate in entities:
             confidence, independent_count = compute_confidence(candidate.signals)
             is_confirmed = confidence >= CONFIDENCE_THRESHOLD and independent_count >= MIN_SIGNALS
@@ -518,7 +519,6 @@ async def resolve_entities() -> dict:
                         canonical = p.username
                         break
 
-            # Check if any profile already has an entity
             entity_id = None
             for p in candidate.profiles:
                 eid = existing_links.get((p.source, p.platform_id))
@@ -532,57 +532,97 @@ async def resolve_entities() -> dict:
                 and not candidate.signals
             )
             tier = "secondary" if is_secondary else "primary"
-
-            if entity_id:
-                await conn.execute("""
-                    UPDATE entities SET
-                        canonical_name = $1, confidence_score = $2,
-                        signal_count = $3, tier = $4, updated_at = NOW()
-                    WHERE id = $5
-                """, canonical, confidence, independent_count, tier, entity_id)
-                stats["entities_updated"] += 1
-            else:
-                entity_id = await conn.fetchval("""
-                    INSERT INTO entities (tier, canonical_name, confidence_score, signal_count)
-                    VALUES ($1, $2, $3, $4)
-                    RETURNING id
-                """, tier, canonical, confidence, independent_count)
-                stats["entities_created"] += 1
+            is_new = entity_id is None
+            if is_new:
+                entity_id = str(uuid_module.uuid4())
 
             seen_entity_ids.add(entity_id)
+            resolved.append((candidate, entity_id, canonical, confidence,
+                              independent_count, tier, is_new, is_confirmed))
 
+        # Batch UPDATE existing entities (one executemany instead of N awaits)
+        update_rows = [
+            (canonical, confidence, count, tier, eid)
+            for _, eid, canonical, confidence, count, tier, is_new, _ in resolved
+            if not is_new
+        ]
+        if update_rows:
+            await conn.executemany("""
+                UPDATE entities SET
+                    canonical_name = $1, confidence_score = $2,
+                    signal_count = $3, tier = $4, updated_at = NOW()
+                WHERE id = $5
+            """, update_rows)
+            stats["entities_updated"] = len(update_rows)
+
+        # Batch INSERT new entities with pre-assigned UUIDs
+        insert_rows = [
+            (eid, tier, canonical, confidence, count)
+            for _, eid, canonical, confidence, count, tier, is_new, _ in resolved
+            if is_new
+        ]
+        if insert_rows:
+            await conn.executemany("""
+                INSERT INTO entities (id, tier, canonical_name, confidence_score, signal_count)
+                VALUES ($1::uuid, $2, $3, $4, $5)
+            """, insert_rows)
+            stats["entities_created"] = len(insert_rows)
+
+        # Batch UPSERT all links in a single UNNEST query
+        eids, sources, pids, usernames, names, confs, confirmed = [], [], [], [], [], [], []
+        for candidate, eid, _, confidence, _, _, _, is_confirmed in resolved:
             for p in candidate.profiles:
-                await conn.execute("""
-                    INSERT INTO entity_platform_links
-                        (entity_id, source, platform_id, platform_username, platform_name,
-                         confidence, link_method, is_confirmed)
-                    VALUES ($1, $2, $3, $4, $5, $6, 'auto', $7)
-                    ON CONFLICT (source, platform_id) DO UPDATE SET
-                        entity_id = EXCLUDED.entity_id,
-                        platform_username = EXCLUDED.platform_username,
-                        platform_name = EXCLUDED.platform_name,
-                        confidence = EXCLUDED.confidence,
-                        is_confirmed = EXCLUDED.is_confirmed,
-                        updated_at = NOW()
-                """, entity_id, p.source, p.platform_id, p.username, p.name,
-                    confidence, is_confirmed)
-                stats["links"] += 1
+                eids.append(eid)
+                sources.append(p.source)
+                pids.append(p.platform_id)
+                usernames.append(p.username)
+                names.append(p.name)
+                confs.append(confidence)
+                confirmed.append(is_confirmed)
+        if eids:
+            await conn.execute("""
+                INSERT INTO entity_platform_links
+                    (entity_id, source, platform_id, platform_username, platform_name,
+                     confidence, link_method, is_confirmed)
+                SELECT entity_id, source, platform_id, platform_username, platform_name,
+                       confidence, 'auto', is_confirmed
+                FROM UNNEST(
+                    $1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[],
+                    $6::float8[], $7::bool[]
+                ) AS t(entity_id, source, platform_id, platform_username, platform_name,
+                       confidence, is_confirmed)
+                ON CONFLICT (source, platform_id) DO UPDATE SET
+                    entity_id = EXCLUDED.entity_id,
+                    platform_username = EXCLUDED.platform_username,
+                    platform_name = EXCLUDED.platform_name,
+                    confidence = EXCLUDED.confidence,
+                    is_confirmed = EXCLUDED.is_confirmed,
+                    updated_at = NOW()
+            """, eids, sources, pids, usernames, names, confs, confirmed)
+            stats["links"] = len(eids)
 
-            # Replace signals for this entity (idempotent)
-            await conn.execute(
-                "DELETE FROM identity_signals WHERE entity_id = $1", entity_id
-            )
+        # Single DELETE for all signals, then batch INSERT
+        all_eids = [eid for _, eid, *_ in resolved]
+        await conn.execute(
+            "DELETE FROM identity_signals WHERE entity_id = ANY($1::uuid[])", all_eids
+        )
+        signal_rows = []
+        for candidate, eid, *_ in resolved:
             for s in candidate.signals:
-                await conn.execute("""
-                    INSERT INTO identity_signals
-                        (entity_id, signal_type, source_platform, source_record_id,
-                         target_platform, target_record_id, value, confidence)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                """, entity_id, s.signal_type, s.source_platform, s.source_record_id,
-                    s.target_platform, s.target_record_id, s.value, s.confidence)
-                stats["signals"] += 1
+                signal_rows.append((
+                    eid, s.signal_type, s.source_platform, s.source_record_id,
+                    s.target_platform, s.target_record_id, s.value, s.confidence,
+                ))
+        if signal_rows:
+            await conn.executemany("""
+                INSERT INTO identity_signals
+                    (entity_id, signal_type, source_platform, source_record_id,
+                     target_platform, target_record_id, value, confidence)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """, signal_rows)
+            stats["signals"] = len(signal_rows)
 
-        # Clean up orphaned entities (no platform links pointing to them)
+        # Clean up orphaned entities
         orphaned = await conn.execute("""
             DELETE FROM entities
             WHERE id NOT IN (SELECT DISTINCT entity_id FROM entity_platform_links)
