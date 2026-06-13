@@ -57,7 +57,7 @@ async def _create_pool_with_retry(params: dict, max_size: int, label: str) -> as
             attempt += 1
 
 
-async def init_pools() -> None:
+async def init_pools(apply_schema_ddl: bool = True) -> None:
     global _analyzer_pool, _collector_pool
 
     max_size = int(os.getenv("DB_MAX_POOL_SIZE", "10"))
@@ -68,7 +68,14 @@ async def init_pools() -> None:
     _analyzer_pool = await _create_pool_with_retry(analyzer_params, max_size, "analyzer")
     _collector_pool = await _create_pool_with_retry(collector_params, max_size, "collector")
 
-    await apply_schema()
+    if apply_schema_ddl:
+        # apply_schema()'s DDL (CREATE EXTENSION/TABLE/INDEX IF NOT EXISTS) can
+        # block for the full command_timeout if another connection holds a
+        # conflicting lock (e.g. the live "serve" process mid-transaction).
+        # One-off scripts that only need to read/write existing tables should
+        # pass apply_schema_ddl=False to skip this — the schema is applied
+        # once by `python -m src.main schema` / on "serve" startup.
+        await apply_schema()
     logger.info("Database pools initialized")
 
 

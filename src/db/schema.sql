@@ -146,3 +146,33 @@ CREATE TABLE IF NOT EXISTS entity_relationships (
 );
 CREATE INDEX IF NOT EXISTS idx_relationships_a ON entity_relationships(entity_a_id);
 CREATE INDEX IF NOT EXISTS idx_relationships_b ON entity_relationships(entity_b_id);
+
+-- Phase 6: media content analysis (see docs/media_analysis_plan.md).
+-- One row per (media_item_id, analysis_type). media_item_id references
+-- unifiedcollector.media_items.id by value (cross-database, no FK). For
+-- derived media (image extracted from a PDF, frame extracted from a video),
+-- media_item_id is synthetic ("{parent_id}:pdf_img:{page}:{idx}" or
+-- "{parent_id}:frame:{sec}") with parent_media_item_id pointing at the real
+-- media_items.id.
+CREATE TABLE IF NOT EXISTS media_analysis (
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    media_item_id        TEXT NOT NULL,
+    parent_media_item_id TEXT,
+    source               VARCHAR NOT NULL,
+    content_type         VARCHAR NOT NULL,
+    analysis_type        VARCHAR NOT NULL,
+    extracted_text       TEXT,
+    result_json          JSONB,
+    gps_lat              DOUBLE PRECISION,
+    gps_lon              DOUBLE PRECISION,
+    taken_at             TIMESTAMP WITH TIME ZONE,
+    perceptual_hash      VARCHAR,
+    face_embedding       DOUBLE PRECISION[],
+    model_version        VARCHAR,
+    processed_at         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    UNIQUE (media_item_id, analysis_type)
+);
+CREATE INDEX IF NOT EXISTS idx_media_analysis_type   ON media_analysis (analysis_type);
+CREATE INDEX IF NOT EXISTS idx_media_analysis_phash  ON media_analysis (perceptual_hash);
+CREATE INDEX IF NOT EXISTS idx_media_analysis_gps    ON media_analysis (gps_lat, gps_lon);
+CREATE INDEX IF NOT EXISTS idx_media_analysis_parent ON media_analysis (parent_media_item_id);
