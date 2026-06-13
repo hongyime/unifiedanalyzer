@@ -6,7 +6,7 @@ from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.timeline_builder import build_timeline
 from src.pipeline.alert_engine import run_alerts
 from src.pipeline.behavioral_profiler import compute_behavioral_profiles
-from src.pipeline.group_graph import build_whatsapp_group_graph
+from src.pipeline.group_graph import build_whatsapp_group_graph, build_telegram_group_graph
 from src.pipeline.strava_patterns import analyze_strava_patterns
 from src.pipeline.bio_nlp import analyze_bios
 from src.pipeline.graph_analytics import compute_graph_analytics
@@ -124,6 +124,11 @@ async def run_incremental() -> dict:
             logger.exception("WhatsApp group graph failed (non-fatal)")
 
         try:
+            await build_telegram_group_graph()
+        except Exception:
+            logger.exception("Telegram group graph failed (non-fatal)")
+
+        try:
             await analyze_strava_patterns()
         except Exception:
             logger.exception("Strava pattern analysis failed (non-fatal)")
@@ -224,6 +229,11 @@ async def run_full_resolution() -> dict:
             await build_whatsapp_group_graph()
         except Exception:
             logger.exception("WhatsApp group graph failed (non-fatal)")
+
+        try:
+            await build_telegram_group_graph()
+        except Exception:
+            logger.exception("Telegram group graph failed (non-fatal)")
 
         try:
             await analyze_strava_patterns()
