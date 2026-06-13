@@ -162,6 +162,60 @@ export interface Relationship {
   sources: Record<string, unknown>
 }
 
+export interface Community {
+  community_id: string
+  member_count: number
+  members: { entity_id: string; canonical_name: string | null }[]
+}
+
+export interface IntelligenceReport {
+  entity: { id: string; canonical_name: string | null; tier: string }
+  platforms: { source: string; platform_id: string; platform_username: string | null }[]
+  location: {
+    primary_country: string | null
+    primary_timezone: string | null
+    region: string | null
+    source_countries: string[] | null
+  } | null
+  behavioral_summary: {
+    total_events: number
+    posting_hour_dist: Record<string, number>
+  } | null
+  content_fingerprint: {
+    vocab_size: number | null
+    vocab_richness: number | null
+    top_words: string[] | null
+    post_count: number | null
+  } | null
+  identity_signals: {
+    signal_type: string
+    target_platform: string
+    target_record_id: string
+    value: string
+    confidence: number
+  }[]
+  same_person_candidates: {
+    entity_id: string
+    canonical_name: string | null
+    score: number | null
+    cross_platform: boolean
+    contributing_signals: { type: string; confidence: number }[]
+  }[]
+  relationships: {
+    relationship_type: string
+    other_entity_id: string
+    other_canonical_name: string | null
+    weight: number
+    cross_platform: boolean
+  }[]
+  community_id: string | null
+  timeline_summary: {
+    first_seen: string | null
+    last_seen: string | null
+    event_count_by_source: Record<string, number>
+  } | null
+}
+
 export interface StravaPatterns {
   total_activities: number
   activity_types: Record<string, number>
@@ -248,4 +302,8 @@ export const api = {
       type: string
     }[]
   }>('/graph/overview'),
+
+  getCommunities: () => get<{ data: Community[] }>('/graph/communities'),
+
+  getIntelligence: (entityId: string) => get<IntelligenceReport>(`/entities/${entityId}/intelligence`),
 }

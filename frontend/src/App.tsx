@@ -5,6 +5,7 @@ import EntitiesPage from './pages/Entities'
 import EntityDetailPage from './pages/EntityDetail'
 import RunsPage from './pages/Runs'
 import CollectorHealthPage from './pages/CollectorHealth'
+import CommunitiesPage from './pages/Communities'
 import { api, HealthInfo } from './api'
 
 function App() {
@@ -28,6 +29,7 @@ function App() {
         <h1>Analyzer</h1>
         <NavLink to="/" className={navClass('/')} end>Alerts</NavLink>
         <NavLink to="/entities" className={navClass('/entities')}>Entities</NavLink>
+        <NavLink to="/communities" className={navClass('/communities')}>Communities</NavLink>
         <NavLink to="/runs" className={navClass('/runs')}>Runs</NavLink>
         <NavLink to="/collectors" className={navClass('/collectors')}>Collectors</NavLink>
         <div style={{ marginTop: 'auto', fontSize: '0.75rem' }}>
@@ -52,6 +54,7 @@ function App() {
           <Route path="/" element={<AlertsPage />} />
           <Route path="/entities" element={<EntitiesPage />} />
           <Route path="/entities/:id" element={<EntityDetailPage />} />
+          <Route path="/communities" element={<CommunitiesPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/collectors" element={<CollectorHealthPage />} />
         </Routes>

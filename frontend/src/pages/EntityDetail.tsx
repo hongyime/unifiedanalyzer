@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { api, EntityDetail, TimelineEvent, BehaviorProfile, Relationship } from '../api'
+import { api, EntityDetail, TimelineEvent, BehaviorProfile, Relationship, IntelligenceReport } from '../api'
 
 function PlatformBadge({ source }: { source: string }) {
   return <span className={`platform-icon p-${source}`}>{source}</span>
@@ -83,9 +83,10 @@ export default function EntityDetailPage() {
   const [events, setEvents] = useState<TimelineEvent[]>([])
   const [eventsTotal, setEventsTotal] = useState(0)
   const [eventsPage, setEventsPage] = useState(1)
-  const [tab, setTab] = useState<'identity' | 'timeline' | 'behavior' | 'relationships' | 'settings'>('identity')
+  const [tab, setTab] = useState<'identity' | 'timeline' | 'behavior' | 'relationships' | 'intelligence' | 'settings'>('identity')
   const [loading, setLoading] = useState(true)
   const [behavior, setBehavior] = useState<BehaviorProfile | null>(null)
+  const [intelligence, setIntelligence] = useState<IntelligenceReport | null>(null)
   const [selectedLinks, setSelectedLinks] = useState<Set<string>>(new Set())
   const [silenceThreshold, setSilenceThreshold] = useState('')
   const [notes, setNotes] = useState('')
@@ -119,6 +120,11 @@ export default function EntityDetailPage() {
   useEffect(() => {
     if (!id || tab !== 'relationships') return
     api.getRelationships(id).then(r => setRelationships(r.data)).catch(() => setRelationships([]))
+  }, [id, tab])
+
+  useEffect(() => {
+    if (!id || tab !== 'intelligence') return
+    api.getIntelligence(id).then(setIntelligence).catch(() => setIntelligence(null))
   }, [id, tab])
 
   const handleSplit = async () => {
@@ -201,6 +207,7 @@ export default function EntityDetailPage() {
         <button className={tab === 'timeline' ? 'primary' : ''} onClick={() => setTab('timeline')}>Timeline</button>
         <button className={tab === 'behavior' ? 'primary' : ''} onClick={() => setTab('behavior')}>Behavior</button>
         <button className={tab === 'relationships' ? 'primary' : ''} onClick={() => setTab('relationships')}>Relationships</button>
+        <button className={tab === 'intelligence' ? 'primary' : ''} onClick={() => setTab('intelligence')}>Intelligence</button>
         <button className={tab === 'settings' ? 'primary' : ''} onClick={() => setTab('settings')}>Settings</button>
       </div>
 
@@ -554,6 +561,156 @@ export default function EntityDetailPage() {
                 ))}
               </tbody>
             </table>
+          )}
+        </>
+      )}
+
+      {tab === 'intelligence' && (
+        <>
+          {!intelligence ? (
+            <div className="empty-state">Loading intelligence report...</div>
+          ) : (
+            <>
+              {intelligence.location && (
+                <div className="card">
+                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Location</div>
+                  {intelligence.location.primary_country && (
+                    <div className="flex-between mb-1">
+                      <span className="text-sm text-muted">Primary country</span>
+                      <span style={{ fontWeight: 600 }}>{intelligence.location.primary_country}</span>
+                    </div>
+                  )}
+                  {intelligence.location.primary_timezone && (
+                    <div className="flex-between mb-1">
+                      <span className="text-sm text-muted">Primary timezone</span>
+                      <span style={{ fontWeight: 600 }}>{intelligence.location.primary_timezone}</span>
+                    </div>
+                  )}
+                  {intelligence.location.region && (
+                    <div className="flex-between mb-1">
+                      <span className="text-sm text-muted">Region</span>
+                      <span style={{ fontWeight: 600 }}>{intelligence.location.region}</span>
+                    </div>
+                  )}
+                  {intelligence.location.source_countries && intelligence.location.source_countries.length > 0 && (
+                    <div style={{ marginTop: '0.75rem' }}>
+                      <div className="text-sm text-muted mb-1">Source countries</div>
+                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+                        {intelligence.location.source_countries.map(c => (
+                          <span key={c} className="badge badge-gray">{c}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {intelligence.content_fingerprint && (
+                <div className="card">
+                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Content Fingerprint</div>
+                  <div className="flex-between mb-1">
+                    <span className="text-sm text-muted">Posts analyzed</span>
+                    <span style={{ fontWeight: 600 }}>{intelligence.content_fingerprint.post_count}</span>
+                  </div>
+                  <div className="flex-between mb-1">
+                    <span className="text-sm text-muted">Vocabulary size</span>
+                    <span style={{ fontWeight: 600 }}>{intelligence.content_fingerprint.vocab_size}</span>
+                  </div>
+                  <div className="flex-between mb-1">
+                    <span className="text-sm text-muted">Vocabulary richness</span>
+                    <span style={{ fontWeight: 600 }}>{intelligence.content_fingerprint.vocab_richness}</span>
+                  </div>
+                  {intelligence.content_fingerprint.top_words && intelligence.content_fingerprint.top_words.length > 0 && (
+                    <div style={{ marginTop: '0.75rem' }}>
+                      <div className="text-sm text-muted mb-1">Top words</div>
+                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+                        {intelligence.content_fingerprint.top_words.slice(0, 15).map(w => (
+                          <span key={w} className="badge badge-gray">{w}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {intelligence.community_id && (
+                <div className="card">
+                  <div className="flex-between">
+                    <span className="text-sm text-muted">Community membership</span>
+                    <Link to="/communities" className="text-sm">View communities &rarr;</Link>
+                  </div>
+                </div>
+              )}
+
+              <div className="card">
+                <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Same-Person Candidates</div>
+                {intelligence.same_person_candidates.length === 0 ? (
+                  <div className="text-sm text-muted">None detected</div>
+                ) : (
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Entity</th>
+                        <th>Probability</th>
+                        <th>Cross-platform</th>
+                        <th>Contributing Signals</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {intelligence.same_person_candidates.map(c => (
+                        <tr key={c.entity_id}>
+                          <td>
+                            <Link to={`/entities/${c.entity_id}`}>
+                              {c.canonical_name || c.entity_id.slice(0, 8)}
+                            </Link>
+                          </td>
+                          <td>
+                            <div className="flex gap-1" style={{ alignItems: 'center' }}>
+                              <ConfidenceBar score={c.score ?? 0} />
+                              <span className="text-sm text-muted">{Math.round((c.score ?? 0) * 100)}%</span>
+                            </div>
+                          </td>
+                          <td>
+                            <span className={`badge ${c.cross_platform ? 'badge-blue' : 'badge-gray'}`}>
+                              {c.cross_platform ? 'yes' : 'no'}
+                            </span>
+                          </td>
+                          <td className="text-sm text-muted">
+                            {c.contributing_signals.map(s => `${s.type} (${s.confidence})`).join(', ')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {intelligence.timeline_summary && (
+                <div className="card">
+                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Timeline Summary</div>
+                  <div className="flex-between mb-1">
+                    <span className="text-sm text-muted">First seen</span>
+                    <span className="text-sm">
+                      {intelligence.timeline_summary.first_seen ? formatDate(intelligence.timeline_summary.first_seen) : '-'}
+                    </span>
+                  </div>
+                  <div className="flex-between mb-1">
+                    <span className="text-sm text-muted">Last seen</span>
+                    <span className="text-sm">
+                      {intelligence.timeline_summary.last_seen ? formatDate(intelligence.timeline_summary.last_seen) : '-'}
+                    </span>
+                  </div>
+                  <div style={{ marginTop: '0.75rem' }}>
+                    <div className="text-sm text-muted mb-1">Events by source</div>
+                    <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+                      {Object.entries(intelligence.timeline_summary.event_count_by_source).map(([source, count]) => (
+                        <span key={source} className="badge badge-blue">{source}: {count}</span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </>
       )}
