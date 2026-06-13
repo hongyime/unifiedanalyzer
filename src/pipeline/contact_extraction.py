@@ -346,9 +346,13 @@ async def extract_contacts() -> dict:
         shared_website_count += 1
 
     # --- persist: delete-then-executemany (same pattern as other signal types) ---
+    # source_table IS NULL scopes this delete to contact_extraction's own
+    # rows — media_analysis.py / media_analysis_tier1.py emit the same
+    # signal_types with source_table='media_items' and manage their own
+    # scoped deletes (see media_common.emit_media_contact_signals).
     async with analyzer.acquire() as conn:
         await conn.execute(
-            "DELETE FROM identity_signals WHERE signal_type = ANY($1::text[])",
+            "DELETE FROM identity_signals WHERE signal_type = ANY($1::text[]) AND source_table IS NULL",
             ["email_match", "cross_platform_link", "phone_match", "shared_website"],
         )
         if new_signals:

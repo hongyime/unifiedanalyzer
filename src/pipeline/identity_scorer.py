@@ -37,6 +37,9 @@ _TYPE_WEIGHT = {
     "shared_website": 0.35,
     "shared_route_origin": 0.40,
     "group_cooccurrence": 0.20,
+    "media_gps_colocation": 0.40,
+    "media_perceptual_match": 0.35,
+    "media_face_match": 0.50,
 }
 
 _MIN_SCORE = 0.10

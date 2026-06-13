@@ -16,6 +16,17 @@ from src.pipeline.content_fingerprint import fingerprint_content
 from src.pipeline.temporal_correlation import correlate_activity
 from src.pipeline.contact_extraction import extract_contacts
 from src.pipeline.route_similarity import analyze_route_similarity
+from src.pipeline.media_analysis import (
+    MEDIA_EXIF_BATCH_SIZE,
+    MEDIA_PDF_IMAGE_BATCH_SIZE,
+    MEDIA_PDF_TEXT_BATCH_SIZE,
+    MEDIA_PHASH_BATCH_SIZE,
+    analyze_media_exif,
+    analyze_media_pdf_text,
+    analyze_media_phash,
+    extract_pdf_images,
+)
+from src.pipeline.media_analysis_tier1 import analyze_media_faces, analyze_media_ocr, extract_video_frames
 from src.pipeline.identity_scorer import compute_identity_scores
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
@@ -173,6 +184,44 @@ async def run_incremental() -> dict:
         except Exception:
             logger.exception("Route similarity analysis failed (non-fatal)")
 
+        # Phase 6: media content analysis (docs/media_analysis_plan.md).
+        # Order matters — 6C.2/6H produce derived pdf_image/video_frame rows
+        # that 6B/6D/6F also consume via fetch_unprocessed_derived().
+        try:
+            await analyze_media_pdf_text(limit=MEDIA_PDF_TEXT_BATCH_SIZE)
+        except Exception:
+            logger.exception("Media PDF text analysis failed (non-fatal)")
+
+        try:
+            await extract_pdf_images(limit=MEDIA_PDF_IMAGE_BATCH_SIZE)
+        except Exception:
+            logger.exception("Media PDF image extraction failed (non-fatal)")
+
+        try:
+            await extract_video_frames()
+        except Exception:
+            logger.exception("Media video frame extraction failed (non-fatal)")
+
+        try:
+            await analyze_media_exif(limit=MEDIA_EXIF_BATCH_SIZE)
+        except Exception:
+            logger.exception("Media EXIF GPS analysis failed (non-fatal)")
+
+        try:
+            await analyze_media_phash(limit=MEDIA_PHASH_BATCH_SIZE)
+        except Exception:
+            logger.exception("Media perceptual hash analysis failed (non-fatal)")
+
+        try:
+            await analyze_media_ocr()
+        except Exception:
+            logger.exception("Media OCR analysis failed (non-fatal)")
+
+        try:
+            await analyze_media_faces()
+        except Exception:
+            logger.exception("Media face analysis failed (non-fatal)")
+
         try:
             await compute_identity_scores()
         except Exception:
@@ -208,7 +257,7 @@ async def run_full_resolution() -> dict:
         # Preserve bio_mention signals — they are rebuilt by detect_bio_mentions() below
         pool = get_analyzer_pool()
         async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM identity_signals WHERE signal_type NOT IN ('bio_mention', 'content_similarity', 'temporal_copost', 'group_cooccurrence', 'email_match', 'cross_platform_link', 'phone_match', 'shared_website', 'shared_route_origin')")
+            await conn.execute("DELETE FROM identity_signals WHERE signal_type NOT IN ('bio_mention', 'content_similarity', 'temporal_copost', 'group_cooccurrence', 'email_match', 'cross_platform_link', 'phone_match', 'shared_website', 'shared_route_origin', 'media_gps_colocation', 'media_perceptual_match', 'media_face_match')")
             await conn.execute("DELETE FROM entity_platform_links")
             await conn.execute("DELETE FROM entities")
 
@@ -279,6 +328,44 @@ async def run_full_resolution() -> dict:
             await analyze_route_similarity()
         except Exception:
             logger.exception("Route similarity analysis failed (non-fatal)")
+
+        # Phase 6: media content analysis (docs/media_analysis_plan.md).
+        # Order matters — 6C.2/6H produce derived pdf_image/video_frame rows
+        # that 6B/6D/6F also consume via fetch_unprocessed_derived().
+        try:
+            await analyze_media_pdf_text(limit=MEDIA_PDF_TEXT_BATCH_SIZE)
+        except Exception:
+            logger.exception("Media PDF text analysis failed (non-fatal)")
+
+        try:
+            await extract_pdf_images(limit=MEDIA_PDF_IMAGE_BATCH_SIZE)
+        except Exception:
+            logger.exception("Media PDF image extraction failed (non-fatal)")
+
+        try:
+            await extract_video_frames()
+        except Exception:
+            logger.exception("Media video frame extraction failed (non-fatal)")
+
+        try:
+            await analyze_media_exif(limit=MEDIA_EXIF_BATCH_SIZE)
+        except Exception:
+            logger.exception("Media EXIF GPS analysis failed (non-fatal)")
+
+        try:
+            await analyze_media_phash(limit=MEDIA_PHASH_BATCH_SIZE)
+        except Exception:
+            logger.exception("Media perceptual hash analysis failed (non-fatal)")
+
+        try:
+            await analyze_media_ocr()
+        except Exception:
+            logger.exception("Media OCR analysis failed (non-fatal)")
+
+        try:
+            await analyze_media_faces()
+        except Exception:
+            logger.exception("Media face analysis failed (non-fatal)")
 
         try:
             await compute_identity_scores()
