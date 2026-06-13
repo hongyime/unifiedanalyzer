@@ -197,7 +197,7 @@ async def run_full_resolution() -> dict:
         # Preserve bio_mention signals — they are rebuilt by detect_bio_mentions() below
         pool = get_analyzer_pool()
         async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM identity_signals WHERE signal_type NOT IN ('bio_mention', 'content_similarity', 'temporal_copost', 'group_cooccurrence', 'email_match', 'cross_platform_link')")
+            await conn.execute("DELETE FROM identity_signals WHERE signal_type NOT IN ('bio_mention', 'content_similarity', 'temporal_copost', 'group_cooccurrence', 'email_match', 'cross_platform_link', 'phone_match', 'shared_website')")
             await conn.execute("DELETE FROM entity_platform_links")
             await conn.execute("DELETE FROM entities")
 

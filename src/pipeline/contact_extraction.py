@@ -1,9 +1,9 @@
 """
-Phase 5E: Contact/link extraction — high-confidence cross-platform
-identity signals derived from emails and platform-profile URLs found
+Phase 5E/5F: Contact/link extraction — high-confidence cross-platform
+identity signals derived from emails, phone numbers, and links found
 in bios and post/video/message text.
 
-Two new signal types (fed into identity_scorer.compute_identity_scores):
+New signal types (fed into identity_scorer.compute_identity_scores):
 
   - email_match: two different entities' bios/content reference the
     same email address. Near-certain — personal emails are rarely
@@ -18,12 +18,22 @@ Two new signal types (fed into identity_scorer.compute_identity_scores):
     a bare @handle mention (bio_mention), since it's an explicit link
     rather than a name-drop.
 
+  - phone_match: a bio/content contains a phone number that exactly
+    matches another entity's WhatsApp phone JID. Near-certain, same
+    tier as email_match — personal phone numbers are rarely shared.
+
+  - shared_website: two different entities' bios/content link to the
+    same non-platform personal website/domain (link aggregators like
+    linktr.ee and common platform/email domains are excluded). Weaker
+    than email/phone — a shared site can indicate a brand/team rather
+    than the same person, so this is weighted lower.
+
 Scans the same bio sources as bio_mention.py plus the same content
 sources as content_fingerprint.py (post descriptions/captions/messages),
 since contact info often appears in post text rather than the profile
 bio itself (e.g. a YouTube video description with a contact email).
 
-target_record_id convention: both new types store the *other entity's
+target_record_id convention: all new types store the *other entity's
 UUID as text* directly (same convention as content_similarity /
 temporal_copost / group_cooccurrence) — no extra resolution needed in
 identity_scorer.
@@ -66,6 +76,37 @@ _RESERVED_PATH_SEGMENTS = frozenset({
     "playlist", "hashtag", "tag", "channel", "video", "videos", "results",
     "search", "orgs", "marketplace", "sponsors", "settings", "notifications",
     "feed", "share", "embed", "live", "about",
+})
+
+# Candidate phone numbers: optional + prefix, digit, then 7-16 digit/
+# separator chars, ending in a digit. Exact-match against WhatsApp phone
+# JIDs after stripping separators provides the precision (a coincidental
+# 9-15 digit collision with a real phone number is effectively impossible).
+PHONE_CANDIDATE_RE = re.compile(r"[+]?[\d][\d\s\-().]{7,16}\d")
+
+# Personal-website links: require an explicit scheme or "www." prefix so
+# we don't match incidental "word.word" patterns in prose.
+WEBSITE_RE = re.compile(
+    r"(?:https?://)?www\.([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z]{2,24})+)"
+    r"|https?://([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z]{2,24})+)",
+    re.IGNORECASE,
+)
+
+# Domains that are platforms, link aggregators, email providers, or other
+# infrastructure shared by unrelated people — not evidence of identity.
+_EXCLUDED_WEBSITE_DOMAINS = frozenset({
+    "instagram.com", "tiktok.com", "youtube.com", "youtu.be", "t.me",
+    "telegram.me", "telegram.org", "github.com", "twitter.com", "x.com",
+    "facebook.com", "fb.com", "fb.watch", "linkedin.com", "lemon8-app.com",
+    "whatsapp.com", "wa.me", "snapchat.com", "pinterest.com", "reddit.com",
+    "linktr.ee", "linktree.com", "beacons.ai", "bio.link", "linkin.bio",
+    "campsite.bio", "msha.ke", "bio.site", "carrd.co", "lnk.bio", "tap.bio",
+    "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com",
+    "live.com", "googlemail.com", "google.com", "apple.com", "spotify.com",
+    "amazon.com", "amzn.to", "bit.ly", "tinyurl.com", "shopify.com",
+    "discord.gg", "discord.com", "patreon.com", "onlyfans.com",
+    "venmo.com", "paypal.com", "paypal.me", "cash.app", "apps.apple.com",
+    "play.google.com", "forms.gle", "docs.google.com", "drive.google.com",
 })
 
 # Content/post sources mirroring content_fingerprint.py's coverage
@@ -122,6 +163,33 @@ def _extract_platform_links(text: str) -> list[tuple[str, str]]:
     return results
 
 
+def _extract_phone_numbers(text: str) -> list[str]:
+    """Return normalized (digits-only) phone number candidates from text.
+
+    Also yields the variant with a leading "00" international-dialing
+    prefix stripped, so e.g. "0044 7723 442078" can match WhatsApp's
+    "447723442078" JID form.
+    """
+    results = []
+    for m in PHONE_CANDIDATE_RE.finditer(text):
+        digits = re.sub(r"\D", "", m.group(0))
+        if 9 <= len(digits) <= 15:
+            results.append(digits)
+        if digits.startswith("00") and 9 <= len(digits) - 2 <= 15:
+            results.append(digits[2:])
+    return results
+
+
+def _extract_website_domains(text: str) -> list[str]:
+    """Return lowercase personal-website domains (excluding platforms/aggregators)."""
+    results = []
+    for m in WEBSITE_RE.finditer(text):
+        domain = (m.group(1) or m.group(2) or "").lower()
+        if domain and domain not in _EXCLUDED_WEBSITE_DOMAINS:
+            results.append(domain)
+    return results
+
+
 async def extract_contacts() -> dict:
     collector = get_collector_pool()
     analyzer = get_analyzer_pool()
@@ -143,8 +211,21 @@ async def extract_contacts() -> dict:
             if norm:
                 platform_username_to_entity[(l["source"], norm)] = l["entity_id"]
 
+    # phone digits (from WhatsApp JID "<digits>@s.whatsapp.net") -> entity_id
+    phone_to_entity: dict[str, str] = {}
+    for l in links:
+        if l["source"] == "whatsapp" and l["platform_id"] and l["platform_id"].endswith("@s.whatsapp.net"):
+            digits = l["platform_id"].split("@", 1)[0]
+            if digits.isdigit() and 9 <= len(digits) <= 15:
+                phone_to_entity[digits] = l["entity_id"]
+
     # --- collect (source_platform, text) per entity from bios + content ---
     entity_texts: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    # Bio-only text, kept separate for shared_website: post/video descriptions
+    # are full of sponsor/affiliate/credit links shared across unrelated
+    # creators (royalty-free music sites, gear affiliates, etc.), whereas a
+    # profile bio linking to a personal site is a deliberate self-disclosure.
+    entity_bio_texts: dict[str, list[str]] = defaultdict(list)
 
     async with collector.acquire() as conn:
         # Bios (profile-level)
@@ -155,6 +236,7 @@ async def extract_contacts() -> dict:
                     eid = pid_to_entity.get((source, str(r["pid"])))
                     if eid and r["bio"]:
                         entity_texts[eid].append((source, r["bio"]))
+                        entity_bio_texts[eid].append(r["bio"])
             except Exception:
                 logger.debug("Contact extraction: skipping bio source %s", source, exc_info=True)
 
@@ -169,39 +251,39 @@ async def extract_contacts() -> dict:
             except Exception:
                 logger.debug("Contact extraction: skipping content source %s", source, exc_info=True)
 
-        # WhatsApp messages (resolve @lid via lid_map, mirrors content_fingerprint.py)
-        try:
-            lid_rows = await conn.fetch("SELECT lid, phone_jid FROM whatsapp_lid_map")
-            lid_map = {r["lid"]: r["phone_jid"] for r in lid_rows}
-            rows = await conn.fetch("""
-                SELECT u.platform_user_id AS raw_pid, m.text AS text
-                FROM whatsapp_messages m
-                JOIN whatsapp_users u ON m.sender_id = u.id
-                WHERE m.text IS NOT NULL AND length(m.text) > 5
-                  AND m.from_me = false
-            """)
-            for r in rows:
-                raw_pid = r["raw_pid"] or ""
-                pid = lid_map.get(raw_pid, raw_pid) if "@lid" in raw_pid else raw_pid
-                eid = pid_to_entity.get(("whatsapp", pid))
-                if eid and r["text"]:
-                    entity_texts[eid].append(("whatsapp", r["text"]))
-        except Exception:
-            logger.debug("Contact extraction: skipping WhatsApp content", exc_info=True)
+        # Note: WhatsApp chat messages are deliberately NOT scanned here.
+        # Unlike bios/posts (content an entity publishes about themselves),
+        # WhatsApp messages are private correspondence that routinely
+        # contains OTHER people's contact info (shared contacts, forwarded
+        # messages) — too noisy for "near-certain self-disclosure" signals.
 
-    # --- extract emails and cross-platform links per entity ---
+    # --- extract emails, phone numbers, links, and websites per entity ---
     email_to_entities: dict[str, set[str]] = defaultdict(set)
+    domain_to_entities: dict[str, set[str]] = defaultdict(set)
     # eid -> set of (source_platform_of_text, target_platform, normalized_handle, target_eid)
     entity_links_found: dict[str, set[tuple[str, str, str, str]]] = defaultdict(set)
+    # eid -> set of (source_platform_of_text, phone_digits, target_eid)
+    entity_phones_found: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
 
     for eid, texts in entity_texts.items():
         for source_platform, text in texts:
+            if "unifiedcollector" in text.lower():
+                continue  # collector setup/test artifact, not user content
             for email in _extract_emails(text):
                 email_to_entities[email].add(eid)
             for target_platform, handle in _extract_platform_links(text):
                 target_eid = platform_username_to_entity.get((target_platform, handle))
                 if target_eid and target_eid != eid:
                     entity_links_found[eid].add((source_platform, target_platform, handle, target_eid))
+            for phone in _extract_phone_numbers(text):
+                target_eid = phone_to_entity.get(phone)
+                if target_eid and target_eid != eid:
+                    entity_phones_found[eid].add((source_platform, phone, target_eid))
+
+    for eid, bios in entity_bio_texts.items():
+        for bio in bios:
+            for domain in _extract_website_domains(bio):
+                domain_to_entities[domain].add(eid)
 
     # --- merge in GitHub commit emails (resolved to entity_ids) ---
     commit_emails = await load_commit_emails()
@@ -242,11 +324,32 @@ async def extract_contacts() -> dict:
             ))
             link_count += 1
 
+    # --- build phone_match signals: bio/content phone number matches another
+    # entity's WhatsApp JID exactly ---
+    phone_match_count = 0
+    for eid, found in entity_phones_found.items():
+        for source_platform, phone, target_eid in found:
+            new_signals.append((
+                eid, "phone_match", source_platform, None, None, None,
+                "whatsapp", target_eid, f"phone:{phone}", 0.90,
+            ))
+            phone_match_count += 1
+
+    # --- build shared_website signals: exactly 2 distinct entities link to
+    # the same non-platform personal domain ---
+    shared_website_count = 0
+    for domain, eids in domain_to_entities.items():
+        if len(eids) != 2:
+            continue
+        a, b = sorted(eids)
+        new_signals.append((a, "shared_website", "multi", None, None, None, "multi", b, domain, 0.65))
+        shared_website_count += 1
+
     # --- persist: delete-then-executemany (same pattern as other signal types) ---
     async with analyzer.acquire() as conn:
         await conn.execute(
             "DELETE FROM identity_signals WHERE signal_type = ANY($1::text[])",
-            ["email_match", "cross_platform_link"],
+            ["email_match", "cross_platform_link", "phone_match", "shared_website"],
         )
         if new_signals:
             await conn.executemany("""
@@ -260,6 +363,8 @@ async def extract_contacts() -> dict:
         "entities_scanned": len(entity_texts),
         "email_match_signals": email_match_pairs,
         "cross_platform_link_signals": link_count,
+        "phone_match_signals": phone_match_count,
+        "shared_website_signals": shared_website_count,
     }
     logger.info("Contact extraction: %s", stats)
     return stats

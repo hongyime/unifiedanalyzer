@@ -14,7 +14,7 @@ async def main():
 
     analyzer = get_analyzer_pool()
     async with analyzer.acquire() as conn:
-        for sig_type in ("email_match", "cross_platform_link"):
+        for sig_type in ("email_match", "cross_platform_link", "phone_match", "shared_website"):
             rows = await conn.fetch("""
                 SELECT s.entity_id::text, e.canonical_name AS name_a,
                        s.target_record_id, t.canonical_name AS name_b,
