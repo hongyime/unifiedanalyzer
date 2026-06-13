@@ -1,10 +1,10 @@
 import os
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.db.connection import check_db_connectivity, get_analyzer_pool, get_collector_pool
-from src.pipeline.incremental_runner import run_incremental, run_full_resolution
+from src.pipeline.incremental_runner import run_incremental, run_full_resolution, get_last_run_time
 from src.notifications.alerts import (
     notify_collector_health, notify_daily_digest, notify_merge_candidate,
 )
@@ -137,13 +137,12 @@ async def start_scheduler() -> None:
     _running = True
 
     interval = int(os.getenv("INCREMENTAL_RUN_INTERVAL_MINUTES", "60")) * 60
-    full_hour = int(os.getenv("FULL_RESOLUTION_HOUR", "3"))
+    full_interval = timedelta(hours=int(os.getenv("FULL_RESOLUTION_INTERVAL_HOURS", "12")))
     digest_hour = int(os.getenv("DAILY_DIGEST_HOUR", "8"))
 
-    logger.info("Scheduler started: incremental every %d min, full resolution at %02d:00 UTC, digest at %02d:00 UTC",
-                interval // 60, full_hour, digest_hour)
+    logger.info("Scheduler started: incremental every %d min, full resolution every %s, digest at %02d:00 UTC",
+                interval // 60, full_interval, digest_hour)
 
-    last_full_date: str | None = None
     last_digest_date: str | None = None
     last_health_check: datetime | None = None
     was_offline = False
@@ -180,11 +179,11 @@ async def start_scheduler() -> None:
             except Exception:
                 logger.exception("Collector health check failed")
 
-        if now.hour == full_hour and last_full_date != now.strftime("%Y-%m-%d"):
-            logger.info("Starting nightly full resolution")
+        last_full_run = await get_last_run_time("full_resolution")
+        if last_full_run is None or (now - last_full_run) >= full_interval:
+            logger.info("Starting full resolution (last run: %s)", last_full_run)
             try:
                 await run_full_resolution()
-                last_full_date = now.strftime("%Y-%m-%d")
             except Exception:
                 logger.exception("Full resolution failed")
         else:

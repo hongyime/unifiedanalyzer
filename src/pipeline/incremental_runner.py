@@ -41,7 +41,7 @@ async def _is_run_locked() -> bool:
     return row is not None
 
 
-async def _get_last_run_time(run_type: str) -> datetime | None:
+async def get_last_run_time(run_type: str) -> datetime | None:
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchval("""
@@ -104,7 +104,7 @@ async def run_incremental() -> dict:
     stats = {"entities": 0, "events": 0, "alerts": 0, "signals": 0}
 
     try:
-        since = await _get_last_run_time("incremental")
+        since = await get_last_run_time("incremental")
 
         resolver_stats = await resolve_entities()
         stats["entities"] = resolver_stats.get("entities", 0)
