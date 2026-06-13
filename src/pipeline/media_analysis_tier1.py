@@ -1,0 +1,431 @@
+"""
+Phase 6, Tier 1 — media content analysis requiring OCR / ML models. Lower
+priority than Tier 0 (src/pipeline/media_analysis.py) since these are slower
+per-item and/or depend on optional binaries (tesseract, ffmpeg) or the
+downloaded ONNX face models.
+
+  6D  analyze_media_ocr()     — Tesseract OCR -> email_match/phone_match/
+                                  cross_platform_link/shared_website reuse
+  6F  analyze_media_faces()   — YuNet detection + SFace embeddings ->
+                                  media_face_match
+  6H  extract_video_frames()  — ffmpeg sparse keyframes (personal-comms
+                                  video only), feeds 6B/6D/6F
+
+See docs/media_analysis_plan.md for the full spec.
+"""
+import asyncio
+import logging
+import os
+import shutil
+import subprocess
+from collections import defaultdict
+
+import cv2
+import numpy as np
+import pytesseract
+from PIL import Image
+
+from src.db.connection import get_analyzer_pool
+from src.pipeline.media_common import (
+    MODEL_DIR,
+    VIDEO_FRAME_DIR,
+    _MEDIA_CONFINEMENT_ROOT,
+    build_contact_lookups,
+    build_entity_lookup,
+    emit_media_contact_signals,
+    fetch_media_item_entities,
+    fetch_unprocessed_derived,
+    fetch_unprocessed_media,
+    lookup_entity,
+    resolve_media_path,
+    upsert_media_analysis,
+)
+
+logger = logging.getLogger(__name__)
+
+MEDIA_OCR_ENABLED = os.getenv("MEDIA_OCR_ENABLED", "true").lower() == "true"
+MEDIA_OCR_BATCH_SIZE = int(os.getenv("MEDIA_OCR_BATCH_SIZE", "200"))
+MEDIA_FACE_BATCH_SIZE = int(os.getenv("MEDIA_FACE_BATCH_SIZE", "200"))
+MEDIA_VIDEO_FRAME_BATCH_SIZE = int(os.getenv("MEDIA_VIDEO_FRAME_BATCH_SIZE", "5"))
+
+
+def _drive_available() -> bool:
+    return _MEDIA_CONFINEMENT_ROOT.is_dir()
+
+
+# ── 6D: OCR text extraction ──
+
+# Priority order per docs/media_analysis_plan.md: high text-density sources
+# first (search/website screenshots, telegram photos), then PDF-embedded
+# images / video frames from 6C.2 / 6H, then everything else (lemon8 last —
+# largest volume, lowest signal density). Each list below has no overlapping
+# (source, content_type) pairs — fetch_unprocessed_media's done-id check is
+# only correct within a single call when pairs don't overlap.
+_OCR_PRIORITY_1 = [("search", "image"), ("website", "image"), ("telegram", "photo")]
+_OCR_PRIORITY_2 = [
+    (None, "profile_photo"), ("beeper", "image"), ("whatsapp", "photo"),
+    ("tiktok", "post"), ("github", "image"), ("instagram", "image"), ("lemon8", "image"),
+]
+_OCR_MAX_DIM = 2000
+_MAX_OCR_TEXT_LEN = 50_000
+
+
+def _ocr_image(path) -> str:
+    with Image.open(path) as img:
+        img = img.convert("RGB")
+        if max(img.size) > _OCR_MAX_DIM:
+            ratio = _OCR_MAX_DIM / max(img.size)
+            size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
+            img = img.resize(size, Image.Resampling.LANCZOS)
+        return pytesseract.image_to_string(img)
+
+
+async def analyze_media_ocr(limit: int | None = None) -> dict:
+    stats: dict = {"processed": 0}
+    if not MEDIA_OCR_ENABLED:
+        return {**stats, "skipped": "ocr_disabled"}
+    if shutil.which("tesseract") is None:
+        logger.warning("6D OCR: tesseract binary not found on PATH, skipping")
+        return {**stats, "skipped": "tesseract_unavailable"}
+    if not _drive_available():
+        logger.warning("6D OCR: media drive unavailable, skipping")
+        return {**stats, "skipped": "drive_unavailable"}
+
+    batch_limit = limit if limit is not None else MEDIA_OCR_BATCH_SIZE
+
+    items = await fetch_unprocessed_media(_OCR_PRIORITY_1, "ocr_text", limit=batch_limit)
+    if len(items) < batch_limit:
+        items += await fetch_unprocessed_derived(
+            ["pdf_image", "video_frame"], "ocr_text", limit=batch_limit - len(items)
+        )
+    if len(items) < batch_limit:
+        items += await fetch_unprocessed_media(_OCR_PRIORITY_2, "ocr_text", limit=batch_limit - len(items))
+
+    entity_lookup = await build_entity_lookup()
+    entity_texts: dict[str, list[tuple[str, str]]] = defaultdict(list)
+
+    derived_parent_ids = {item["parent_media_item_id"] for item in items if item.get("parent_media_item_id")}
+    item_entities = await fetch_media_item_entities(list(derived_parent_ids)) if derived_parent_ids else {}
+
+    rows = []
+    for item in items:
+        path = resolve_media_path(item["file_path"])
+        if path is None:
+            continue
+        text = ""
+        try:
+            text = _ocr_image(path)[:_MAX_OCR_TEXT_LEN]
+        except Exception:
+            logger.debug("OCR failed for %s", path, exc_info=True)
+
+        rows.append({
+            "media_item_id": item["id"], "parent_media_item_id": item.get("parent_media_item_id"),
+            "source": item["source"], "content_type": item["content_type"],
+            "analysis_type": "ocr_text", "extracted_text": text or None,
+            "model_version": "tesseract-v1",
+        })
+        if not text:
+            continue
+
+        parent_id = item.get("parent_media_item_id")
+        eid = None
+        if parent_id:
+            src = item_entities.get(parent_id)
+            if src:
+                eid = lookup_entity(entity_lookup, src[0], src[1])
+        elif item.get("entity_id"):
+            eid = lookup_entity(entity_lookup, item["source"], item["entity_id"])
+        if eid:
+            entity_texts[eid].append((item["source"], text))
+
+    await upsert_media_analysis(rows)
+    stats["processed"] = len(rows)
+
+    lookups = await build_contact_lookups()
+    stats.update(await emit_media_contact_signals(entity_texts, lookups, "ocr_text"))
+    logger.info("6D OCR: %s", stats)
+    return stats
+
+
+# ── 6F: face detection + embeddings ──
+
+_FACE_DETECTOR_MODEL = MODEL_DIR / "face_detection_yunet_2023mar.onnx"
+_FACE_RECOGNIZER_MODEL = MODEL_DIR / "face_recognition_sface_2021dec.onnx"
+
+# Profile photos first (github/lemon8/telegram/instagram), then personal-comms
+# photos (telegram/whatsapp/beeper), then bulk image sources last.
+_FACE_CONTENT_TYPES_PRIORITY = [
+    (None, "profile_photo"),
+    ("telegram", "photo"), ("whatsapp", "photo"), ("beeper", "image"),
+    ("lemon8", "image"), ("search", "image"), ("website", "image"),
+]
+_FACE_MAX_DIM = 1600
+# Cosine similarity between SFace embeddings. OpenCV's model docs cite ~0.363
+# as the threshold at FAR=1e-3; pick a bit stricter to stay precision-first.
+_FACE_MATCH_THRESHOLD = 0.40
+
+
+def _face_models_available() -> bool:
+    return _FACE_DETECTOR_MODEL.is_file() and _FACE_RECOGNIZER_MODEL.is_file()
+
+
+def _load_image_for_face(path):
+    img = cv2.imread(str(path))
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    if max(h, w) > _FACE_MAX_DIM:
+        scale = _FACE_MAX_DIM / max(h, w)
+        img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))))
+    return img
+
+
+def _detect_and_embed(img, detector, recognizer):
+    h, w = img.shape[:2]
+    detector.setInputSize((w, h))
+    _, faces = detector.detect(img)
+    if faces is None:
+        return [], -1, None
+
+    faces_info = []
+    best_idx, best_area = -1, 0.0
+    for i, f in enumerate(faces):
+        x, y, fw, fh, score = float(f[0]), float(f[1]), float(f[2]), float(f[3]), float(f[14])
+        faces_info.append({"bbox": [x, y, fw, fh], "score": score})
+        area = fw * fh
+        if area > best_area:
+            best_area, best_idx = area, i
+
+    embedding = None
+    if best_idx >= 0:
+        try:
+            aligned = recognizer.alignCrop(img, faces[best_idx])
+            feat = recognizer.feature(aligned)
+            embedding = feat.flatten().astype(float).tolist()
+        except Exception:
+            logger.debug("Face embedding failed", exc_info=True)
+    return faces_info, best_idx, embedding
+
+
+async def analyze_media_faces(limit: int | None = None) -> dict:
+    stats = {"processed": 0, "faces_detected": 0, "embeddings": 0, "media_face_match_signals": 0}
+    if not _drive_available():
+        logger.warning("6F face detection: media drive unavailable, skipping")
+        return {**stats, "skipped": "drive_unavailable"}
+    if not _face_models_available():
+        logger.warning("6F face detection: model files not found in %s, skipping", MODEL_DIR)
+        return {**stats, "skipped": "models_unavailable"}
+
+    batch_limit = limit if limit is not None else MEDIA_FACE_BATCH_SIZE
+    items = await fetch_unprocessed_media(_FACE_CONTENT_TYPES_PRIORITY, "face_detection", limit=batch_limit)
+    if len(items) < batch_limit:
+        items += await fetch_unprocessed_derived(
+            ["pdf_image", "video_frame"], "face_detection", limit=batch_limit - len(items)
+        )
+
+    detector = cv2.FaceDetectorYN_create(str(_FACE_DETECTOR_MODEL), "", (320, 320))
+    recognizer = cv2.FaceRecognizerSF_create(str(_FACE_RECOGNIZER_MODEL), "")
+
+    detection_rows, embedding_rows = [], []
+    for item in items:
+        path = resolve_media_path(item["file_path"])
+        if path is None:
+            continue
+        img = _load_image_for_face(path)
+        if img is None:
+            continue
+        try:
+            faces_info, best_idx, embedding = _detect_and_embed(img, detector, recognizer)
+        except Exception:
+            logger.debug("Face detection failed for %s", path, exc_info=True)
+            continue
+
+        detection_rows.append({
+            "media_item_id": item["id"], "parent_media_item_id": item.get("parent_media_item_id"),
+            "source": item["source"], "content_type": item["content_type"],
+            "analysis_type": "face_detection",
+            "result_json": {"face_count": len(faces_info), "faces": faces_info},
+            "model_version": "yunet-2023mar",
+        })
+        stats["faces_detected"] += len(faces_info)
+
+        if embedding is not None:
+            embedding_rows.append({
+                "media_item_id": item["id"], "parent_media_item_id": item.get("parent_media_item_id"),
+                "source": item["source"], "content_type": item["content_type"],
+                "analysis_type": "face_embedding",
+                "result_json": {
+                    "bbox": faces_info[best_idx]["bbox"], "face_index": best_idx,
+                    "face_count": len(faces_info),
+                },
+                "face_embedding": embedding,
+                "model_version": "sface-2021dec",
+            })
+            stats["embeddings"] += 1
+
+    await upsert_media_analysis(detection_rows)
+    await upsert_media_analysis(embedding_rows)
+    stats["processed"] = len(detection_rows)
+
+    stats["media_face_match_signals"] = await _build_face_match_signals()
+    logger.info("6F face detection: %s", stats)
+    return stats
+
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    va, vb = np.array(a), np.array(b)
+    denom = np.linalg.norm(va) * np.linalg.norm(vb)
+    return float(np.dot(va, vb) / denom) if denom else 0.0
+
+
+async def _build_face_match_signals() -> int:
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        emb_rows = await conn.fetch("""
+            SELECT media_item_id, parent_media_item_id, face_embedding
+            FROM media_analysis
+            WHERE analysis_type = 'face_embedding' AND face_embedding IS NOT NULL
+        """)
+
+    new_signals: list[tuple] = []
+    if emb_rows:
+        real_ids = list({r["parent_media_item_id"] or r["media_item_id"] for r in emb_rows})
+        item_entities = await fetch_media_item_entities(real_ids)
+        entity_lookup = await build_entity_lookup()
+
+        candidates = []  # (eid, source_platform, embedding, media_item_id)
+        for r in emb_rows:
+            real_id = r["parent_media_item_id"] or r["media_item_id"]
+            src = item_entities.get(real_id)
+            if not src:
+                continue
+            source, raw_eid = src
+            eid = lookup_entity(entity_lookup, source, raw_eid)
+            if not eid:
+                continue
+            candidates.append((eid, source, r["face_embedding"], r["media_item_id"]))
+
+        # Pairwise cosine similarity across different entities + platforms.
+        match_targets: dict[int, set[str]] = defaultdict(set)
+        pairwise: list[tuple] = []
+        for i in range(len(candidates)):
+            for j in range(i + 1, len(candidates)):
+                a_eid, a_src, a_emb, a_mid = candidates[i]
+                b_eid, b_src, b_emb, b_mid = candidates[j]
+                if a_eid == b_eid or a_src == b_src:
+                    continue
+                sim = _cosine_sim(a_emb, b_emb)
+                if sim < _FACE_MATCH_THRESHOLD:
+                    continue
+                match_targets[i].add(b_eid)
+                match_targets[j].add(a_eid)
+                pairwise.append((sim, i, j, a_mid, b_mid))
+
+        # Fan-out filter: drop matches where either face also resembles a
+        # THIRD distinct entity (ambiguous / common-looking face), then keep
+        # the best remaining match per entity pair.
+        pair_best: dict[frozenset, tuple] = {}
+        for sim, i, j, a_mid, b_mid in pairwise:
+            if len(match_targets[i]) > 1 or len(match_targets[j]) > 1:
+                continue
+            a_eid, b_eid = candidates[i][0], candidates[j][0]
+            pair_key = frozenset((a_eid, b_eid))
+            existing = pair_best.get(pair_key)
+            if existing is None or sim > existing[0]:
+                pair_best[pair_key] = (sim, a_eid, a_mid, b_eid, b_mid)
+
+        for sim, a_eid, a_mid, b_eid, b_mid in pair_best.values():
+            new_signals.append((
+                a_eid, "media_face_match", "multi", "media_items", "face_embedding", a_mid,
+                "multi", b_eid, f"sim:{sim:.3f}", round(min(sim, 0.99), 2),
+            ))
+
+    async with analyzer.acquire() as conn:
+        await conn.execute("DELETE FROM identity_signals WHERE signal_type = 'media_face_match'")
+        if new_signals:
+            await conn.executemany("""
+                INSERT INTO identity_signals
+                    (entity_id, signal_type, source_platform, source_table, source_column,
+                     source_record_id, target_platform, target_record_id, value, confidence)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """, new_signals)
+    return len(new_signals)
+
+
+# ── 6H: video frame extraction ──
+
+# Personal-comms video only — youtube/tiktok video is Tier 2 (out of scope).
+_VIDEO_CONTENT_TYPES = [("telegram", "video"), ("beeper", "video"), ("whatsapp", "video")]
+_VIDEO_FRAME_INTERVAL_SEC = 20
+_VIDEO_FRAME_MAX = 12
+
+
+def _ffmpeg_available() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+async def extract_video_frames(limit: int | None = None) -> dict:
+    stats = {"videos_processed": 0, "frames_extracted": 0}
+    if not _drive_available():
+        logger.warning("6H video frames: media drive unavailable, skipping")
+        return {**stats, "skipped": "drive_unavailable"}
+    if not _ffmpeg_available():
+        logger.warning("6H video frames: ffmpeg not found on PATH, skipping")
+        return {**stats, "skipped": "ffmpeg_unavailable"}
+
+    batch_limit = limit if limit is not None else MEDIA_VIDEO_FRAME_BATCH_SIZE
+    items = await fetch_unprocessed_media(_VIDEO_CONTENT_TYPES, "video_frames", limit=batch_limit)
+
+    marker_rows, frame_rows = [], []
+    for item in items:
+        path = resolve_media_path(item["file_path"])
+        if path is None:
+            continue
+
+        outdir = VIDEO_FRAME_DIR / item["id"]
+        outdir.mkdir(parents=True, exist_ok=True)
+        count = 0
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "ffmpeg", "-y", "-i", str(path),
+                    "-vf", f"fps=1/{_VIDEO_FRAME_INTERVAL_SEC}",
+                    "-frames:v", str(_VIDEO_FRAME_MAX), "-loglevel", "error",
+                    str(outdir / "frame_%03d.jpg"),
+                ],
+                capture_output=True, timeout=120,
+            )
+            if result.returncode == 0:
+                for frame_path in sorted(outdir.glob("frame_*.jpg")):
+                    idx = int(frame_path.stem.split("_")[1])
+                    sec = (idx - 1) * _VIDEO_FRAME_INTERVAL_SEC
+                    frame_rows.append({
+                        "media_item_id": f"{item['id']}:frame:{sec}",
+                        "parent_media_item_id": item["id"],
+                        "source": item["source"], "content_type": "image",
+                        "analysis_type": "video_frame",
+                        "result_json": {"derived_path": str(frame_path), "timestamp_sec": sec},
+                        "model_version": "ffmpeg-fps-v1",
+                    })
+                    count += 1
+            else:
+                logger.debug("ffmpeg failed for %s: %s", path, result.stderr.decode(errors="replace")[:500])
+        except Exception:
+            logger.debug("Frame extraction failed for %s", path, exc_info=True)
+
+        # Marker row on the video's own id — done-cursor for
+        # fetch_unprocessed_media. Per-frame rows above (analysis_type=
+        # 'video_frame') are what 6B/6D/6F pick up via fetch_unprocessed_derived.
+        marker_rows.append({
+            "media_item_id": item["id"], "source": item["source"],
+            "content_type": item["content_type"], "analysis_type": "video_frames",
+            "result_json": {"frame_count": count}, "model_version": "ffmpeg-fps-v1",
+        })
+        stats["frames_extracted"] += count
+
+    await upsert_media_analysis(frame_rows)
+    await upsert_media_analysis(marker_rows)
+    stats["videos_processed"] = len(marker_rows)
+    logger.info("6H video frames: %s", stats)
+    return stats
