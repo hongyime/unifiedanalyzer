@@ -38,6 +38,29 @@ STOPWORDS = frozenset({
     "im", "dont", "cant", "its", "ive", "id", "s", "t", "re", "ve", "ll",
 })
 
+# Words from "free music credit" disclaimers and generic vlog intro/outro/CTA
+# phrasing (e.g. "hey guys, back with another vlog, hope you enjoy, free
+# music from X, copyright disclaimer..."). Two unrelated creators who both
+# use royalty-free music and talk in the same vlog register can clear
+# _SIM_THRESHOLD on this vocabulary alone with zero personally-distinctive
+# overlap. Excluded ONLY from the similarity-comparison vocab in
+# _cosine_sim/_MIN_SHARED_VOCAB below — stored fingerprint stats
+# (vocab_size, vocab_richness, top_words) are computed from the full
+# vocab and are unaffected.
+_BOILERPLATE_WORDS = frozenset({
+    # music/copyright credit boilerplate
+    "music", "audio", "song", "songs", "track", "tracks", "copyright",
+    "disclaimer", "infringement", "intended", "belong", "rightful",
+    "owner", "owners", "credit", "credits", "artist", "feat", "ft",
+    "license", "licensed", "royalty", "free",
+    # vlog intro/outro/CTA boilerplate
+    "hey", "hi", "guys", "everyone", "everybody", "welcome", "back",
+    "another", "vlog", "video", "videos", "enjoy", "enjoyed", "hope",
+    "hoping", "today", "finally", "thanks", "thank", "watching",
+    "subscribe", "subscribed", "channel", "comment", "comments",
+    "follow", "instagram", "ig",
+})
+
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 MENTION_RE = re.compile(r"@\w+")
 HASHTAG_RE = re.compile(r"#\w+")
@@ -257,10 +280,14 @@ async def fingerprint_content() -> dict:
             # Skip pairs where either entity has low vocab diversity — template/boilerplate false positive risk
             if fingerprints[eid_a]["vocab_richness"] < _MIN_VOCAB_RICHNESS or fingerprints[eid_b]["vocab_richness"] < _MIN_VOCAB_RICHNESS:
                 continue
-            shared = set(vocab_a) & set(vocab_b)
+            # Comparison-only vocab: strip creator-boilerplate words so shared
+            # music-credit/vlog-CTA vocabulary doesn't drive similarity.
+            comp_a = {w: c for w, c in vocab_a.items() if w not in _BOILERPLATE_WORDS}
+            comp_b = {w: c for w, c in vocab_b.items() if w not in _BOILERPLATE_WORDS}
+            shared = set(comp_a) & set(comp_b)
             if len(shared) < _MIN_SHARED_VOCAB:
                 continue
-            sim = _cosine_sim(vocab_a, vocab_b)
+            sim = _cosine_sim(comp_a, comp_b)
             if sim >= _SIM_THRESHOLD:
                 new_signals.append((
                     eid_a,
