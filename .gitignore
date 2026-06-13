@@ -147,6 +147,11 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# Phase 6 media analysis: derived artifacts (extracted PDF images, video
+# frames) and downloaded ONNX face models — regenerable, not source.
+data/media_derived/
+data/
+
 # Environments
 .env
 .envrc

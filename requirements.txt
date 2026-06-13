@@ -3,3 +3,12 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-dotenv>=1.0.0
 rapidfuzz>=3.9.0
+
+# Phase 6: media content analysis (docs/media_analysis_plan.md)
+Pillow>=10.0.0
+pypdf>=4.0
+imagehash>=4.3.1
+PyMuPDF>=1.24
+pytesseract>=0.3.10
+opencv-python>=4.9
+onnxruntime>=1.17
