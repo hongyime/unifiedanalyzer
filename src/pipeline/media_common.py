@@ -200,6 +200,9 @@ async def fetch_unprocessed_derived(
     return out
 
 
+# Max rows per executemany inside upsert_media_analysis (see chunking note there).
+_UPSERT_CHUNK = 500
+
 _MEDIA_ANALYSIS_COLUMNS = [
     ("media_item_id", "text"),
     ("parent_media_item_id", "text"),
@@ -241,13 +244,27 @@ async def upsert_media_analysis(rows: list[dict]) -> int:
         row = []
         for c, _ in _MEDIA_ANALYSIS_COLUMNS:
             v = r.get(c)
-            if c == "result_json" and v is not None:
-                v = json.dumps(v)
+            # PostgreSQL text/jsonb cannot store NUL (0x00). Extracted PDF/OCR
+            # text routinely contains stray NUL bytes; left in, one bad row
+            # fails the whole executemany batch with CharacterNotInRepertoireError.
+            # Strip raw 0x00 from text, and the literal backslash-u0000 escape
+            # from the dumped JSON (jsonb rejects that escape even though it is
+            # valid JSON syntax).
+            if c == "extracted_text" and isinstance(v, str):
+                v = v.replace("\x00", "")
+            elif c == "result_json" and v is not None:
+                v = json.dumps(v).replace("\\u0000", "")
             row.append(v)
         values.append(tuple(row))
 
+    # Chunk the executemany. A single unbounded call (the limit=None backfill
+    # can hand us tens of thousands of rows, each with large extracted_text)
+    # would build one enormous bind-execute message; chunking bounds memory and
+    # per-statement blast radius. asyncpg autocommits each executemany, so a
+    # crash mid-loop still persists completed chunks (resumable backfill).
     async with analyzer.acquire() as conn:
-        await conn.executemany(query, values)
+        for i in range(0, len(values), _UPSERT_CHUNK):
+            await conn.executemany(query, values[i:i + _UPSERT_CHUNK])
     return len(values)
 
 

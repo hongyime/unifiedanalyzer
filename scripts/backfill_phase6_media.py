@@ -54,34 +54,56 @@ OCR_BACKFILL_LIMIT = int(os.getenv("MEDIA_OCR_BACKFILL_LIMIT", "3000"))
 FACE_BACKFILL_LIMIT = int(os.getenv("MEDIA_FACE_BACKFILL_LIMIT", "3000"))
 
 
-async def _run(label: str, coro):
-    t0 = time.monotonic()
-    print(f"\n=== {label} START ===", flush=True)
-    try:
-        stats = await coro
-        dt = time.monotonic() - t0
-        print(f"=== {label} DONE in {dt:.0f}s -> {stats} ===", flush=True)
-    except Exception as e:  # noqa: BLE001 — one stage failing must not abort the rest
-        dt = time.monotonic() - t0
-        print(f"=== {label} FAILED after {dt:.0f}s: {e!r} ===", flush=True)
-        import traceback
+async def _drain(label: str, fn, batch: int, progress_key: str, max_total: int | None = None):
+    """Call fn(limit=batch) in a loop until it stops making progress.
 
-        traceback.print_exc()
+    Each call persists its own chunked upserts (see upsert_media_analysis), so a
+    crash or restart resumes from where the DB left off — no work is redone and
+    nothing is lost all-or-nothing. progress_key is the stats field that counts
+    items handled this call; 0 means the backlog for this stage is drained.
+    max_total caps a single launch for the expensive Tier 1 stages (the rest is
+    picked up by the scheduled incremental cycles or a re-launch of this script).
+    """
+    t0 = time.monotonic()
+    total = 0
+    rounds = 0
+    print(f"\n=== {label} START (batch={batch}, cap={max_total}) ===", flush=True)
+    while True:
+        try:
+            stats = await fn(limit=batch)
+        except Exception as e:  # noqa: BLE001 — one round failing must not abort the rest
+            print(f"  {label} round {rounds} FAILED: {e!r}", flush=True)
+            import traceback
+
+            traceback.print_exc()
+            break
+        n = int(stats.get(progress_key, 0) or 0)
+        total += n
+        rounds += 1
+        print(f"  {label} round {rounds}: +{n} ({progress_key}), total={total}, {stats}", flush=True)
+        if n == 0:
+            break
+        if max_total is not None and total >= max_total:
+            print(f"  {label} hit cap {max_total}; remainder deferred to scheduled cycles", flush=True)
+            break
+    dt = time.monotonic() - t0
+    print(f"=== {label} DONE in {dt:.0f}s: total={total} over {rounds} rounds ===", flush=True)
 
 
 async def main():
     await init_pools(apply_schema_ddl=False)
 
-    # --- Tier 0: unbounded full backfill (cheap, dependency-ordered) ---
-    await _run("6C  pdf_text", analyze_media_pdf_text(limit=None))
-    await _run("6C.2 pdf_images", extract_pdf_images(limit=None))
-    await _run("6H  video_frames", extract_video_frames(limit=None))
-    await _run("6A  exif_gps", analyze_media_exif(limit=None))
-    await _run("6B  phash", analyze_media_phash(limit=None))
+    # --- Tier 0: drain fully (cheap), dependency-ordered. 6C/6C.2/6H produce
+    # derived rows that 6B/6D/6F consume, so they run first. ---
+    await _drain("6C  pdf_text", analyze_media_pdf_text, batch=200, progress_key="processed")
+    await _drain("6C.2 pdf_images", extract_pdf_images, batch=100, progress_key="pdfs_processed")
+    await _drain("6H  video_frames", extract_video_frames, batch=25, progress_key="videos_processed")
+    await _drain("6A  exif_gps", analyze_media_exif, batch=1000, progress_key="processed")
+    await _drain("6B  phash", analyze_media_phash, batch=1000, progress_key="processed")
 
-    # --- Tier 1: bounded kickoff (expensive) ---
-    await _run(f"6D  ocr_text (limit={OCR_BACKFILL_LIMIT})", analyze_media_ocr(limit=OCR_BACKFILL_LIMIT))
-    await _run(f"6F  faces (limit={FACE_BACKFILL_LIMIT})", analyze_media_faces(limit=FACE_BACKFILL_LIMIT))
+    # --- Tier 1: capped per launch (expensive: Tesseract OCR, ONNX face embed). ---
+    await _drain("6D  ocr_text", analyze_media_ocr, batch=300, progress_key="processed", max_total=OCR_BACKFILL_LIMIT)
+    await _drain("6F  faces", analyze_media_faces, batch=300, progress_key="processed", max_total=FACE_BACKFILL_LIMIT)
 
     # --- Final tallies ---
     analyzer = get_analyzer_pool()
