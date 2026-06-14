@@ -411,6 +411,28 @@ async def extract_video_frames(limit: int | None = None) -> dict:
                     count += 1
             else:
                 logger.debug("ffmpeg failed for %s: %s", path, result.stderr.decode(errors="replace")[:500])
+
+            # Fallback: clips shorter than the sampling interval yield no frames
+            # under fps=1/N (~half of messaging-app videos are sub-20s). Grab the
+            # first frame so short videos still contribute to 6D/6F.
+            if count == 0:
+                first = outdir / "frame_001.jpg"
+                fb = await asyncio.to_thread(
+                    subprocess.run,
+                    ["ffmpeg", "-y", "-i", str(path), "-frames:v", "1",
+                     "-loglevel", "error", str(first)],
+                    capture_output=True, timeout=120,
+                )
+                if fb.returncode == 0 and first.exists():
+                    frame_rows.append({
+                        "media_item_id": f"{item['id']}:frame:0",
+                        "parent_media_item_id": item["id"],
+                        "source": item["source"], "content_type": "image",
+                        "analysis_type": "video_frame",
+                        "result_json": {"derived_path": str(first), "timestamp_sec": 0},
+                        "model_version": "ffmpeg-fps-v1",
+                    })
+                    count = 1
         except Exception:
             logger.debug("Frame extraction failed for %s", path, exc_info=True)
 
