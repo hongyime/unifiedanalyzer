@@ -7,6 +7,13 @@
     "skipLibCheck": true,
     "jsx": "react-jsx",
     "moduleResolution": "bundler",
+    "paths": {
+      // lucide-react@0.468.0 ships without a "types"/"exports" entry in its
+      // package.json, so TS can't find its bundled declarations on its own.
+      // Point it at the .d.ts that IS in the package. Vite resolves the module
+      // fine at build time via "module"; this only affects type-checking.
+      "lucide-react": ["./node_modules/lucide-react/dist/lucide-react"]
+    },
     "allowImportingTsExtensions": true,
     "moduleDetection": "force",
     "noEmit": true,

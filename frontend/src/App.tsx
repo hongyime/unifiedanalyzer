@@ -1,60 +1,121 @@
-import { Routes, Route, NavLink, useLocation } from 'react-router-dom'
+import { Routes, Route, NavLink } from 'react-router-dom'
 import { useEffect, useState } from 'react'
+import {
+  Bell, Users, Network, Play, Activity, Images, Circle,
+} from 'lucide-react'
 import AlertsPage from './pages/Alerts'
 import EntitiesPage from './pages/Entities'
 import EntityDetailPage from './pages/EntityDetail'
 import RunsPage from './pages/Runs'
 import CollectorHealthPage from './pages/CollectorHealth'
 import CommunitiesPage from './pages/Communities'
-import { api, HealthInfo } from './api'
+import MediaPage from './pages/Media'
+import { openHealthSocket, LiveHealth } from './api'
+
+const NAV = [
+  { to: '/', label: 'Alerts', icon: Bell, end: true },
+  { to: '/entities', label: 'Entities', icon: Users },
+  { to: '/communities', label: 'Communities', icon: Network },
+  { to: '/media', label: 'Media', icon: Images },
+  { to: '/runs', label: 'Runs', icon: Play },
+  { to: '/collectors', label: 'Collectors', icon: Activity },
+]
+
+/** Subscribe to /ws/health, auto-reconnecting on drop. */
+function useLiveHealth(): LiveHealth | null {
+  const [health, setHealth] = useState<LiveHealth | null>(null)
+  useEffect(() => {
+    let ws: WebSocket | null = null
+    let retry: ReturnType<typeof setTimeout>
+    let closed = false
+    const connect = () => {
+      ws = openHealthSocket(setHealth)
+      ws.onclose = () => {
+        if (!closed) retry = setTimeout(connect, 3000)
+      }
+    }
+    connect()
+    return () => {
+      closed = true
+      clearTimeout(retry)
+      ws?.close()
+    }
+  }, [])
+  return health
+}
 
 function App() {
-  const location = useLocation()
-  const [health, setHealth] = useState<HealthInfo | null>(null)
-
-  useEffect(() => {
-    api.getHealth().then(setHealth).catch(() => {})
-    const iv = setInterval(() => {
-      api.getHealth().then(setHealth).catch(() => {})
-    }, 30000)
-    return () => clearInterval(iv)
-  }, [])
-
-  const navClass = (path: string) =>
-    location.pathname === path || location.pathname.startsWith(path + '/') ? 'active' : ''
+  const health = useLiveHealth()
 
   return (
-    <div className="layout">
-      <nav className="sidebar">
-        <h1>Analyzer</h1>
-        <NavLink to="/" className={navClass('/')} end>Alerts</NavLink>
-        <NavLink to="/entities" className={navClass('/entities')}>Entities</NavLink>
-        <NavLink to="/communities" className={navClass('/communities')}>Communities</NavLink>
-        <NavLink to="/runs" className={navClass('/runs')}>Runs</NavLink>
-        <NavLink to="/collectors" className={navClass('/collectors')}>Collectors</NavLink>
-        <div style={{ marginTop: 'auto', fontSize: '0.75rem' }}>
-          {health && (
+    <div className="flex min-h-screen">
+      <nav className="flex w-56 flex-col gap-1 border-r border-border bg-card p-4">
+        <h1 className="mb-6 text-lg font-bold text-accent">Analyzer</h1>
+        {NAV.map(({ to, label, icon: Icon, end }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={end}
+            className={({ isActive }) =>
+              `flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors ${
+                isActive ? 'bg-hover text-fg' : 'text-muted hover:bg-hover hover:text-fg'
+              }`
+            }
+          >
+            <Icon size={16} />
+            {label}
+          </NavLink>
+        ))}
+
+        <div className="mt-auto border-t border-border pt-3 text-xs">
+          {health ? (
             <>
-              <div className="mb-1">
+              <div className="mb-1.5 flex items-center font-medium">
                 <span className={`health-dot ${health.status}`} />
-                {health.status}
+                {health.status === 'ok' ? 'Healthy' : 'Degraded'}
               </div>
               <div className="text-muted">
-                {health.entity_count} entities
-                {health.alert_count_unread > 0 && (
-                  <> &middot; {health.alert_count_unread} unread</>
-                )}
+                {health.entity_count.toLocaleString()} entities
+                {health.alert_count_unread > 0 && <> · {health.alert_count_unread} unread</>}
               </div>
+              <div className="text-muted">{health.media_items_analyzed.toLocaleString()} media analyzed</div>
+              {health.sources.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {health.sources.map((s) => (
+                    <span
+                      key={s.source}
+                      title={`${s.source}: ${s.failed_24h} failed / ${s.items_24h} items (24h)`}
+                      className="flex items-center gap-1 rounded bg-bg px-1.5 py-0.5 text-[0.65rem] text-muted"
+                    >
+                      <Circle
+                        size={7}
+                        className={
+                          s.health === 'green'
+                            ? 'fill-green text-green'
+                            : s.health === 'amber'
+                            ? 'fill-amber text-amber'
+                            : 'fill-red text-red'
+                        }
+                      />
+                      {s.source}
+                    </span>
+                  ))}
+                </div>
+              )}
             </>
+          ) : (
+            <span className="text-muted">Connecting…</span>
           )}
         </div>
       </nav>
-      <main className="main">
+
+      <main className="max-w-[1200px] flex-1 p-8">
         <Routes>
           <Route path="/" element={<AlertsPage />} />
           <Route path="/entities" element={<EntitiesPage />} />
           <Route path="/entities/:id" element={<EntityDetailPage />} />
           <Route path="/communities" element={<CommunitiesPage />} />
+          <Route path="/media" element={<MediaPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/collectors" element={<CollectorHealthPage />} />
         </Routes>

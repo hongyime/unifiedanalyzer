@@ -234,6 +234,94 @@ export interface Paginated<T> {
   per_page: number
 }
 
+// ── Phase 6 media analysis ──
+export interface MediaItem {
+  id: string
+  media_item_id: string
+  parent_media_item_id: string | null
+  source: string
+  content_type: string
+  analysis_type: string
+  text_preview: string | null
+  has_text: boolean
+  gps_lat: number | null
+  gps_lon: number | null
+  has_gps: boolean
+  taken_at: string | null
+  perceptual_hash: string | null
+  has_face: boolean
+  is_derived: boolean
+  model_version: string | null
+  processed_at: string | null
+  result_json: Record<string, unknown> | null
+  thumbnail_url: string
+}
+
+export interface MediaStats {
+  totals: {
+    rows_total: number
+    items_total: number
+    with_gps: number
+    with_text: number
+    with_face: number
+    derived: number
+    with_phash: number
+  }
+  by_analysis_type: { analysis_type: string; n: number }[]
+  by_source: { source: string; n: number }[]
+  by_content_type: { content_type: string; n: number }[]
+}
+
+export interface MediaFilters {
+  analysis_types: string[]
+  sources: string[]
+  content_types: string[]
+}
+
+export interface MediaBrowseParams {
+  page?: number
+  per_page?: number
+  analysis_type?: string
+  source?: string
+  content_type?: string
+  has_gps?: boolean
+  has_text?: boolean
+  has_face?: boolean
+  q?: string
+}
+
+// ── Live health (websocket /ws/health) ──
+export interface LiveHealth {
+  status: string
+  analyzer_db: string
+  collector_db: string
+  entity_count: number
+  alert_count_unread: number
+  last_completed_run: { run_type: string; finished_at: string } | null
+  media_items_analyzed: number
+  sources: {
+    source: string
+    health: 'green' | 'amber' | 'red'
+    last_completed: string | null
+    items_24h: number
+    failed_24h: number
+  }[]
+}
+
+/** Open the /ws/health websocket. Returns the socket so callers can close it. */
+export function openHealthSocket(onMessage: (h: LiveHealth) => void): WebSocket {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  const ws = new WebSocket(`${proto}://${location.host}/ws/health`)
+  ws.onmessage = (e) => {
+    try {
+      onMessage(JSON.parse(e.data) as LiveHealth)
+    } catch {
+      // ignore malformed frame
+    }
+  }
+  return ws
+}
+
 async function patch<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'PATCH',
@@ -306,4 +394,20 @@ export const api = {
   getCommunities: () => get<{ data: Community[] }>('/graph/communities'),
 
   getIntelligence: (entityId: string) => get<IntelligenceReport>(`/entities/${entityId}/intelligence`),
+
+  getMediaStats: () => get<MediaStats>('/media/stats'),
+  getMediaFilters: () => get<MediaFilters>('/media/filters'),
+  browseMedia: (params: MediaBrowseParams = {}) => {
+    const q = new URLSearchParams()
+    q.set('page', String(params.page ?? 1))
+    q.set('per_page', String(params.per_page ?? 48))
+    if (params.analysis_type) q.set('analysis_type', params.analysis_type)
+    if (params.source) q.set('source', params.source)
+    if (params.content_type) q.set('content_type', params.content_type)
+    if (params.has_gps) q.set('has_gps', 'true')
+    if (params.has_text) q.set('has_text', 'true')
+    if (params.has_face) q.set('has_face', 'true')
+    if (params.q) q.set('q', params.q)
+    return get<Paginated<MediaItem>>(`/media/browse?${q.toString()}`)
+  },
 }
