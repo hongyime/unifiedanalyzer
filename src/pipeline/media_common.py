@@ -58,28 +58,46 @@ for _d in (PDF_IMAGE_DIR, VIDEO_FRAME_DIR, MODEL_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
+_DERIVED_MARKER = "media_derived/"
+
+
 def resolve_media_path(file_path: str | None) -> Path | None:
     """Resolve a media file reference to an absolute path on disk.
 
     Two shapes are accepted:
-      - collector-relative, e.g. "/media/search/default/image/x.jpg" —
-        confined to COLLECTOR_MEDIA_ROOT/media.
-      - absolute derived-artifact paths under MEDIA_DERIVED_PATH (PDF
-        images, video frames written by this pipeline).
+      - collector media, e.g. "/media/search/default/image/x.jpg" — rebased
+        under COLLECTOR_MEDIA_ROOT/media.
+      - derived-artifact paths (PDF images, video frames written by this
+        pipeline) — rebased under MEDIA_DERIVED_PATH.
 
-    Returns None (never raises) if the path is missing, unreadable, or
-    escapes its confinement root — "graceful offline" / poisoned-path
-    safety, matching unifiedcollector's dashboard API check.
+    Resolution is by *content marker*, not by Path.is_absolute(), so it works
+    identically on the Windows host (where the DB stores "Z:\\...\\media_derived"
+    and "/media/..." paths) and inside a Linux container (where those same
+    stored strings must map onto the container's bind mounts). We split each
+    stored path on the "media_derived/" tail (derived) or strip its drive/leading
+    slashes down to the "media/..." tail (collector), then re-root it onto the
+    locally-configured directory. relative_to() still enforces confinement.
+
+    Returns None (never raises) if the path is missing, unreadable, or escapes
+    its confinement root — "graceful offline" / poisoned-path safety.
     """
     if not file_path:
         return None
+    raw = str(file_path).replace("\\", "/")
     try:
-        p = Path(file_path)
-        if p.is_absolute():
-            full = p.resolve()
+        idx = raw.find(_DERIVED_MARKER)
+        if idx != -1:
+            # Derived artifact: keep the tail after "media_derived/".
+            tail = raw[idx + len(_DERIVED_MARKER):].lstrip("/")
+            full = (MEDIA_DERIVED_PATH / tail).resolve()
             full.relative_to(MEDIA_DERIVED_PATH)
         else:
-            full = (Path(COLLECTOR_MEDIA_ROOT) / file_path.lstrip("/\\")).resolve()
+            # Collector media: drop any drive letter ("z:/") + leading slashes,
+            # leaving the "media/..." tail to re-root under COLLECTOR_MEDIA_ROOT.
+            rel = raw.lstrip("/")
+            if len(rel) >= 2 and rel[1] == ":":
+                rel = rel[2:].lstrip("/")
+            full = (Path(COLLECTOR_MEDIA_ROOT) / rel).resolve()
             full.relative_to(_MEDIA_CONFINEMENT_ROOT)
     except (ValueError, OSError):
         return None
