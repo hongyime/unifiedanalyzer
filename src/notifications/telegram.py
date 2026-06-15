@@ -8,6 +8,10 @@ import urllib.error
 
 logger = logging.getLogger(__name__)
 
+# Windows: don't pop a visible console window when shelling out to `tailscale`.
+# 0 on POSIX (flag absent there).
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 _BOT_TOKEN: str | None = None
 _CHAT_ID: str | None = None
 _THREAD_ID: int | None = None
@@ -33,6 +37,7 @@ def _detect_tailscale_ip() -> str | None:
         result = subprocess.run(
             ["tailscale", "ip", "-4"],
             capture_output=True, text=True, timeout=5,
+            creationflags=_NO_WINDOW,
         )
         if result.returncode == 0:
             ip = result.stdout.strip().split("\n")[0].strip()

@@ -15,6 +15,7 @@ See docs/media_analysis_plan.md for the full spec.
 """
 import asyncio
 import logging
+import io
 import os
 import shutil
 import subprocess
@@ -22,7 +23,6 @@ from collections import defaultdict
 
 import cv2
 import numpy as np
-import pytesseract
 from PIL import Image
 
 # Cap OpenCV's internal thread pool (DNN face detect/embed) so it doesn't peg
@@ -33,6 +33,7 @@ cv2.setNumThreads(int(os.getenv("MEDIA_CV_NUM_THREADS", "2")))
 from src.db.connection import get_analyzer_pool
 from src.pipeline.media_common import (
     MODEL_DIR,
+    NO_WINDOW_FLAGS,
     VIDEO_FRAME_DIR,
     _MEDIA_CONFINEMENT_ROOT,
     build_contact_lookups,
@@ -79,13 +80,29 @@ _MAX_OCR_TEXT_LEN = 50_000
 
 
 def _ocr_image(path) -> str:
+    # Call tesseract directly (stdin->stdout) instead of via pytesseract: on
+    # Windows pytesseract spawns a visible console window per call (dozens per
+    # cycle) with no way to suppress it. Driving the binary ourselves lets us
+    # pass CREATE_NO_WINDOW. Same default OCR behaviour (psm 3, eng).
     with Image.open(path) as img:
         img = img.convert("RGB")
         if max(img.size) > _OCR_MAX_DIM:
             ratio = _OCR_MAX_DIM / max(img.size)
             size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
             img = img.resize(size, Image.Resampling.LANCZOS)
-        return pytesseract.image_to_string(img)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+    result = subprocess.run(
+        ["tesseract", "stdin", "stdout"],
+        input=buf.getvalue(),
+        capture_output=True,
+        timeout=60,
+        creationflags=NO_WINDOW_FLAGS,
+    )
+    if result.returncode != 0:
+        logger.debug("tesseract failed: %s", result.stderr.decode(errors="replace")[:300])
+        return ""
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 async def analyze_media_ocr(limit: int | None = None) -> dict:
@@ -422,7 +439,7 @@ async def extract_video_frames(limit: int | None = None) -> dict:
                     "-frames:v", str(_VIDEO_FRAME_MAX), "-loglevel", "error",
                     str(outdir / "frame_%03d.jpg"),
                 ],
-                capture_output=True, timeout=120,
+                capture_output=True, timeout=120, creationflags=NO_WINDOW_FLAGS,
             )
             if result.returncode == 0:
                 for frame_path in sorted(outdir.glob("frame_*.jpg")):
@@ -449,7 +466,7 @@ async def extract_video_frames(limit: int | None = None) -> dict:
                     subprocess.run,
                     ["ffmpeg", "-y", "-i", str(path), "-frames:v", "1",
                      "-loglevel", "error", str(first)],
-                    capture_output=True, timeout=120,
+                    capture_output=True, timeout=120, creationflags=NO_WINDOW_FLAGS,
                 )
                 if fb.returncode == 0 and first.exists():
                     frame_rows.append({

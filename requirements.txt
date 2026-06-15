@@ -9,7 +9,10 @@ Pillow>=10.0.0
 pypdf>=4.0
 imagehash>=4.3.1
 PyMuPDF>=1.24
-pytesseract>=0.3.10
+# OCR uses the `tesseract` binary directly (subprocess, CREATE_NO_WINDOW on
+# Windows) — the pytesseract wrapper was dropped because it spawns a visible
+# console window per call with no way to suppress it. The tesseract binary is
+# still a required system dependency.
 # opencv-python-headless: same cv2 API, drops the GUI/Qt native libs we never
 # use — smaller install + lower RAM baseline on this headless pipeline.
 opencv-python-headless>=4.9

@@ -8,8 +8,15 @@ src/pipeline/media_analysis_tier1.py (Tier 1: 6D/6F/6H).
 import json
 import logging
 import os
+import subprocess
 from collections import defaultdict
 from pathlib import Path
+
+# Windows: spawn child processes (tesseract, ffmpeg, …) WITHOUT a visible
+# console window. 0 on POSIX (the flag doesn't exist there). Pass this as
+# creationflags= to every subprocess call in the pipeline so no stray cmd.exe
+# windows pop up during analysis cycles.
+NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # CPU caps (see .env "CPU / RAM CAPS"). Set BEFORE numpy/onnxruntime/cv2 are
 # imported anywhere (this module is imported ahead of the cv2/numpy imports in
