@@ -1,7 +1,32 @@
 # Phase 6: Media Content Analysis Pipeline
 
-Status: **PLANNED — not started**. No part of this exists yet. This doc is the
-spec for the next agent (or future-me) to pick up.
+Status: **SHIPPED (Tier 0 + Tier 1) — backfilling.** As of 2026-06-14 the full
+pipeline below is implemented and wired into `incremental_runner.py`:
+`media_analysis` table (`src/db/schema.sql`), Tier 0 in
+`src/pipeline/media_analysis.py` (6A/6B/6C/6C.2), Tier 1 in
+`src/pipeline/media_analysis_tier1.py` (6D/6F/6H), shared helpers in
+`src/pipeline/media_common.py`. Tesseract + ffmpeg are installed; the YuNet +
+SFace ONNX models are present under `data/media_derived/models/`. Tier 2
+(6E/6I/6J/6K) remains deferred. The text below is the original spec, kept for
+the design rationale.
+
+**Current backfill state (2026-06-14, early — ~0.5% of the 124k-item corpus):**
+exif_gps 520, phash 1040, pdf_text 460, pdf_image 4432, ocr_text 210,
+face_embedding 100, video_frame 3. Zero Phase-6 identity_signals emitted yet —
+expected at this coverage (matches need cross-entity density). Drain the
+backlog with `scripts/backfill_phase6_media.py` (run detached). If signals stay
+at zero after meaningful coverage, debug entity attribution in
+`media_common.build_entity_lookup()` — sources without `entity_platform_links`
+rows (search/website/beeper) are analyzed but never attributed.
+
+**CPU/RAM caps (2026-06-14):** native-lib thread caps (`OMP_*`/`OPENBLAS_*`/
+`cv2.setNumThreads`) set via `.env` + `media_common.py`; steady-state OCR/face
+batch sizes lowered to 60; signal rebuilds skipped on idle cycles; the 6F
+face-match builder is numpy/BLAS-vectorized and capped at `MEDIA_FACE_MATCH_MAX`
+embeddings per rebuild. Orphaned derived files are pruned by
+`scripts/cleanup_orphan_derived.py`. Use `opencv-python-headless` (a fresh
+install does this; this machine still has the full build co-installed — needs an
+elevated `pip uninstall opencv-python opencv-contrib-python` to fully remove).
 
 ## Why this exists
 

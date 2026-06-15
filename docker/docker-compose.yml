@@ -1,14 +1,30 @@
 services:
   analyzer:
+    # Dashboard image bundles the built frontend + API + scheduler.
+    # Auto-starts with Docker Desktop via restart: unless-stopped.
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/Dockerfile.dashboard
+    # Host API_PORT is 8002 (avoids colliding with the collector dashboard on 8001).
     ports:
-      - "8001:8001"
+      - "8002:8002"
     env_file:
       - ../.env
+    environment:
+      # In-container overrides of the host-oriented .env values:
+      # reach the collector Postgres by its container name on the shared network
+      # (host .env uses localhost:5500, which is only valid on the host).
+      ANALYZER_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedanalyzer
+      COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
+      # Derived media lives on Z: on the host; mounted into the container below.
+      MEDIA_DERIVED_PATH: /app/media_derived
+      # COLLECTOR_MEDIA_ROOT is the dir that CONTAINS the "media/" folder.
+      COLLECTOR_MEDIA_ROOT: /app/collector_root
     volumes:
-      - "Z:/unifiedcollector/media:/media:ro"
+      # Collector media (read-only) for thumbnails of real media items.
+      - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
+      # Derived artifacts (PDF images / video frames / ONNX models) on Z:.
+      - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
     networks:
       - unifiedcollector_default
     restart: unless-stopped

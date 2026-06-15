@@ -11,6 +11,18 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
+# CPU caps (see .env "CPU / RAM CAPS"). Set BEFORE numpy/onnxruntime/cv2 are
+# imported anywhere (this module is imported ahead of the cv2/numpy imports in
+# media_analysis_tier1) so the native BLAS/OMP runtimes pick them up at init.
+# setdefault: never override an explicit value already loaded from .env.
+for _var, _default in (
+    ("OMP_THREAD_LIMIT", "1"),
+    ("OMP_NUM_THREADS", "2"),
+    ("OPENBLAS_NUM_THREADS", "2"),
+    ("MKL_NUM_THREADS", "2"),
+):
+    os.environ.setdefault(_var, _default)
+
 from src.db.connection import get_analyzer_pool, get_collector_pool
 from src.pipeline.bio_mention import _normalize_mention
 from src.pipeline.contact_extraction import (
@@ -28,7 +40,9 @@ _MEDIA_CONFINEMENT_ROOT = (Path(COLLECTOR_MEDIA_ROOT) / "media").resolve()
 
 # Derived artifacts (PDF-embedded images, video frames, downloaded ONNX
 # models) live entirely within unifiedanalyzer's own tree.
-MEDIA_DERIVED_PATH = Path(os.getenv("MEDIA_DERIVED_PATH", "data/media_derived")).resolve()
+# Default lives on Z: — these artifacts grow without bound and must stay off the
+# space-constrained C: drive. Override with MEDIA_DERIVED_PATH if needed.
+MEDIA_DERIVED_PATH = Path(os.getenv("MEDIA_DERIVED_PATH", "Z:/unifiedanalyzer/media_derived")).resolve()
 PDF_IMAGE_DIR = MEDIA_DERIVED_PATH / "pdf_images"
 VIDEO_FRAME_DIR = MEDIA_DERIVED_PATH / "video_frames"
 MODEL_DIR = MEDIA_DERIVED_PATH / "models"

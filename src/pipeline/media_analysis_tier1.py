@@ -25,6 +25,11 @@ import numpy as np
 import pytesseract
 from PIL import Image
 
+# Cap OpenCV's internal thread pool (DNN face detect/embed) so it doesn't peg
+# every core. Runtime call — independent of env-var import timing. media_common
+# (imported below) already set OMP/BLAS caps for numpy/onnxruntime.
+cv2.setNumThreads(int(os.getenv("MEDIA_CV_NUM_THREADS", "2")))
+
 from src.db.connection import get_analyzer_pool
 from src.pipeline.media_common import (
     MODEL_DIR,
@@ -47,6 +52,9 @@ MEDIA_OCR_ENABLED = os.getenv("MEDIA_OCR_ENABLED", "true").lower() == "true"
 MEDIA_OCR_BATCH_SIZE = int(os.getenv("MEDIA_OCR_BATCH_SIZE", "200"))
 MEDIA_FACE_BATCH_SIZE = int(os.getenv("MEDIA_FACE_BATCH_SIZE", "200"))
 MEDIA_VIDEO_FRAME_BATCH_SIZE = int(os.getenv("MEDIA_VIDEO_FRAME_BATCH_SIZE", "5"))
+# Ceiling on embeddings loaded/compared per face-match rebuild — bounds RAM and
+# CPU as the embedding corpus grows (most-recent-first). See .env.
+MEDIA_FACE_MATCH_MAX = int(os.getenv("MEDIA_FACE_MATCH_MAX", "20000"))
 
 
 def _drive_available() -> bool:
@@ -141,8 +149,12 @@ async def analyze_media_ocr(limit: int | None = None) -> dict:
     await upsert_media_analysis(rows)
     stats["processed"] = len(rows)
 
-    lookups = await build_contact_lookups()
-    stats.update(await emit_media_contact_signals(entity_texts, lookups, "ocr_text"))
+    # Idle-cycle skip (CPU saver). Same TODO as 6C pdf_text: emit rebuilds from
+    # this batch's entity_texts only, so steady-state cycles overwrite prior
+    # ocr_text signals rather than accumulating.
+    if stats["processed"]:
+        lookups = await build_contact_lookups()
+        stats.update(await emit_media_contact_signals(entity_texts, lookups, "ocr_text"))
     logger.info("6D OCR: %s", stats)
     return stats
 
@@ -267,25 +279,27 @@ async def analyze_media_faces(limit: int | None = None) -> dict:
     await upsert_media_analysis(embedding_rows)
     stats["processed"] = len(detection_rows)
 
-    stats["media_face_match_signals"] = await _build_face_match_signals()
+    # Skip the (potentially large) signal rebuild on idle cycles — if no new
+    # faces were detected this run, the embedding corpus is unchanged and the
+    # existing media_face_match signals are still correct. CPU/RAM saver.
+    if stats["processed"]:
+        stats["media_face_match_signals"] = await _build_face_match_signals()
     logger.info("6F face detection: %s", stats)
     return stats
-
-
-def _cosine_sim(a: list[float], b: list[float]) -> float:
-    va, vb = np.array(a), np.array(b)
-    denom = np.linalg.norm(va) * np.linalg.norm(vb)
-    return float(np.dot(va, vb) / denom) if denom else 0.0
 
 
 async def _build_face_match_signals() -> int:
     analyzer = get_analyzer_pool()
     async with analyzer.acquire() as conn:
+        # Cap the corpus (most-recent embeddings first) so this rebuild stays
+        # bounded in RAM/CPU as the table grows past tens of thousands of faces.
         emb_rows = await conn.fetch("""
             SELECT media_item_id, parent_media_item_id, face_embedding
             FROM media_analysis
             WHERE analysis_type = 'face_embedding' AND face_embedding IS NOT NULL
-        """)
+            ORDER BY processed_at DESC
+            LIMIT $1
+        """, MEDIA_FACE_MATCH_MAX)
 
     new_signals: list[tuple] = []
     if emb_rows:
@@ -293,7 +307,10 @@ async def _build_face_match_signals() -> int:
         item_entities = await fetch_media_item_entities(real_ids)
         entity_lookup = await build_entity_lookup()
 
-        candidates = []  # (eid, source_platform, embedding, media_item_id)
+        eids: list[str] = []
+        srcs: list[str] = []
+        mids: list[str] = []
+        embs: list[list[float]] = []
         for r in emb_rows:
             real_id = r["parent_media_item_id"] or r["media_item_id"]
             src = item_entities.get(real_id)
@@ -303,42 +320,53 @@ async def _build_face_match_signals() -> int:
             eid = lookup_entity(entity_lookup, source, raw_eid)
             if not eid:
                 continue
-            candidates.append((eid, source, r["face_embedding"], r["media_item_id"]))
+            eids.append(eid)
+            srcs.append(source)
+            mids.append(r["media_item_id"])
+            embs.append(r["face_embedding"])
 
-        # Pairwise cosine similarity across different entities + platforms.
-        match_targets: dict[int, set[str]] = defaultdict(set)
-        pairwise: list[tuple] = []
-        for i in range(len(candidates)):
-            for j in range(i + 1, len(candidates)):
-                a_eid, a_src, a_emb, a_mid = candidates[i]
-                b_eid, b_src, b_emb, b_mid = candidates[j]
-                if a_eid == b_eid or a_src == b_src:
+        n = len(embs)
+        if n >= 2:
+            # Normalize once; cosine similarity is then a single BLAS matrix-vector
+            # product per row (M @ M[i]) — O(n^2) compute in C, but O(n*d) memory
+            # (no full n*n matrix materialized) and orders of magnitude faster than
+            # the previous Python double loop.
+            M = np.asarray(embs, dtype=np.float32)
+            norms = np.linalg.norm(M, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            M /= norms
+
+            match_targets: dict[int, set[str]] = defaultdict(set)
+            pairwise: list[tuple] = []  # (sim, i, j)
+            for i in range(n - 1):
+                sims = M[i + 1:] @ M[i]  # cosine sims of all j>i against i
+                for jrel in np.nonzero(sims >= _FACE_MATCH_THRESHOLD)[0]:
+                    j = i + 1 + int(jrel)
+                    if eids[i] == eids[j] or srcs[i] == srcs[j]:
+                        continue  # same entity or same platform — not cross-identity
+                    sim = float(sims[jrel])
+                    match_targets[i].add(eids[j])
+                    match_targets[j].add(eids[i])
+                    pairwise.append((sim, i, j))
+
+            # Fan-out filter: drop matches where either face also resembles a
+            # THIRD distinct entity (ambiguous / common-looking face), then keep
+            # the best remaining match per entity pair.
+            pair_best: dict[frozenset, tuple] = {}
+            for sim, i, j in pairwise:
+                if len(match_targets[i]) > 1 or len(match_targets[j]) > 1:
                     continue
-                sim = _cosine_sim(a_emb, b_emb)
-                if sim < _FACE_MATCH_THRESHOLD:
-                    continue
-                match_targets[i].add(b_eid)
-                match_targets[j].add(a_eid)
-                pairwise.append((sim, i, j, a_mid, b_mid))
+                a_eid, b_eid = eids[i], eids[j]
+                pair_key = frozenset((a_eid, b_eid))
+                existing = pair_best.get(pair_key)
+                if existing is None or sim > existing[0]:
+                    pair_best[pair_key] = (sim, a_eid, mids[i], b_eid, mids[j])
 
-        # Fan-out filter: drop matches where either face also resembles a
-        # THIRD distinct entity (ambiguous / common-looking face), then keep
-        # the best remaining match per entity pair.
-        pair_best: dict[frozenset, tuple] = {}
-        for sim, i, j, a_mid, b_mid in pairwise:
-            if len(match_targets[i]) > 1 or len(match_targets[j]) > 1:
-                continue
-            a_eid, b_eid = candidates[i][0], candidates[j][0]
-            pair_key = frozenset((a_eid, b_eid))
-            existing = pair_best.get(pair_key)
-            if existing is None or sim > existing[0]:
-                pair_best[pair_key] = (sim, a_eid, a_mid, b_eid, b_mid)
-
-        for sim, a_eid, a_mid, b_eid, b_mid in pair_best.values():
-            new_signals.append((
-                a_eid, "media_face_match", "multi", "media_items", "face_embedding", a_mid,
-                "multi", b_eid, f"sim:{sim:.3f}", round(min(sim, 0.99), 2),
-            ))
+            for sim, a_eid, a_mid, b_eid, b_mid in pair_best.values():
+                new_signals.append((
+                    a_eid, "media_face_match", "multi", "media_items", "face_embedding", a_mid,
+                    "multi", b_eid, f"sim:{sim:.3f}", round(min(sim, 0.99), 2),
+                ))
 
     async with analyzer.acquire() as conn:
         await conn.execute("DELETE FROM identity_signals WHERE signal_type = 'media_face_match'")

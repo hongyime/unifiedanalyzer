@@ -122,7 +122,9 @@ async def analyze_media_exif(limit: int | None = None) -> dict:
     await upsert_media_analysis(rows)
     stats["processed"] = len(rows)
 
-    stats["media_gps_colocation_signals"] = await _build_gps_colocation_signals()
+    # Idle-cycle skip: no new EXIF rows -> GPS clusters unchanged (CPU saver).
+    if stats["processed"]:
+        stats["media_gps_colocation_signals"] = await _build_gps_colocation_signals()
     logger.info("6A EXIF GPS: %s", stats)
     return stats
 
@@ -233,7 +235,9 @@ async def analyze_media_phash(limit: int | None = None) -> dict:
     await upsert_media_analysis(rows)
     stats["processed"] = len(rows)
 
-    stats["media_perceptual_match_signals"] = await _build_perceptual_match_signals()
+    # Idle-cycle skip: no new hashes -> match buckets unchanged (CPU saver).
+    if stats["processed"]:
+        stats["media_perceptual_match_signals"] = await _build_perceptual_match_signals()
     logger.info("6B perceptual hash: %s", stats)
     return stats
 
@@ -353,8 +357,15 @@ async def analyze_media_pdf_text(limit: int | None = None) -> dict:
     await upsert_media_analysis(rows)
     stats["processed"] = len(rows)
 
-    lookups = await build_contact_lookups()
-    stats.update(await emit_media_contact_signals(entity_texts, lookups, "pdf_text"))
+    # Idle-cycle skip: nothing new this cycle -> leave existing pdf_text contact
+    # signals untouched (also avoids the needless delete+reinsert).
+    # TODO(continuing agent): emit_media_contact_signals rebuilds from THIS
+    # batch's entity_texts only, so steady-state cycles overwrite prior pdf_text
+    # signals rather than accumulating. Fine during a full backfill (one pass);
+    # if incremental coverage matters, rescan all pdf_text rows here instead.
+    if stats["processed"]:
+        lookups = await build_contact_lookups()
+        stats.update(await emit_media_contact_signals(entity_texts, lookups, "pdf_text"))
     logger.info("6C PDF text: %s", stats)
     return stats
 
