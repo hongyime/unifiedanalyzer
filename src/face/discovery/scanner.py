@@ -107,11 +107,19 @@ class DriveScanner:
         objects before the consumer catches up.
         """
         if not self.drive_sources:
-            # Scan default drives
-            self.drive_sources = [
-                {"path": "C:/", "type": "local"},
-                {"path": "D:/", "type": "local"},
-            ]
+            # SCOPE LOCK (D3): fail closed. The merged unifiedanalyzer system
+            # indexes faces ONLY from collector media (via
+            # face_worker.ingest_collector_media + resolve_media_path, confined
+            # to Z:/unifiedcollector). A bare C:/ + D:/ default here would walk
+            # the whole system and HYDRATE OneDrive placeholders onto the
+            # space-constrained C: drive (see memory: onedrive-hydration-hazard).
+            # If a full drive scan is ever wanted again, set DRIVE_SOURCES
+            # explicitly in .env — never let it default to C:.
+            logger.error(
+                "DriveScanner.scan_drives called with no drive_sources configured; "
+                "refusing to walk C:/ (OneDrive hydration risk). Set DRIVE_SOURCES explicitly."
+            )
+            return
 
         # Bounded queue for backpressure. 4x batch_size gives producers
         # room to keep batching without blocking on every put when the

@@ -18,8 +18,10 @@ for the full plan and decisions.
   derived video frames (already on Z:), not by scanning drives.
 - **DB unify (D2=start clean):** facetracker tables go in a `facetracker` schema
   inside the unifiedanalyzer DB; no data migrated — re-index from scratch.
-- **Storage on Z: (D1):** face crops / FAISS / thumbnails → `Z:/facetracker/faces`
-  (was `Y:/facetracker/faces`). InsightFace model cache → Z: too.
+- **Storage on Z: (D1):** all face artifacts — crops / FAISS / thumbnails / InsightFace
+  model cache → `Z:/unifiedanalyzer/media_derived/faces` (under the single
+  `Z:/unifiedanalyzer` project root, alongside other derived media; was `Z:/facetracker`,
+  originally `Y:/facetracker/faces`).
 
 ## Next stages (not done yet)
 1. Stand up `facetracker` schema in the analyzer DB; `face_worker` entrypoint.

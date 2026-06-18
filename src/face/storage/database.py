@@ -164,11 +164,18 @@ class Database:
 
     def connect(self) -> None:
         """Create database engine and session factory."""
+        import os
+        # MERGE: face tables live in the FACE_DB_SCHEMA schema inside the unified
+        # analyzer DB. Set search_path so unqualified ORM queries (Face/Image/
+        # Identity) resolve there. Mirrors src/face_worker.py's engine options.
+        # See docs/facetracker_merge_plan.md.
+        schema = os.getenv("FACE_DB_SCHEMA", "facetracker")
         self.engine = create_engine(
             self.database_url,
             pool_pre_ping=True,
             pool_size=10,
             max_overflow=20,
+            connect_args={"options": f"-csearch_path={schema},public"},
         )
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine

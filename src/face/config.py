@@ -19,8 +19,11 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
     # Storage Paths — accept HOST_FACE_STORAGE (.env) or FACE_STORAGE_ROOT (.env.example) for back-compat
+    # Default on Z: — the storage drive (Y: migration abandoned 2026-06-19,
+    # see memory: storage-derived-on-z). All growing face artifacts (crops,
+    # FAISS, thumbs) live on Z:, never C:.
     face_storage_root: str = Field(
-        default="Y:/facetracker/faces",
+        default="Z:/unifiedanalyzer/media_derived/faces",
         validation_alias=AliasChoices("FACE_STORAGE_ROOT", "HOST_FACE_STORAGE"),
     )
     postgres_data_path: str = "./postgres_data"
@@ -188,7 +191,29 @@ class Settings(BaseSettings):
     
     @property
     def database_url(self) -> str:
-        """Get PostgreSQL database URL."""
+        """PostgreSQL URL for the face engine's SQLAlchemy layer.
+
+        MERGE (docs/facetracker_merge_plan.md): the facetracker tables now live
+        in the `facetracker` schema inside the unified analyzer DB, not the old
+        standalone :5433 instance. So prefer ANALYZER_DATABASE_URL when set,
+        rewritten to the sync psycopg2 driver (localhost -> 127.0.0.1 to hit
+        Docker's published IPv4 port proxy). Falls back to the legacy
+        postgres_* fields for standalone/dev use.
+
+        search_path=facetracker is applied at engine creation
+        (src/face/storage/database.py:connect), not here.
+        """
+        import os
+        from urllib.parse import urlparse
+
+        raw = os.getenv("ANALYZER_DATABASE_URL")
+        if raw:
+            u = urlparse(raw)
+            host = "127.0.0.1" if u.hostname in ("localhost", None) else u.hostname
+            return (
+                f"postgresql+psycopg2://{u.username}:{u.password}"
+                f"@{host}:{u.port or 5432}/{u.path.lstrip('/')}"
+            )
         return (
             f"postgresql://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"

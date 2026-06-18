@@ -61,6 +61,12 @@ app.include_router(media_router, prefix="/api")
 # Websocket router mounted at root so the path is exactly /ws/health.
 app.include_router(websocket_router)
 
+# Face engine API (merge Stage 4 — docs/facetracker_merge_plan.md §7): mount the
+# vendored facetracker routes under /api/face. Guarded so a face-side failure
+# never blocks analyzer startup. Returns empty until faces are indexed (B1/R6).
+from src.api.face_mount import mount_face_api
+mount_face_api(app)
+
 _scheduler_task: asyncio.Task | None = None
 
 

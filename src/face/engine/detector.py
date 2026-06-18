@@ -79,7 +79,7 @@ class FaceDetector:
         if providers is None:
             providers = ['CPUExecutionProvider']
         if root is None:
-            root = os.getenv("FACE_MODEL_ROOT", "Z:/facetracker")
+            root = os.getenv("FACE_MODEL_ROOT", "Z:/unifiedanalyzer/media_derived/faces")
 
         logger.info(f"Initializing FaceDetector with model: {model_name} (root={root})")
 
