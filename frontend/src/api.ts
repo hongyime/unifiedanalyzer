@@ -290,6 +290,36 @@ export interface MediaBrowseParams {
   q?: string
 }
 
+// ── Faces (facetracker engine, mounted under /api/face) ──
+export interface FaceStats {
+  total_faces: number
+  total_images: number
+  total_identities: number
+  total_videos: number
+  indexing: {
+    files_processed: number
+    files_failed: number
+    faces_per_image_avg: number
+  }
+}
+
+export interface FaceIdentity {
+  identity_id: string
+  name: string | null
+  face_count: number
+  created_at: string
+  updated_at: string
+  avg_quality_score: number
+  thumbnail_url: string | null
+}
+
+export interface FaceIdentityList {
+  identities: FaceIdentity[]
+  total: number
+  page: number
+  page_size: number
+}
+
 // ── Live health (websocket /ws/health) ──
 export interface LiveHealth {
   status: string
@@ -410,4 +440,10 @@ export const api = {
     if (params.q) q.set('q', params.q)
     return get<Paginated<MediaItem>>(`/media/browse?${q.toString()}`)
   },
+
+  // Faces — facetracker engine routes under /api/face (returns empty until the
+  // collector media is restored (B1) + face re-index (R6) runs).
+  getFaceStats: () => get<FaceStats>('/face/stats'),
+  getFaceIdentities: (page = 1) =>
+    get<FaceIdentityList>(`/face/identities?page=${page}&page_size=50`),
 }

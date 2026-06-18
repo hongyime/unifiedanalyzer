@@ -1,7 +1,7 @@
 import { Routes, Route, NavLink } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import {
-  Bell, Users, Network, Play, Activity, Images, Circle,
+  Bell, Users, Network, Play, Activity, Images, Circle, ScanFace,
 } from 'lucide-react'
 import AlertsPage from './pages/Alerts'
 import EntitiesPage from './pages/Entities'
@@ -10,6 +10,7 @@ import RunsPage from './pages/Runs'
 import CollectorHealthPage from './pages/CollectorHealth'
 import CommunitiesPage from './pages/Communities'
 import MediaPage from './pages/Media'
+import FacesPage from './pages/Faces'
 import { openHealthSocket, LiveHealth } from './api'
 
 const NAV = [
@@ -17,6 +18,7 @@ const NAV = [
   { to: '/entities', label: 'Entities', icon: Users },
   { to: '/communities', label: 'Communities', icon: Network },
   { to: '/media', label: 'Media', icon: Images },
+  { to: '/faces', label: 'Faces', icon: ScanFace },
   { to: '/runs', label: 'Runs', icon: Play },
   { to: '/collectors', label: 'Collectors', icon: Activity },
 ]
@@ -116,6 +118,7 @@ function App() {
           <Route path="/entities/:id" element={<EntityDetailPage />} />
           <Route path="/communities" element={<CommunitiesPage />} />
           <Route path="/media" element={<MediaPage />} />
+          <Route path="/faces" element={<FacesPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/collectors" element={<CollectorHealthPage />} />
         </Routes>

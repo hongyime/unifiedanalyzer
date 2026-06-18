@@ -67,3 +67,16 @@ export function useMediaBrowse(params: MediaBrowseParams) {
     placeholderData: (prev) => prev,
   })
 }
+
+// ── Faces (facetracker engine, /api/face) ──
+export function useFaceStats() {
+  return useQuery({ queryKey: ['face-stats'], queryFn: api.getFaceStats, refetchInterval: 30_000 })
+}
+
+export function useFaceIdentities(page: number) {
+  return useQuery({
+    queryKey: ['face-identities', page],
+    queryFn: () => api.getFaceIdentities(page),
+    placeholderData: (prev) => prev,
+  })
+}
