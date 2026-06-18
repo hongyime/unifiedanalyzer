@@ -1,5 +1,6 @@
 """Face detection module using InsightFace RetinaFace."""
 
+import os
 import threading
 import numpy as np
 from pathlib import Path
@@ -63,21 +64,28 @@ class FaceDetector:
     MIN_LAPLACIAN_VARIANCE = 100  # Minimum sharpness
     MIN_CONFIDENCE = 0.5  # Minimum detection confidence
 
-    def __init__(self, model_name: str = "buffalo_l", providers: List[str] = None):
+    def __init__(self, model_name: str = "buffalo_l", providers: List[str] = None, root: str = None):
         """
         Initialize face detector.
 
         Args:
             model_name: InsightFace model name (buffalo_l, buffalo_m, etc.).
             providers: ONNX runtime providers (CUDAExecutionProvider, CPUExecutionProvider).
+            root: InsightFace model cache root. Defaults to FACE_MODEL_ROOT env
+                (Z: drive) so the ~300MB model download stays off the
+                space-constrained C: drive. InsightFace stores models under
+                "{root}/models".
         """
         if providers is None:
             providers = ['CPUExecutionProvider']
+        if root is None:
+            root = os.getenv("FACE_MODEL_ROOT", "Z:/facetracker")
 
-        logger.info(f"Initializing FaceDetector with model: {model_name}")
-        
+        logger.info(f"Initializing FaceDetector with model: {model_name} (root={root})")
+
         self.app = FaceAnalysis(
             name=model_name,
+            root=root,
             providers=providers,
             allowed_modules=['detection', 'landmarks', 'recognition']
         )

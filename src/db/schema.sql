@@ -176,3 +176,21 @@ CREATE INDEX IF NOT EXISTS idx_media_analysis_type   ON media_analysis (analysis
 CREATE INDEX IF NOT EXISTS idx_media_analysis_phash  ON media_analysis (perceptual_hash);
 CREATE INDEX IF NOT EXISTS idx_media_analysis_gps    ON media_analysis (gps_lat, gps_lon);
 CREATE INDEX IF NOT EXISTS idx_media_analysis_parent ON media_analysis (parent_media_item_id);
+
+-- facetracker merge (Stage 2): bridge linking analyzer entities to faces in the
+-- facetracker face engine. face_id references facetracker.faces.id by value —
+-- NO cross-schema FK, so the face engine owns its schema independently and can
+-- be re-indexed/rebuilt without breaking analyzer rows. media_item_id records
+-- which collector media the face came from (entity attribution traceability).
+CREATE TABLE IF NOT EXISTS entity_faces (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_id      UUID REFERENCES entities(id) ON DELETE CASCADE,
+    face_id        INTEGER NOT NULL,
+    media_item_id  TEXT,
+    confidence     FLOAT DEFAULT 0.0,
+    method         VARCHAR(50),
+    created_at     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (entity_id, face_id)
+);
+CREATE INDEX IF NOT EXISTS idx_entity_faces_entity ON entity_faces(entity_id);
+CREATE INDEX IF NOT EXISTS idx_entity_faces_face   ON entity_faces(face_id);
