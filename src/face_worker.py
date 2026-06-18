@@ -265,17 +265,47 @@ def ingest_collector_media(limit: int = 50) -> dict:
     return stats
 
 
+def loop(batch: int, interval: int) -> None:
+    """Run ingest_collector_media in a continuous loop (the intended end-state:
+    a separate long-running worker process, see docs/facetracker_merge_plan.md §6).
+
+    Each tick indexes up to `batch` un-indexed collector images, then sleeps
+    `interval` seconds. Idempotent + resumable (ingest dedupes by file_path), so
+    a tick that finds nothing new (e.g. while collector source media is still
+    being restored — task B1) is a cheap no-op. Errors are logged, not fatal.
+    """
+    import time
+    logger.info("Face worker loop: batch=%d interval=%ds", batch, interval)
+    while True:
+        try:
+            stats = ingest_collector_media(batch)
+            if stats.get("images_indexed"):
+                logger.info("ingest tick: %s", stats)
+        except Exception:
+            logger.exception("ingest tick failed (will retry next interval)")
+        time.sleep(interval)
+
+
 def main() -> None:
+    import os
     import sys
     logger.info("Face worker (schema=%s)", FACE_DB_SCHEMA)
     tables = init_schema()
     logger.info("facetracker schema tables present: %s", tables)
-    if len(sys.argv) > 1 and sys.argv[1] == "ingest":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else None
+    if cmd == "ingest":
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else 50
         logger.info("Stage 2 ingest (limit=%d)…", limit)
         logger.info("ingest stats: %s", ingest_collector_media(limit))
+    elif cmd == "loop":
+        batch = int(os.getenv("FACE_WORKER_BATCH", "50"))
+        interval = int(os.getenv("FACE_WORKER_INTERVAL", "300"))
+        loop(batch, interval)
     else:
-        logger.info("Schema ready. Run `python -m src.face_worker ingest [N]` to index collector media.")
+        logger.info(
+            "Schema ready. Run `python -m src.face_worker ingest [N]` for a one-shot "
+            "batch, or `python -m src.face_worker loop` for the continuous worker."
+        )
 
 
 if __name__ == "__main__":
