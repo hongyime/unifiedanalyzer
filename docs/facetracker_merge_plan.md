@@ -154,3 +154,41 @@ via the analyzer stack. Compact reclaimed Docker space.
   the merged system to collector media + a narrower set of folders?
 - **D4 — Timeline:** OK to land this as ~5-6 sequential PRs over multiple
   sessions (vs one big bang)? Recommended: yes.
+
+## 7. Status & decisions resolved (2026-06-19)
+
+**Decisions (all resolved):**
+- **D1 — storage:** all face artifacts (crops, FAISS, thumbs, InsightFace model
+  cache) live under `Z:/unifiedanalyzer/media_derived/faces`. Y: migration was
+  abandoned; Z: was reformatted to NTFS and is the single storage drive. No
+  separate `Z:/facetracker` folder.
+- **D2 — data:** start clean / re-scan (no pg_dump migration). The standalone
+  facetracker Postgres no longer exists; the `facetracker` schema lives inside
+  the unified analyzer DB (`unifiedcollector_postgres` → `unifiedanalyzer`).
+- **D3 — scope:** collector media only. Face ingest is
+  `face_worker.ingest_collector_media` reading `media_items` via
+  `resolve_media_path` (drive-confined to `Z:/unifiedcollector`). The drive
+  scanner now fails closed on empty `drive_sources` (no C:/ walk) to prevent
+  OneDrive Files-On-Demand hydration filling C:.
+
+**Stage status:**
+- Stage 0 (vendor) — DONE. Stage 1 (schema + face_worker) — DONE.
+  Stage 2 (entity_faces bridge + collector ingest) — DONE.
+- Stage 4 (API + UI) — DONE: face routers mounted under `/api/face`
+  (`src/api/face_mount.py`); face DB pointed at the analyzer DB with
+  `search_path=facetracker`; frontend Faces page added. Deferred: FAISS-backed
+  search (needs the worker process holding the index) + face API auth.
+- Stage 3 (replace Phase 6 SFace + re-embed) — BLOCKED. Needs a face index to
+  build/validate the facetracker-backed `media_face_match` producer, which needs
+  collector media. See blocker below.
+- Stage 5 (single compose + decommission FT DB) — PARTIAL: standalone FT DB +
+  containers/images/volumes already removed. Remaining: a `face_worker` compose
+  service (needs the worker converted to a long-running loop) — deferred (docker
+  deprioritized this session).
+
+**⚠️ Blocker — collector source media wiped.** The Z: reformat destroyed the
+collector media under `Z:/unifiedcollector/media` (all 15 source dirs empty)
+while the collector DB still lists ~140k media rows. Re-derive, face re-index,
+and the Stage 3 producer swap are all blocked until the source media is restored
+(re-run unifiedcollector or restore a backup). The analyzer DB itself survived
+(entities + media_analysis intact).
