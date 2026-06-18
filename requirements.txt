@@ -17,3 +17,25 @@ PyMuPDF>=1.24
 # use — smaller install + lower RAM baseline on this headless pipeline.
 opencv-python-headless>=4.9
 onnxruntime>=1.17
+
+# ── facetracker face engine (merge Stage 0 — see docs/facetracker_merge_plan.md)
+# Vendored into src/face/. Scope is collector media only (D3), so the vendored
+# drive discovery/ and DeepSORT tracker modules are currently UNUSED and will be
+# pruned (along with their deps: watchdog, deep-sort-realtime, aiofiles) in a
+# later stage. Deps below are the ones the collector-media face path needs.
+sqlalchemy>=2.0.0
+pgvector>=0.2.0
+psycopg2-binary>=2.9.9
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+insightface>=0.7.3
+faiss-cpu>=1.8.0
+scikit-learn>=1.4.0
+hdbscan>=0.8.1
+umap-learn>=0.5.5
+pillow-heif>=0.15.0
+imageio>=2.34.0
+imageio-ffmpeg>=0.4.9
+structlog>=24.0.0
+loguru>=0.7.0
+python-multipart>=0.0.9
