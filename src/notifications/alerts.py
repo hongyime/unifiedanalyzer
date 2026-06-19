@@ -114,3 +114,24 @@ async def notify_error(run_type: str, error: str):
         f"❌ <b>{run_type.title()} run failed</b>\n"
         f"<code>{error[:500]}</code>"
     )
+
+
+async def notify_status(s: dict):
+    """Periodic system-status heartbeat to the group chat.
+
+    Unlike the event-driven notifications above (run complete, new alert, …),
+    this is a recurring "here's where things stand" snapshot posted on an
+    interval by the scheduler, so the group always has a current picture even
+    when nothing eventful happened. Built by scheduler._build_status.
+    """
+    url = telegram.get_dashboard_url()
+    icon = "✅" if s.get("db_ok") else "⚠️"
+    lines = [f"{icon} <b>UnifiedAnalyzer status</b>"]
+    lines.append(f"Entities: {s.get('entity_count', 0)} · Faces: {s.get('face_count', 0)}")
+    lines.append(f"Alerts: {s.get('alerts_24h', 0)} (24h), {s.get('unread', 0)} unread")
+    if s.get("last_run"):
+        lines.append(f"Last run: {s['last_run']}")
+    if s.get("collectors_down"):
+        lines.append(f"⚠️ Collectors quiet: {', '.join(s['collectors_down'])}")
+    lines.append(f"\n{url}")
+    await telegram.send("\n".join(lines))

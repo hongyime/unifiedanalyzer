@@ -7,6 +7,7 @@ from src.db.connection import check_db_connectivity, get_analyzer_pool, get_coll
 from src.pipeline.incremental_runner import run_incremental, run_full_resolution, get_last_run_time
 from src.notifications.alerts import (
     notify_collector_health, notify_daily_digest, notify_merge_candidate,
+    notify_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,46 @@ async def _build_daily_digest() -> dict:
     }
 
 
+async def _build_status() -> dict:
+    """Compact current-state snapshot for the periodic status heartbeat.
+
+    Lighter than _build_daily_digest: just the numbers the group wants at a
+    glance, plus the facetracker face count (merge) and the last completed run.
+    """
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        entity_count = await conn.fetchval("SELECT COUNT(*) FROM entities")
+        alerts_24h = await conn.fetchval(
+            "SELECT COUNT(*) FROM alerts WHERE detected_at > NOW() - INTERVAL '24 hours'"
+        )
+        unread = await conn.fetchval("SELECT COUNT(*) FROM alerts WHERE is_read = false")
+        # Faces live in the facetracker schema (merge); tolerate it being absent.
+        try:
+            face_count = await conn.fetchval("SELECT COUNT(*) FROM facetracker.faces")
+        except Exception:
+            face_count = 0
+        last = await conn.fetchrow(
+            "SELECT run_type, finished_at FROM analysis_runs "
+            "WHERE status = 'completed' AND finished_at IS NOT NULL "
+            "ORDER BY finished_at DESC LIMIT 1"
+        )
+
+    last_run = None
+    if last and last["finished_at"]:
+        last_run = f"{last['run_type']} @ {last['finished_at'].strftime('%Y-%m-%d %H:%M UTC')}"
+
+    issues = await _check_collector_health()
+    return {
+        "db_ok": True,
+        "entity_count": entity_count or 0,
+        "face_count": face_count or 0,
+        "alerts_24h": alerts_24h or 0,
+        "unread": unread or 0,
+        "last_run": last_run,
+        "collectors_down": [i["source"] for i in issues],
+    }
+
+
 async def _check_merge_candidates():
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
@@ -139,12 +180,16 @@ async def start_scheduler() -> None:
     interval = int(os.getenv("INCREMENTAL_RUN_INTERVAL_MINUTES", "60")) * 60
     full_interval = timedelta(hours=int(os.getenv("FULL_RESOLUTION_INTERVAL_HOURS", "12")))
     digest_hour = int(os.getenv("DAILY_DIGEST_HOUR", "8"))
+    # Recurring status heartbeat to the group chat (hours; 0 disables).
+    status_interval_h = int(os.getenv("STATUS_HEARTBEAT_INTERVAL_HOURS", "6"))
 
-    logger.info("Scheduler started: incremental every %d min, full resolution every %s, digest at %02d:00 UTC",
-                interval // 60, full_interval, digest_hour)
+    logger.info("Scheduler started: incremental every %d min, full resolution every %s, "
+                "digest at %02d:00 UTC, status heartbeat every %dh",
+                interval // 60, full_interval, digest_hour, status_interval_h)
 
     last_digest_date: str | None = None
     last_health_check: datetime | None = None
+    last_status: datetime | None = None
     was_offline = False
 
     while _running:
@@ -178,6 +223,18 @@ async def start_scheduler() -> None:
                 last_health_check = now
             except Exception:
                 logger.exception("Collector health check failed")
+
+        # Recurring status heartbeat to the group chat. Fires on the first loop
+        # (confirms the system is up) then every status_interval_h hours.
+        if status_interval_h > 0 and (
+            last_status is None
+            or (now - last_status).total_seconds() >= status_interval_h * 3600
+        ):
+            try:
+                await notify_status(await _build_status())
+                last_status = now
+            except Exception:
+                logger.exception("Status heartbeat failed")
 
         last_full_run = await get_last_run_time("full_resolution")
         if last_full_run is None or (now - last_full_run) >= full_interval:
