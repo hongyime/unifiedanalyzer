@@ -2,6 +2,7 @@ services:
   analyzer:
     # Dashboard image bundles the built frontend + API + scheduler.
     # Auto-starts with Docker Desktop via restart: unless-stopped.
+    image: unifiedanalyzer:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.dashboard
@@ -20,10 +21,38 @@ services:
       MEDIA_DERIVED_PATH: /app/media_derived
       # COLLECTOR_MEDIA_ROOT is the dir that CONTAINS the "media/" folder.
       COLLECTOR_MEDIA_ROOT: /app/collector_root
+      # Face artifacts (crops/FAISS/thumbs/InsightFace cache) under the mounted
+      # derived dir — container path, not the host Z: path from .env.
+      FACE_MODEL_ROOT: /app/media_derived/faces
     volumes:
       # Collector media (read-only) for thumbnails of real media items.
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       # Derived artifacts (PDF images / video frames / ONNX models) on Z:.
+      - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
+    networks:
+      - unifiedcollector_default
+    restart: unless-stopped
+
+  # Face indexing worker (merge §6): a SEPARATE long-running process (SQLAlchemy
+  # + ONNX threads) from the analyzer's asyncio API/scheduler. Reuses the same
+  # image; runs the continuous loop. No-op until collector source media is
+  # restored (task B1). Reads/writes the same Z: derived + model dirs and the
+  # shared analyzer DB.
+  face_worker:
+    image: unifiedanalyzer:latest
+    depends_on:
+      - analyzer
+    command: ["python", "-m", "src.face_worker", "loop"]
+    env_file:
+      - ../.env
+    environment:
+      ANALYZER_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedanalyzer
+      COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
+      MEDIA_DERIVED_PATH: /app/media_derived
+      COLLECTOR_MEDIA_ROOT: /app/collector_root
+      FACE_MODEL_ROOT: /app/media_derived/faces
+    volumes:
+      - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
     networks:
       - unifiedcollector_default

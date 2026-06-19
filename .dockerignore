@@ -1,0 +1,28 @@
+# Keep the build context lean + correct. Without this, `COPY frontend/ ./`
+# would copy the host's frontend/node_modules over the container's `npm ci`
+# output (platform mismatch), and the whole .git / venv would bloat context.
+.git
+.gitignore
+
+# Node
+node_modules
+frontend/node_modules
+frontend/dist
+
+# Python
+.venv
+venv
+**/__pycache__
+**/*.pyc
+*.egg-info
+
+# Local env + data (image reads config via env_file at run time, not build)
+.env
+data
+docs
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea
+.vscode
