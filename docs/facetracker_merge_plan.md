@@ -192,3 +192,38 @@ while the collector DB still lists ~140k media rows. Re-derive, face re-index,
 and the Stage 3 producer swap are all blocked until the source media is restored
 (re-run unifiedcollector or restore a backup). The analyzer DB itself survived
 (entities + media_analysis intact).
+
+## 8. Status update (2026-06-20) — media refilling, F3 landed
+
+The collector media is refilling (COLLECTOR_RECOVER_MISSING); ~36 GB / ~66k
+files back at time of writing and the per-source dirs are repopulating. With that
+unblocked, the remaining merge work was completed:
+
+- **R5 (derived-artifact backfill) — DONE.** `src/pipeline/backfill_derived.py`
+  cleared the stale `media_analysis` marker rows (88 video + 644 pdf) whose Z:
+  files were lost and re-derived them; on-disk `media_derived/video_frames` +
+  `pdf_images` regenerated. Stale-marker count is now 0. Items whose source has
+  not refilled yet carry no marker and are re-derived automatically by the
+  running scheduler as their media lands. A token-free plateau watcher
+  (`src/pipeline/watch_refill_backfill.py`) can re-run it unattended.
+- **R6 / R7 — auto-progressing.** `face_worker` is indexing collector images
+  into `facetracker.faces` (+512-dim ArcFace) and writing the
+  `public.entity_faces` bridge inline; counts climb as media refills.
+- **Stage 3 (F3) — DONE.** `_build_face_match_signals()` now derives the
+  cross-entity `media_face_match` identity signal from the facetracker
+  InsightFace corpus (`facetracker.faces` JOIN `public.entity_faces`) instead of
+  the 128-dim SFace embeddings. Same-DB cross-schema query; pgvector read as
+  `::text` and json-parsed. Threshold `_INSIGHTFACE_MATCH_THRESHOLD=0.40`
+  (env-overridable). Rebuild is gated on an `entity_faces` COUNT change (the
+  facetracker corpus grows via the separate worker, not the SFace cycle). SFace
+  detection still feeds the gallery `has_face` filter; it no longer drives
+  identity matching. Validated live: 0 signals on the current 4-distinct-people
+  corpus (correct precision-first outcome — no same-person-across-entities
+  collision yet); signals populate as the bridge grows.
+- **Stage 5 — DONE.** `face_worker` is now a `restart: unless-stopped` compose
+  service in the single `docker/docker-compose.yml`, sharing the
+  `unifiedanalyzer:latest` image.
+
+Remaining is not analyzer work: **B1** — finish restoring collector source media
+(unifiedcollector's job); face-match signals and derived artifacts deepen
+automatically as it completes.
