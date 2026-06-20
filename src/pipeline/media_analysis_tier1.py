@@ -6,14 +6,18 @@ downloaded ONNX face models.
 
   6D  analyze_media_ocr()     — Tesseract OCR -> email_match/phone_match/
                                   cross_platform_link/shared_website reuse
-  6F  analyze_media_faces()   — YuNet detection + SFace embeddings ->
-                                  media_face_match
+  6F  analyze_media_faces()   — YuNet detection + SFace embeddings (feed the
+                                  media gallery "has_face" filter). The
+                                  media_face_match identity signal is built by
+                                  _build_face_match_signals() from facetracker's
+                                  InsightFace/ArcFace 512-dim corpus (F3).
   6H  extract_video_frames()  — ffmpeg sparse keyframes (personal-comms
                                   video only), feeds 6B/6D/6F
 
 See docs/media_analysis_plan.md for the full spec.
 """
 import asyncio
+import json
 import logging
 import io
 import os
@@ -191,7 +195,16 @@ _FACE_CONTENT_TYPES_PRIORITY = [
 _FACE_MAX_DIM = 1600
 # Cosine similarity between SFace embeddings. OpenCV's model docs cite ~0.363
 # as the threshold at FAR=1e-3; pick a bit stricter to stay precision-first.
+# NOTE: SFace embeddings (analyze_media_faces) still feed the media gallery's
+# "has_face" filter, but they NO LONGER drive identity matching — F3 moved the
+# media_face_match signal onto InsightFace/facetracker embeddings (below).
 _FACE_MATCH_THRESHOLD = 0.40
+
+# F3: cross-entity matching now uses facetracker's 512-dim ArcFace (InsightFace)
+# embeddings instead of the 128-dim SFace ones. ArcFace cosine separates
+# same/different identity much more cleanly; 0.40 keeps this precision-first
+# (same-person pairs typically land 0.45-0.7, impostors below ~0.2).
+_INSIGHTFACE_MATCH_THRESHOLD = float(os.getenv("INSIGHTFACE_MATCH_THRESHOLD", "0.40"))
 
 
 def _face_models_available() -> bool:
@@ -296,51 +309,91 @@ async def analyze_media_faces(limit: int | None = None) -> dict:
     await upsert_media_analysis(embedding_rows)
     stats["processed"] = len(detection_rows)
 
-    # Skip the (potentially large) signal rebuild on idle cycles — if no new
-    # faces were detected this run, the embedding corpus is unchanged and the
-    # existing media_face_match signals are still correct. CPU/RAM saver.
-    if stats["processed"]:
-        stats["media_face_match_signals"] = await _build_face_match_signals()
+    # F3: the media_face_match signal is built from the facetracker InsightFace
+    # corpus, which face_worker grows INDEPENDENTLY of this SFace cycle. So gate
+    # the (O(n^2)) rebuild on the bridge corpus changing — not on SFace having
+    # processed new media — else signals would go stale whenever SFace is idle
+    # but face_worker keeps indexing. _maybe_build_face_match_signals is a cheap
+    # COUNT check that rebuilds only when entity_faces changed since last build.
+    stats["media_face_match_signals"] = await _maybe_build_face_match_signals()
     logger.info("6F face detection: %s", stats)
     return stats
 
 
-async def _build_face_match_signals() -> int:
+# Module-level cache of the entity_faces row count at the last successful signal
+# rebuild. -1 forces a rebuild on the first cycle after process start.
+_last_bridge_count = -1
+
+
+async def _maybe_build_face_match_signals() -> int:
+    """Rebuild media_face_match signals only when the bridged-face corpus
+    (public.entity_faces) has changed since the last build. Returns the number
+    of signals written, or -1 when the rebuild was skipped (corpus unchanged)."""
+    global _last_bridge_count
     analyzer = get_analyzer_pool()
     async with analyzer.acquire() as conn:
-        # Cap the corpus (most-recent embeddings first) so this rebuild stays
-        # bounded in RAM/CPU as the table grows past tens of thousands of faces.
+        count = await conn.fetchval("SELECT count(*) FROM public.entity_faces")
+    if count == _last_bridge_count:
+        return -1  # unchanged — existing signals still valid, skip the rebuild
+    n = await _build_face_match_signals()
+    _last_bridge_count = count
+    return n
+
+
+def _parse_pgvector(text: str) -> list[float]:
+    """pgvector renders vector(512) as '[0.1,0.2,...]'. asyncpg has no codec for
+    the type registered on the analyzer pool, so we SELECT embedding_vec::text and
+    parse here (the bracketed form is valid JSON)."""
+    return json.loads(text)
+
+
+async def _build_face_match_signals() -> int:
+    """F3 — derive the cross-entity media_face_match identity signal from the
+    facetracker InsightFace (ArcFace, 512-dim) corpus, bridged to analyzer
+    entities via public.entity_faces. Replaces the old SFace-embedding source.
+
+    facetracker.faces + public.entity_faces live in the SAME analyzer DB (just
+    other schemas), so one analyzer connection reaches both — no cross-DB hop.
+    entity_faces already carries the resolved entity_id, so no entity_lookup is
+    needed; we only resolve each face's SOURCE PLATFORM (via its media_item) to
+    keep the cross-platform-only filter the signal depends on.
+    """
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        # Highest-quality faces first so the bounded corpus keeps the best crops
+        # as the table grows past tens of thousands of faces.
         emb_rows = await conn.fetch("""
-            SELECT media_item_id, parent_media_item_id, face_embedding
-            FROM media_analysis
-            WHERE analysis_type = 'face_embedding' AND face_embedding IS NOT NULL
-            ORDER BY processed_at DESC
+            SELECT ef.entity_id::text   AS entity_id,
+                   ef.media_item_id     AS media_item_id,
+                   f.id                 AS face_id,
+                   f.embedding_vec::text AS emb
+            FROM public.entity_faces ef
+            JOIN facetracker.faces f ON f.id = ef.face_id
+            WHERE ef.entity_id IS NOT NULL AND f.embedding_vec IS NOT NULL
+            ORDER BY f.quality_score DESC NULLS LAST
             LIMIT $1
         """, MEDIA_FACE_MATCH_MAX)
 
     new_signals: list[tuple] = []
     if emb_rows:
-        real_ids = list({r["parent_media_item_id"] or r["media_item_id"] for r in emb_rows})
-        item_entities = await fetch_media_item_entities(real_ids)
-        entity_lookup = await build_entity_lookup()
+        # Resolve each face's source platform from its bridged collector media
+        # item. Faces with no media_item_id (e.g. video-frame faces keyed on
+        # video_path) get source=None and are simply excluded from the
+        # same-platform skip — they can still match cross-identity.
+        mi_ids = list({r["media_item_id"] for r in emb_rows if r["media_item_id"]})
+        item_entities = await fetch_media_item_entities(mi_ids) if mi_ids else {}
 
         eids: list[str] = []
-        srcs: list[str] = []
+        srcs: list[str | None] = []
         mids: list[str] = []
         embs: list[list[float]] = []
         for r in emb_rows:
-            real_id = r["parent_media_item_id"] or r["media_item_id"]
-            src = item_entities.get(real_id)
-            if not src:
-                continue
-            source, raw_eid = src
-            eid = lookup_entity(entity_lookup, source, raw_eid)
-            if not eid:
-                continue
-            eids.append(eid)
+            mi = r["media_item_id"]
+            source = item_entities.get(mi, (None, None))[0] if mi else None
+            eids.append(r["entity_id"])
             srcs.append(source)
-            mids.append(r["media_item_id"])
-            embs.append(r["face_embedding"])
+            mids.append(mi or f"face:{r['face_id']}")
+            embs.append(_parse_pgvector(r["emb"]))
 
         n = len(embs)
         if n >= 2:
@@ -357,10 +410,15 @@ async def _build_face_match_signals() -> int:
             pairwise: list[tuple] = []  # (sim, i, j)
             for i in range(n - 1):
                 sims = M[i + 1:] @ M[i]  # cosine sims of all j>i against i
-                for jrel in np.nonzero(sims >= _FACE_MATCH_THRESHOLD)[0]:
+                for jrel in np.nonzero(sims >= _INSIGHTFACE_MATCH_THRESHOLD)[0]:
                     j = i + 1 + int(jrel)
-                    if eids[i] == eids[j] or srcs[i] == srcs[j]:
-                        continue  # same entity or same platform — not cross-identity
+                    # Skip same entity, or same KNOWN platform (cross-platform is
+                    # the whole point of this signal). Unknown source (None) is
+                    # not treated as a shared platform, so it can still match.
+                    if eids[i] == eids[j]:
+                        continue
+                    if srcs[i] is not None and srcs[i] == srcs[j]:
+                        continue
                     sim = float(sims[jrel])
                     match_targets[i].add(eids[j])
                     match_targets[j].add(eids[i])
@@ -381,7 +439,8 @@ async def _build_face_match_signals() -> int:
 
             for sim, a_eid, a_mid, b_eid, b_mid in pair_best.values():
                 new_signals.append((
-                    a_eid, "media_face_match", "multi", "media_items", "face_embedding", a_mid,
+                    a_eid, "media_face_match", "multi", "facetracker.faces",
+                    "insightface_embedding", a_mid,
                     "multi", b_eid, f"sim:{sim:.3f}", round(min(sim, 0.99), 2),
                 ))
 
