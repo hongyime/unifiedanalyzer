@@ -74,8 +74,16 @@ _scheduler_task: asyncio.Task | None = None
 async def startup():
     global _scheduler_task
     await init_pools()
-    _scheduler_task = asyncio.create_task(start_scheduler())
-    logging.getLogger(__name__).info("UnifiedAnalyzer started")
+    # The scheduler runs the heavy Phase-6 pipeline (cv2 / ffmpeg / pypdf) whose
+    # blocking C calls would freeze this uvicorn event loop for the whole run,
+    # making the dashboard unresponsive. So it now runs as a SEPARATE process
+    # (the `scheduler` compose service / `python -m src.main scheduler`). Set
+    # RUN_SCHEDULER=1 to co-host it in-process (single-process / dev fallback).
+    if os.getenv("RUN_SCHEDULER", "0") == "1":
+        _scheduler_task = asyncio.create_task(start_scheduler())
+        logging.getLogger(__name__).info("UnifiedAnalyzer started (scheduler in-process)")
+    else:
+        logging.getLogger(__name__).info("UnifiedAnalyzer started (API only; scheduler is a separate process)")
     asyncio.create_task(notify_startup())
 
 

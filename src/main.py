@@ -19,7 +19,8 @@ def main():
     parser = argparse.ArgumentParser(description="UnifiedAnalyzer — Personal OSINT Analyzer")
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("serve", help="Start the FastAPI server with scheduler")
+    sub.add_parser("serve", help="Start the FastAPI server (API only; scheduler is separate)")
+    sub.add_parser("scheduler", help="Run the analysis scheduler loop (separate process)")
     sub.add_parser("run", help="Run one incremental analysis cycle")
     sub.add_parser("full", help="Run full identity resolution")
     sub.add_parser("schema", help="Apply database schema (idempotent)")
@@ -31,6 +32,22 @@ def main():
         port = int(os.getenv("API_PORT", "8001"))
         host = os.getenv("API_HOST", "0.0.0.0")
         uvicorn.run("src.api.app:app", host=host, port=port, reload=False)
+
+    elif args.command == "scheduler":
+        # Standalone scheduler process: runs the heavy Phase-6 pipeline off the
+        # API's event loop so the dashboard stays responsive during runs. Mirrors
+        # the face_worker split. start_scheduler() is a long-lived loop.
+        from src.db.connection import init_pools, close_pools
+        from src.scheduler.scheduler import start_scheduler
+
+        async def _run():
+            await init_pools()
+            try:
+                await start_scheduler()
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
 
     elif args.command == "run":
         from src.db.connection import init_pools, close_pools

@@ -24,10 +24,39 @@ services:
       # Face artifacts (crops/FAISS/thumbs/InsightFace cache) under the mounted
       # derived dir — container path, not the host Z: path from .env.
       FACE_MODEL_ROOT: /app/media_derived/faces
+      # API only — the scheduler runs as a SEPARATE process (the `scheduler`
+      # service below) so its blocking Phase-6 work never freezes the dashboard.
+      RUN_SCHEDULER: "0"
     volumes:
       # Collector media (read-only) for thumbnails of real media items.
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       # Derived artifacts (PDF images / video frames / ONNX models) on Z:.
+      - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
+    networks:
+      - unifiedcollector_default
+    restart: unless-stopped
+
+  # Analysis scheduler: a SEPARATE process running the periodic incremental /
+  # full-resolution pipeline (Phase 6 media analysis, identity resolution,
+  # notifications). Split out of the API container because its blocking cv2 /
+  # ffmpeg / pypdf calls would otherwise freeze the uvicorn event loop — and the
+  # dashboard with it — for the whole run. Reuses the same image; owns the
+  # Telegram run-summary + heartbeat notifications.
+  scheduler:
+    image: unifiedanalyzer:latest
+    depends_on:
+      - analyzer
+    command: ["python", "-m", "src.main", "scheduler"]
+    env_file:
+      - ../.env
+    environment:
+      ANALYZER_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedanalyzer
+      COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
+      MEDIA_DERIVED_PATH: /app/media_derived
+      COLLECTOR_MEDIA_ROOT: /app/collector_root
+      FACE_MODEL_ROOT: /app/media_derived/faces
+    volumes:
+      - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
     networks:
       - unifiedcollector_default
