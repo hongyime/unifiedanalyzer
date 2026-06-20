@@ -57,6 +57,27 @@ async def _is_run_locked() -> bool:
     return row is not None
 
 
+async def clear_orphaned_run_locks() -> int:
+    """Mark every still-'running' analysis_runs row as failed. Called once at
+    scheduler startup: in the single-scheduler-process model a freshly started
+    scheduler is the ONLY scheduler, so any 'running' row was orphaned by a
+    predecessor killed mid-run (e.g. a container recreate). Without this, the new
+    scheduler would skip runs for up to 30 min until _is_run_locked's stale-lock
+    timer fires. Returns the number cleared."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        cleared = await conn.fetch("""
+            UPDATE analysis_runs
+            SET status = 'failed', finished_at = NOW(),
+                error_message = 'Orphaned by scheduler restart — cleared on startup'
+            WHERE status = 'running'
+            RETURNING id
+        """)
+    if cleared:
+        logger.warning("Cleared %d orphaned run lock(s) on scheduler startup", len(cleared))
+    return len(cleared)
+
+
 async def get_last_run_time(run_type: str) -> datetime | None:
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:

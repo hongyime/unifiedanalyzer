@@ -4,7 +4,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from src.db.connection import check_db_connectivity, get_analyzer_pool, get_collector_pool
-from src.pipeline.incremental_runner import run_incremental, run_full_resolution, get_last_run_time
+from src.pipeline.incremental_runner import (
+    run_incremental,
+    run_full_resolution,
+    get_last_run_time,
+    clear_orphaned_run_locks,
+)
 from src.notifications.alerts import (
     notify_collector_health, notify_daily_digest, notify_merge_candidate,
     notify_status,
@@ -176,6 +181,14 @@ async def _check_merge_candidates():
 async def start_scheduler() -> None:
     global _running
     _running = True
+
+    # A fresh scheduler process is the only scheduler — clear any 'running' lock
+    # orphaned by a predecessor killed mid-run (container recreate), so we don't
+    # skip runs for up to 30 min waiting on the stale-lock timer.
+    try:
+        await clear_orphaned_run_locks()
+    except Exception:
+        logger.exception("Failed clearing orphaned run locks at startup (non-fatal)")
 
     interval = int(os.getenv("INCREMENTAL_RUN_INTERVAL_MINUTES", "60")) * 60
     full_interval = timedelta(hours=int(os.getenv("FULL_RESOLUTION_INTERVAL_HOURS", "12")))
