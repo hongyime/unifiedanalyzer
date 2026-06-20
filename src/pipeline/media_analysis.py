@@ -13,6 +13,7 @@ src/pipeline/media_analysis_tier1.py.
 """
 import logging
 import os
+import concurrent.futures
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -375,6 +376,19 @@ async def analyze_media_pdf_text(limit: int | None = None) -> dict:
 _MIN_EMBEDDED_IMAGE_DIM = 100
 
 
+# Embedded-image bytes are written to the derived dir, which on the dockerized
+# stack is a Windows bind-mount (Z:) through Docker Desktop's WSL2 layer — slow
+# PER FILE (~200ms+), and a single PDF can yield 100s of images. doc.extract_image
+# returns the already-stored bytes (no decode), so the write latency dominates.
+# Dispatch the independent writes to a small thread pool so that latency overlaps
+# (~4x measured). Writes still go to Z: only — nothing is written into the
+# container's own (C:-backed) layer, so the docker image/vhdx does not grow.
+_PDF_WRITE_WORKERS = int(os.getenv("MEDIA_PDF_WRITE_WORKERS", "8"))
+_pdf_write_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_PDF_WRITE_WORKERS, thread_name_prefix="pdf-img-write"
+)
+
+
 async def extract_pdf_images(limit: int | None = None) -> dict:
     stats = {"pdfs_processed": 0, "images_extracted": 0}
     if not _drive_available():
@@ -388,7 +402,9 @@ async def extract_pdf_images(limit: int | None = None) -> dict:
         path = resolve_media_path(item["file_path"])
         if path is None:
             continue
-        count = 0
+        # (write-future, image_row) pairs — the row is recorded only once its file
+        # has actually landed, so DB rows never reference a missing file.
+        pending: list[tuple[concurrent.futures.Future, dict]] = []
         try:
             doc = fitz.open(str(path))
             for page_num in range(len(doc)):
@@ -403,8 +419,8 @@ async def extract_pdf_images(limit: int | None = None) -> dict:
                         continue
                     ext = base.get("ext", "png")
                     derived_path = PDF_IMAGE_DIR / f"{item['id']}_{page_num}_{idx}.{ext}"
-                    derived_path.write_bytes(base["image"])
-                    image_rows.append({
+                    fut = _pdf_write_pool.submit(derived_path.write_bytes, base["image"])
+                    pending.append((fut, {
                         "media_item_id": f"{item['id']}:pdf_img:{page_num}:{idx}",
                         "parent_media_item_id": item["id"],
                         "source": item["source"], "content_type": "image",
@@ -414,11 +430,22 @@ async def extract_pdf_images(limit: int | None = None) -> dict:
                             "idx": idx, "width": width, "height": height,
                         },
                         "model_version": "pymupdf-v1",
-                    })
-                    count += 1
+                    }))
             doc.close()
         except Exception:
             logger.debug("PDF image extraction failed for %s", path, exc_info=True)
+
+        # Drain this PDF's writes before recording its marker. Only count images
+        # whose write succeeded.
+        count = 0
+        for fut, row in pending:
+            try:
+                fut.result()
+            except Exception:
+                logger.debug("PDF image write failed for %s", row["result_json"]["derived_path"], exc_info=True)
+                continue
+            image_rows.append(row)
+            count += 1
 
         # Marker row on the PDF's own id — done-cursor for fetch_unprocessed_media.
         # Per-image rows above (analysis_type='pdf_image') are what 6B/6D/6F pick up
