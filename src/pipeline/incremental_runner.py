@@ -26,7 +26,12 @@ from src.pipeline.media_analysis import (
     analyze_media_phash,
     extract_pdf_images,
 )
-from src.pipeline.media_analysis_tier1 import analyze_media_faces, analyze_media_ocr, extract_video_frames
+from src.pipeline.media_analysis_tier1 import (
+    analyze_media_faces,
+    analyze_media_ocr,
+    extract_video_frames,
+    rebuild_face_match_signals,
+)
 from src.pipeline.identity_scorer import compute_identity_scores
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
@@ -222,6 +227,13 @@ async def run_incremental() -> dict:
         except Exception:
             logger.exception("Media face analysis failed (non-fatal)")
 
+        # F3: rebuild the InsightFace-backed media_face_match signal independently
+        # of the SFace face step above (which skips when its models are missing).
+        try:
+            await rebuild_face_match_signals()
+        except Exception:
+            logger.exception("Face-match signal rebuild failed (non-fatal)")
+
         try:
             await compute_identity_scores()
         except Exception:
@@ -366,6 +378,13 @@ async def run_full_resolution() -> dict:
             await analyze_media_faces()
         except Exception:
             logger.exception("Media face analysis failed (non-fatal)")
+
+        # F3: rebuild the InsightFace-backed media_face_match signal independently
+        # of the SFace face step above (which skips when its models are missing).
+        try:
+            await rebuild_face_match_signals()
+        except Exception:
+            logger.exception("Face-match signal rebuild failed (non-fatal)")
 
         try:
             await compute_identity_scores()

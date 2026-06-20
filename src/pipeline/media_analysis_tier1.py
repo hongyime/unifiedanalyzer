@@ -309,13 +309,12 @@ async def analyze_media_faces(limit: int | None = None) -> dict:
     await upsert_media_analysis(embedding_rows)
     stats["processed"] = len(detection_rows)
 
-    # F3: the media_face_match signal is built from the facetracker InsightFace
-    # corpus, which face_worker grows INDEPENDENTLY of this SFace cycle. So gate
-    # the (O(n^2)) rebuild on the bridge corpus changing — not on SFace having
-    # processed new media — else signals would go stale whenever SFace is idle
-    # but face_worker keeps indexing. _maybe_build_face_match_signals is a cheap
-    # COUNT check that rebuilds only when entity_faces changed since last build.
-    stats["media_face_match_signals"] = await _maybe_build_face_match_signals()
+    # NOTE: the media_face_match identity signal is NO LONGER built here. It is
+    # InsightFace-based (facetracker corpus) and must run even when the SFace
+    # models are absent — but this function early-returns above in that case. So
+    # the rebuild lives in rebuild_face_match_signals(), called independently by
+    # the runner (see incremental_runner). This function now only produces the
+    # SFace face_detection/face_embedding rows that feed the gallery has_face.
     logger.info("6F face detection: %s", stats)
     return stats
 
@@ -325,10 +324,16 @@ async def analyze_media_faces(limit: int | None = None) -> dict:
 _last_bridge_count = -1
 
 
-async def _maybe_build_face_match_signals() -> int:
+async def rebuild_face_match_signals() -> int:
     """Rebuild media_face_match signals only when the bridged-face corpus
     (public.entity_faces) has changed since the last build. Returns the number
-    of signals written, or -1 when the rebuild was skipped (corpus unchanged)."""
+    of signals written, or -1 when the rebuild was skipped (corpus unchanged).
+
+    F3: this is decoupled from analyze_media_faces (the SFace detector) on
+    purpose — the signal is built from facetracker's InsightFace corpus, which
+    face_worker grows independently, so it must run even when the SFace YuNet/
+    SFace models are missing. The cheap COUNT gate keeps the O(n^2) rebuild off
+    idle cycles. Called directly by incremental_runner after the face step."""
     global _last_bridge_count
     analyzer = get_analyzer_pool()
     async with analyzer.acquire() as conn:

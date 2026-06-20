@@ -14,10 +14,12 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 
-# System libs for the Phase 6 media stack (Pillow/OpenCV) used by the
-# /api/media thumbnail + analysis endpoints.
+# System libs + binaries for the full Phase 6 media stack:
+#  - libglib2.0-0 libgl1 : OpenCV / Pillow runtime (thumbnails + face detect)
+#  - ffmpeg              : 6H sparse video-frame extraction
+#  - tesseract-ocr       : 6D image/PDF OCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libgl1 \
+    libglib2.0-0 libgl1 ffmpeg tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
