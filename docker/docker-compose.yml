@@ -1,3 +1,12 @@
+# Cap container log growth. Docker's json-file logs live INSIDE the C:-backed
+# WSL2 vhdx, so uncapped logs are one of the few ways these long-running services
+# can quietly grow the disk. 3 x 10MB = 30MB max per service (oldest rotated out).
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   analyzer:
     # Dashboard image bundles the built frontend + API + scheduler.
@@ -35,6 +44,7 @@ services:
     networks:
       - unifiedcollector_default
     restart: unless-stopped
+    logging: *default-logging
 
   # Analysis scheduler: a SEPARATE process running the periodic incremental /
   # full-resolution pipeline (Phase 6 media analysis, identity resolution,
@@ -61,6 +71,7 @@ services:
     networks:
       - unifiedcollector_default
     restart: unless-stopped
+    logging: *default-logging
 
   # Face indexing worker (merge §6): a SEPARATE long-running process (SQLAlchemy
   # + ONNX threads) from the analyzer's asyncio API/scheduler. Reuses the same
@@ -86,6 +97,7 @@ services:
     networks:
       - unifiedcollector_default
     restart: unless-stopped
+    logging: *default-logging
 
 networks:
   unifiedcollector_default:
