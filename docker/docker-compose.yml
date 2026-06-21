@@ -72,6 +72,10 @@ services:
       - unifiedcollector_default
     restart: unless-stopped
     logging: *default-logging
+    # Soft CPU priority: this heavy background pipeline (cv2/ffmpeg/pdf/ONNX)
+    # yields under contention so it never starves host-critical neighbours
+    # (pihole DNS, plex, the collector). Full speed when the host is idle.
+    cpu_shares: 512
 
   # Face indexing worker (merge §6): a SEPARATE long-running process (SQLAlchemy
   # + ONNX threads) from the analyzer's asyncio API/scheduler. Reuses the same
@@ -98,6 +102,9 @@ services:
       - unifiedcollector_default
     restart: unless-stopped
     logging: *default-logging
+    # Soft CPU priority — same as the scheduler: ONNX face inference yields to
+    # host-critical neighbours under contention rather than pegging cores.
+    cpu_shares: 512
 
 networks:
   unifiedcollector_default:
