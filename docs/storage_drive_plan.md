@@ -13,6 +13,11 @@ C: is space-constrained. Two failure modes filled it before:
 
 **Rule:** every growing artifact writes under Z:; never scan C:/OneDrive.
 
+> **Update 2026-06-26:** drive face-scanning is now live — `face_worker` scans
+> the **W:/X:/Y:/Z:** drives (`DRIVE_SOURCES` in docker-compose). This rule still
+> holds: **C: is deliberately excluded** from `DRIVE_SOURCES`, so no OneDrive
+> hydration. W:/X: are SMB/CIFS mounts (Tailscale `Prawn-E14`).
+
 ## Layout (single project root)
 ```
 Z:/unifiedanalyzer/media_derived/

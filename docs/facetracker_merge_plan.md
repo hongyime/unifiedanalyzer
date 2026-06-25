@@ -1,5 +1,13 @@
 # facetracker → unifiedanalyzer: Full-Merge Plan
 
+> **STATUS — COMPLETE & HISTORICAL (2026-06-26).** The merge is done: the face
+> engine lives in `src/face/` + `src/face_worker.py`, writing the `facetracker`
+> schema inside the unifiedanalyzer DB. The standalone **facetracker stack has
+> been retired and wiped** (containers removed, `C:\facetracker` deleted, code
+> preserved at github.com/bryanseah234/facetracker). face_worker now also scans
+> the W/X/Y/Z drives. See [`analyzer_overview.md`](analyzer_overview.md) for the
+> current system. This document is kept as a historical record of the plan.
+
 **Status:** DRAFT for review. No code moves until the "Open decisions" below are
 signed off.
 

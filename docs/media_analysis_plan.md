@@ -10,6 +10,12 @@ SFace ONNX models are present under `data/media_derived/models/`. Tier 2
 (6E/6I/6J/6K) remains deferred. The text below is the original spec, kept for
 the design rationale.
 
+> **Update 2026-06-26:** backfill has progressed substantially — `media_analysis`
+> is now ~178k rows and `facetracker.faces` ~2.3k. For the live per-table state
+> (and the candid gap that `entity_faces` is only ~13, i.e. faces barely bridged
+> to entities), see [`analyzer_overview.md`](analyzer_overview.md) §8–9. The
+> 2026-06-14 snapshot below is kept as the original baseline.
+
 **Current backfill state (2026-06-14, early — ~0.5% of the 124k-item corpus):**
 exif_gps 520, phash 1040, pdf_text 460, pdf_image 4432, ocr_text 210,
 face_embedding 100, video_frame 3. Zero Phase-6 identity_signals emitted yet —
