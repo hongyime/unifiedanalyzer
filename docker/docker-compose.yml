@@ -95,9 +95,43 @@ services:
       MEDIA_DERIVED_PATH: /app/media_derived
       COLLECTOR_MEDIA_ROOT: /app/collector_root
       FACE_MODEL_ROOT: /app/media_derived/faces
+      # ---- Drive face-scanning (W/X/Y/Z) ----
+      # DriveScanner walks these container paths and feeds image files through
+      # the SAME InsightFace detect->index flow as collector media (see
+      # src/face_worker.py:ingest_drive_media). C: is DELIBERATELY ABSENT —
+      # walking C: hydrates OneDrive placeholders and fills the disk (retired
+      # facetracker's exact failure; see memory onedrive-hydration-hazard).
+      # Y:/Z: are local. W:/X: are SMB shares on Tailscale host Prawn-E14
+      # (100.92.164.125), mounted as CIFS volumes (see top-level `volumes:`).
+      DRIVE_SOURCES: >-
+        [{"path": "/mnt/w", "type": "local"},
+         {"path": "/mnt/x", "type": "local"},
+         {"path": "/mnt/y", "type": "local"},
+         {"path": "/mnt/z", "type": "local"}]
+      # Prefix-excluded subtrees: the analyzer's own derived face crops (would
+      # be a circular re-detect), collector media already indexed via the
+      # collector path (avoid dupes), and OS junk dirs.
+      # NOTE: $$ escapes a literal $ — docker-compose interpolates single $,
+      # so "$RECYCLE.BIN" must be written "$$RECYCLE.BIN" to survive.
+      EXCLUDE_PATHS: >-
+        ["/mnt/z/unifiedanalyzer", "/mnt/z/unifiedcollector",
+         "/mnt/z/$$RECYCLE.BIN", "/mnt/z/System Volume Information",
+         "/mnt/y/facetracker", "/mnt/y/unifiedcollector",
+         "/mnt/y/$$RECYCLE.BIN", "/mnt/y/System Volume Information",
+         "/mnt/w/$$RECYCLE.BIN", "/mnt/w/System Volume Information",
+         "/mnt/x/$$RECYCLE.BIN", "/mnt/x/System Volume Information"]
     volumes:
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
+      # Whole-drive read-only mounts for face scanning. Read-only: the worker
+      # only reads pixels, never writes to the scanned drives.
+      - "Y:/:/mnt/y:ro"
+      - "Z:/:/mnt/z:ro"
+      # W:/X: are SMB/CIFS volumes (defined under top-level `volumes:`) — the
+      # host's mapped network drives aren't visible to Docker's WSL2 backend, so
+      # the container mounts the share itself over Tailscale.
+      - "wdrive:/mnt/w:ro"
+      - "xdrive:/mnt/x:ro"
     networks:
       - unifiedcollector_default
     restart: unless-stopped
@@ -105,6 +139,24 @@ services:
     # Soft CPU priority — same as the scheduler: ONNX face inference yields to
     # host-critical neighbours under contention rather than pegging cores.
     cpu_shares: 512
+
+# CIFS volumes for the W:/X: drives on Tailscale host Prawn-E14. Credentials
+# come from .env (SMB_HOST/SMB_USER/SMB_PASS, gitignored) — pass
+# `--env-file ../.env` to docker compose so these ${...} refs interpolate.
+# Mounted read-only (ro) — face scanning never writes to the shares.
+volumes:
+  wdrive:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: "//${SMB_HOST}/w-drive"
+      o: "username=${SMB_USER},password=${SMB_PASS},vers=3.0,ro,uid=0,gid=0,file_mode=0444,dir_mode=0555"
+  xdrive:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: "//${SMB_HOST}/x-drive"
+      o: "username=${SMB_USER},password=${SMB_PASS},vers=3.0,ro,uid=0,gid=0,file_mode=0444,dir_mode=0555"
 
 networks:
   unifiedcollector_default:

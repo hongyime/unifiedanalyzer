@@ -265,6 +265,153 @@ def ingest_collector_media(limit: int = 50) -> dict:
     return stats
 
 
+def ingest_drive_media(limit: int = 200) -> dict:
+    """Index faces from image files on the configured DRIVE_SOURCES (e.g. the
+    W:/X:/Y:/Z: host drives, mounted into this container) into facetracker.images
+    / facetracker.faces.
+
+    This is the filesystem-walk counterpart to ingest_collector_media: instead of
+    pulling rows from the collector's media_items table, it walks the drive trees
+    via DriveScanner and runs the SAME InsightFace detect -> Image/Face write flow.
+    Differences from the collector path:
+      * Source is a filesystem walk (DriveScanner over Settings.drive_sources),
+        scoped + excluded by DRIVE_SOURCES / EXCLUDE_PATHS / EXCLUDE_DIR_NAMES.
+      * No entity bridging — a loose file on a drive has no platform owner, so we
+        do NOT write public.entity_faces (faces are still FAISS/pgvector
+        searchable and clusterable, just not pre-attributed to an entity).
+      * Images only for now. cv2.imread can't decode videos/most RAW, so we
+        filter to Settings.image_extensions. TODO(handoff): add a video-frame
+        path (mirror facetracker manager.py's ffmpeg sampling) if drive videos
+        need indexing.
+
+    SCOPE/SAFETY: DriveScanner fails closed when no drive_sources are configured
+    (see scanner.py D3 scope-lock) — and C: must never be added to DRIVE_SOURCES
+    (OneDrive hydration hazard; see memory + docs/facetracker_merge_plan.md).
+
+    Deduped by images.file_path (the container path), bounded by `limit` per call
+    for resumable batching. Idempotent: an already-indexed path is skipped.
+
+    We iterate each source with scanner.scan_directory() (single-threaded,
+    breakable generator) rather than scanner.scan_drives() (which spawns daemon
+    producer threads that would leak across repeated loop ticks when we break
+    early on `limit`).
+    """
+    import hashlib
+
+    import cv2
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    from src.face.config import Settings
+    from src.face.discovery.scanner import DriveScanner
+    from src.face.engine.detector import FaceDetector
+    from src.face.storage.database import Image as FtImage, Face as FtFace
+
+    stats = {"scanned": 0, "images_indexed": 0, "faces": 0, "skipped": 0}
+
+    settings = Settings()
+    scanner = DriveScanner(settings)
+    if not scanner.drive_sources:
+        # Fail-closed: no DRIVE_SOURCES -> nothing to do (cheap no-op).
+        return stats
+    image_exts = set(settings.image_extensions)
+
+    analyzer_engine = create_engine(
+        analyzer_sqlalchemy_url(),
+        connect_args={"options": f"-csearch_path={FACE_DB_SCHEMA},public"},
+        pool_pre_ping=True,
+    )
+    _wait_for_db(analyzer_engine)
+
+    # Dedupe cursor: every already-indexed file_path (collector + drive).
+    with analyzer_engine.connect() as aconn:
+        done = {r[0] for r in aconn.execute(text("SELECT file_path FROM images")).fetchall()}
+
+    detector = None
+    Session = sessionmaker(bind=analyzer_engine)
+
+    def _reached_limit() -> bool:
+        return stats["images_indexed"] >= limit
+
+    try:
+        for source in scanner.drive_sources:
+            if _reached_limit():
+                break
+            src_path = source.get("path") if isinstance(source, dict) else source.path
+            for batch in scanner.scan_directory(src_path):
+                if _reached_limit():
+                    break
+                for record in batch:
+                    if _reached_limit():
+                        break
+                    # cv2 can only decode raster images; skip videos/RAW.
+                    if record.extension not in image_exts:
+                        continue
+                    if record.path in done:
+                        continue
+                    stats["scanned"] += 1
+
+                    img = cv2.imread(record.path)
+                    if img is None:
+                        stats["skipped"] += 1
+                        continue
+
+                    # Lazy-init detector (first use downloads/loads the ONNX
+                    # model). Keep it off the path when nothing decodes.
+                    if detector is None:
+                        detector = FaceDetector()
+
+                    h, w = img.shape[:2]
+                    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    faces = detector.detect(rgb)
+
+                    # file_hash / embedding_id need to fit String(64). The path
+                    # itself can exceed that, so key off a sha1 of the path
+                    # (40 hex chars, leaving room for the ":{idx}" face suffix).
+                    path_hash = hashlib.sha1(record.path.encode("utf-8")).hexdigest()
+
+                    sess = Session()
+                    try:
+                        image_row = FtImage(
+                            file_path=record.path, file_hash=path_hash,
+                            file_size=int(record.size), file_mtime=record.mtime,
+                            width=w, height=h, status="completed", is_video=False,
+                            face_count=len(faces),
+                        )
+                        sess.add(image_row)
+                        sess.flush()  # assign image_row.id
+                        for idx, f in enumerate(faces):
+                            if f.embedding is None:
+                                continue
+                            x1, y1, x2, y2 = [int(v) for v in f.bbox]
+                            face_row = FtFace(
+                                image_id=image_row.id,
+                                embedding_id=f"{path_hash}:{idx}",
+                                bbox_x1=x1 / w, bbox_y1=y1 / h, bbox_x2=x2 / w, bbox_y2=y2 / h,
+                                bbox_px_x1=x1, bbox_px_y1=y1, bbox_px_x2=x2, bbox_px_y2=y2,
+                                quality_score=float(f.quality_score),
+                                laplacian_variance=float(f.laplacian_variance),
+                                face_area_percent=float(f.area_ratio * 100.0),
+                                detection_confidence=float(f.confidence),
+                                embedding_vec=f.embedding.tolist(),
+                            )
+                            sess.add(face_row)
+                            stats["faces"] += 1
+                        sess.commit()
+                        stats["images_indexed"] += 1
+                        done.add(record.path)
+                    except Exception:
+                        sess.rollback()
+                        logger.exception("drive ingest failed for %s", record.path)
+                        stats["skipped"] += 1
+                    finally:
+                        sess.close()
+    finally:
+        analyzer_engine.dispose()
+
+    return stats
+
+
 def loop(batch: int, interval: int) -> None:
     """Run ingest_collector_media in a continuous loop (the intended end-state:
     a separate long-running worker process, see docs/facetracker_merge_plan.md §6).
@@ -273,16 +420,41 @@ def loop(batch: int, interval: int) -> None:
     `interval` seconds. Idempotent + resumable (ingest dedupes by file_path), so
     a tick that finds nothing new (e.g. while collector source media is still
     being restored — task B1) is a cheap no-op. Errors are logged, not fatal.
+
+    Drive scanning: when DRIVE_SOURCES is configured, every `drive_every`th tick
+    also runs ingest_drive_media over the mounted W/X/Y/Z drives. It's on a
+    slower cadence (FACE_WORKER_DRIVE_INTERVAL, default 1h) because a full drive
+    walk — especially over the SMB W:/X: shares — is far heavier than the
+    collector DB query. TODO(handoff): the walk re-stats already-indexed files
+    each pass; add an mtime/cursor optimization if SMB walk cost becomes a
+    problem.
     """
     import time
-    logger.info("Face worker loop: batch=%d interval=%ds", batch, interval)
+    drive_limit = int(os.getenv("FACE_WORKER_DRIVE_BATCH", "200"))
+    drive_interval = int(os.getenv("FACE_WORKER_DRIVE_INTERVAL", "3600"))
+    drive_every = max(1, drive_interval // max(1, interval))
+    logger.info(
+        "Face worker loop: batch=%d interval=%ds | drive_batch=%d drive_every=%d ticks",
+        batch, interval, drive_limit, drive_every,
+    )
+    tick = 0
     while True:
         try:
             stats = ingest_collector_media(batch)
             if stats.get("images_indexed"):
-                logger.info("ingest tick: %s", stats)
+                logger.info("collector ingest tick: %s", stats)
         except Exception:
-            logger.exception("ingest tick failed (will retry next interval)")
+            logger.exception("collector ingest tick failed (will retry next interval)")
+
+        if tick % drive_every == 0:
+            try:
+                dstats = ingest_drive_media(drive_limit)
+                if dstats.get("scanned") or dstats.get("images_indexed"):
+                    logger.info("drive ingest tick: %s", dstats)
+            except Exception:
+                logger.exception("drive ingest tick failed (will retry next cycle)")
+
+        tick += 1
         time.sleep(interval)
 
 
@@ -297,6 +469,12 @@ def main() -> None:
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else 50
         logger.info("Stage 2 ingest (limit=%d)…", limit)
         logger.info("ingest stats: %s", ingest_collector_media(limit))
+    elif cmd == "scan":
+        # One-shot drive scan over DRIVE_SOURCES (W/X/Y/Z mounts). Used for
+        # testing/manual backfill; the `loop` command runs it on a cadence.
+        limit = int(sys.argv[2]) if len(sys.argv) > 2 else 200
+        logger.info("Drive scan (limit=%d)…", limit)
+        logger.info("drive scan stats: %s", ingest_drive_media(limit))
     elif cmd == "loop":
         batch = int(os.getenv("FACE_WORKER_BATCH", "50"))
         interval = int(os.getenv("FACE_WORKER_INTERVAL", "300"))

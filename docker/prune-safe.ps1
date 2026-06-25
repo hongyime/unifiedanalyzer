@@ -38,13 +38,24 @@ Log ("before: " + ((docker system df --format '{{.Type}}={{.Size}}') -join '  ')
 $img = docker image prune -f 2>&1 | Select-String 'reclaimed'
 Log ("image prune: " + ($img -join ' '))
 
-# 2) build cache, keeping 10GB for fast rebuilds. Fall back if the flag is
-#    unsupported on this Docker version.
-$bc = docker builder prune -f --keep-storage 10GB 2>&1 | Select-String 'reclaimed'
-if ($LASTEXITCODE -ne 0 -or -not $bc) {
-    $bc = docker builder prune -f 2>&1 | Select-String 'reclaimed'
+# 2) build cache, ALWAYS keeping a 10GB reserve so the next rebuild stays fast.
+#    Docker 28+/buildkit renamed --keep-storage -> --reserved-space; the old
+#    flag is deprecated on Docker 29 and trips the (now-removed) destructive
+#    fallback below. Try the new flag first, then the old one for legacy
+#    daemons. CRITICAL: we DO NOT fall back to an unreserved `builder prune` —
+#    wiping the whole cache forces a ~25min cold rebuild of the heavy ML pip
+#    layer (onnxruntime / insightface / faiss-cpu / scikit-learn / umap).
+#    Skipping the cache prune is always preferable to nuking it; the cache is
+#    self-bounding and only this project's, so letting it sit costs little.
+$bc = docker builder prune -f --reserved-space 10GB 2>&1
+if ($LASTEXITCODE -ne 0) {
+    $bc = docker builder prune -f --keep-storage 10GB 2>&1
 }
-Log ("builder prune: " + ($bc -join ' '))
+if ($LASTEXITCODE -ne 0) {
+    Log "builder prune: SKIPPED (no supported reserve flag on this daemon; refusing to wipe cache)"
+} else {
+    Log ("builder prune: " + (($bc | Select-String 'reclaimed') -join ' '))
+}
 
 Log ("after:  " + ((docker system df --format '{{.Type}}={{.Size}}') -join '  '))
 Log "=== prune-safe done ==="
