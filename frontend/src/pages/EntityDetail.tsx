@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { api, EntityDetail, TimelineEvent, BehaviorProfile, Relationship, IntelligenceReport } from '../api'
+import { FaceAvatar } from '../components/FaceAvatar'
 
 function PlatformBadge({ source }: { source: string }) {
   return <span className={`platform-icon p-${source}`}>{source}</span>
@@ -201,9 +202,12 @@ export default function EntityDetailPage() {
 
       <div className="card">
         <div className="flex-between">
-          <div>
-            <h2 style={{ marginBottom: '0.25rem' }}>{entity.canonical_name || '(unnamed)'}</h2>
-            <div className="text-sm text-muted">{entity.tier} &middot; {entity.platform_links.length} platforms</div>
+          <div className="flex gap-1" style={{ alignItems: 'center' }}>
+            <FaceAvatar url={entity.face_crop_url} name={entity.canonical_name} size={48} />
+            <div>
+              <h2 style={{ marginBottom: '0.25rem' }}>{entity.canonical_name || '(unnamed)'}</h2>
+              <div className="text-sm text-muted">{entity.tier} &middot; {entity.platform_links.length} platforms</div>
+            </div>
           </div>
           <div style={{ textAlign: 'right' }}>
             <div className="flex gap-1" style={{ alignItems: 'center', justifyContent: 'flex-end' }}>
@@ -687,9 +691,15 @@ export default function EntityDetailPage() {
                       {intelligence.same_person_candidates.map(c => (
                         <tr key={c.entity_id}>
                           <td>
-                            <Link to={`/entities/${c.entity_id}`}>
-                              {c.canonical_name || c.entity_id.slice(0, 8)}
-                            </Link>
+                            <div className="flex gap-1" style={{ alignItems: 'center' }}>
+                              {c.contributing_signals.some(s => s.type === 'media_face_match') && intelligence.entity.face_crop_url && (
+                                <FaceAvatar url={intelligence.entity.face_crop_url} name={intelligence.entity.canonical_name} size={30} />
+                              )}
+                              <FaceAvatar url={c.face_crop_url} name={c.canonical_name} size={30} />
+                              <Link to={`/entities/${c.entity_id}`}>
+                                {c.canonical_name || c.entity_id.slice(0, 8)}
+                              </Link>
+                            </div>
                           </td>
                           <td>
                             <div className="flex gap-1" style={{ alignItems: 'center' }}>

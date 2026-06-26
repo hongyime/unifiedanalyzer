@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, Entity } from '../api'
+import { FaceAvatar } from '../components/FaceAvatar'
 
 function PlatformBadge({ source }: { source: string }) {
   return <span className={`platform-icon p-${source}`}>{source}</span>
@@ -127,10 +128,15 @@ export default function EntitiesPage() {
               {entities.map(e => (
                 <tr key={e.id}>
                   <td>
-                    <Link to={`/entities/${e.id}`} style={{ fontWeight: 500 }}>
-                      {e.canonical_name || '(unnamed)'}
-                    </Link>
-                    <div className="text-sm text-muted">{e.tier}</div>
+                    <div className="flex gap-1" style={{ alignItems: 'center' }}>
+                      <FaceAvatar url={e.face_crop_url} name={e.canonical_name} size={34} />
+                      <div>
+                        <Link to={`/entities/${e.id}`} style={{ fontWeight: 500 }}>
+                          {e.canonical_name || '(unnamed)'}
+                        </Link>
+                        <div className="text-sm text-muted">{e.tier}</div>
+                      </div>
+                    </div>
                   </td>
                   <td>
                     {e.platforms.map(p => <PlatformBadge key={p} source={p} />)}

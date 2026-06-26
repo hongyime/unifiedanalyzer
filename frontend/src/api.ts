@@ -26,6 +26,19 @@ export interface Entity {
   platform_count: number
   platforms: string[]
   created_at: string | null
+  face_crop_url?: string | null
+}
+
+export interface ReviewCandidate {
+  entity_a: string
+  name_a: string | null
+  entity_b: string
+  name_b: string | null
+  score: number | null
+  cross_platform: boolean
+  signals: { type: string; confidence: number }[]
+  face_a: string | null
+  face_b: string | null
 }
 
 export interface EntityDetail {
@@ -39,6 +52,7 @@ export interface EntityDetail {
   metadata: Record<string, unknown>
   platform_links: PlatformLink[]
   identity_signals: Signal[]
+  face_crop_url?: string | null
 }
 
 export interface PlatformLink {
@@ -169,7 +183,7 @@ export interface Community {
 }
 
 export interface IntelligenceReport {
-  entity: { id: string; canonical_name: string | null; tier: string }
+  entity: { id: string; canonical_name: string | null; tier: string; face_crop_url?: string | null }
   platforms: { source: string; platform_id: string; platform_username: string | null }[]
   location: {
     primary_country: string | null
@@ -200,6 +214,7 @@ export interface IntelligenceReport {
     score: number | null
     cross_platform: boolean
     contributing_signals: { type: string; confidence: number }[]
+    face_crop_url?: string | null
   }[]
   relationships: {
     relationship_type: string
@@ -403,6 +418,9 @@ export const api = {
 
   dismissMatch: (entityA: string, entityB: string) =>
     post<{ ok: boolean }>('/entities/dismiss-match', { entity_a: entityA, entity_b: entityB }),
+
+  getReviewCandidates: (limit = 50) =>
+    get<{ candidates: ReviewCandidate[]; total: number }>(`/review/candidates?limit=${limit}`),
 
   updateEntitySettings: (entityId: string, settings: { silence_threshold_days?: number | null; notes?: string }) =>
     patch<{ ok: boolean }>(`/entities/${entityId}/settings`, settings),

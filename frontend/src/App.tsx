@@ -1,9 +1,10 @@
 import { Routes, Route, NavLink } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import {
-  Bell, Users, Network, Play, Activity, Images, Circle, ScanFace,
+  Bell, Users, Network, Play, Activity, Images, Circle, ScanFace, ListChecks,
 } from 'lucide-react'
 import AlertsPage from './pages/Alerts'
+import ReviewPage from './pages/Review'
 import EntitiesPage from './pages/Entities'
 import EntityDetailPage from './pages/EntityDetail'
 import RunsPage from './pages/Runs'
@@ -15,6 +16,7 @@ import { openHealthSocket, LiveHealth } from './api'
 
 const NAV = [
   { to: '/', label: 'Alerts', icon: Bell, end: true },
+  { to: '/review', label: 'Review', icon: ListChecks },
   { to: '/entities', label: 'Entities', icon: Users },
   { to: '/communities', label: 'Communities', icon: Network },
   { to: '/media', label: 'Media', icon: Images },
@@ -114,6 +116,7 @@ function App() {
       <main className="max-w-[1200px] flex-1 p-8">
         <Routes>
           <Route path="/" element={<AlertsPage />} />
+          <Route path="/review" element={<ReviewPage />} />
           <Route path="/entities" element={<EntitiesPage />} />
           <Route path="/entities/:id" element={<EntityDetailPage />} />
           <Route path="/communities" element={<CommunitiesPage />} />

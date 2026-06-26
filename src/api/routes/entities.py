@@ -2,8 +2,19 @@ import json
 from fastapi import APIRouter, Query, HTTPException
 
 from src.db.connection import get_analyzer_pool
+from src.api.face_lookup import representative_faces, face_crop_url
 
 router = APIRouter(tags=["entities"])
+
+
+def _decode_meta(raw) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    try:
+        d = json.loads(raw)
+        return d if isinstance(d, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
 
 
 SORT_COLUMNS = {
@@ -89,6 +100,8 @@ async def list_entities(
             LIMIT ${idx} OFFSET ${idx + 1}
         """, *params)
 
+        rep = await representative_faces(conn, [str(r["id"]) for r in rows])
+
     return {
         "data": [
             {
@@ -101,6 +114,7 @@ async def list_entities(
                 "platform_count": r["platform_count"],
                 "platforms": r["platforms"] or [],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "face_crop_url": face_crop_url(rep.get(str(r["id"]))),
             }
             for r in rows
         ],
@@ -108,6 +122,44 @@ async def list_entities(
         "page": page,
         "per_page": per_page,
     }
+
+
+@router.get("/review/candidates")
+async def review_candidates(limit: int = Query(50, ge=1, le=200)):
+    """Global same-person merge candidates (highest score first) with a face
+    thumbnail for each side — powers the Review queue. Defined BEFORE the
+    /entities/{entity_id} route so 'candidates' isn't swallowed as an id."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT r.entity_a_id, r.entity_b_id, r.weight, r.cross_platform, r.sources,
+                   ea.canonical_name AS name_a, eb.canonical_name AS name_b
+            FROM entity_relationships r
+            JOIN entities ea ON r.entity_a_id = ea.id
+            JOIN entities eb ON r.entity_b_id = eb.id
+            WHERE r.relationship_type = 'same_person_probability'
+            ORDER BY r.weight DESC
+            LIMIT $1
+        """, limit)
+        ids: list[str] = []
+        for r in rows:
+            ids.append(str(r["entity_a_id"]))
+            ids.append(str(r["entity_b_id"]))
+        rep = await representative_faces(conn, ids)
+
+    candidates = []
+    for r in rows:
+        meta = _decode_meta(r["sources"])
+        candidates.append({
+            "entity_a": str(r["entity_a_id"]), "name_a": r["name_a"],
+            "entity_b": str(r["entity_b_id"]), "name_b": r["name_b"],
+            "score": meta.get("score"),
+            "cross_platform": r["cross_platform"],
+            "signals": meta.get("contributing_signals", []),
+            "face_a": face_crop_url(rep.get(str(r["entity_a_id"]))),
+            "face_b": face_crop_url(rep.get(str(r["entity_b_id"]))),
+        })
+    return {"candidates": candidates, "total": len(candidates)}
 
 
 @router.get("/entities/{entity_id}")
@@ -136,10 +188,13 @@ async def get_entity(entity_id: str):
             ORDER BY confidence DESC
         """, entity_id)
 
+        _rep = await representative_faces(conn, [entity_id])
+
     return {
         "id": str(entity["id"]),
         "tier": entity["tier"],
         "canonical_name": entity["canonical_name"],
+        "face_crop_url": face_crop_url(_rep.get(entity_id)),
         "confidence_score": entity["confidence_score"],
         "signal_count": entity["signal_count"],
         "last_seen_at": entity["last_seen_at"].isoformat() if entity["last_seen_at"] else None,

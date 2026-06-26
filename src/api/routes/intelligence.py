@@ -14,6 +14,7 @@ import json
 from fastapi import APIRouter, HTTPException
 
 from src.db.connection import get_analyzer_pool
+from src.api.face_lookup import representative_faces, face_crop_url
 
 router = APIRouter(tags=["intelligence"])
 
@@ -144,6 +145,16 @@ async def get_intelligence(entity_id: str):
             "contributing_signals": sources.get("contributing_signals", []),
         })
 
+    # Representative face thumbnails for the subject + every candidate (so the
+    # Intelligence tab can show faces side by side).
+    async with pool.acquire() as conn:
+        _rep = await representative_faces(
+            conn, [entity_id] + [c["entity_id"] for c in same_person_candidates]
+        )
+    subject_face_url = face_crop_url(_rep.get(entity_id))
+    for c in same_person_candidates:
+        c["face_crop_url"] = face_crop_url(_rep.get(c["entity_id"]))
+
     # --- other relationships ---
     relationships = []
     for r in relationship_rows:
@@ -179,6 +190,7 @@ async def get_intelligence(entity_id: str):
             "id": str(entity["id"]),
             "canonical_name": entity["canonical_name"],
             "tier": entity["tier"],
+            "face_crop_url": subject_face_url,
         },
         "platforms": [
             {
