@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { api, EntityDetail, TimelineEvent, BehaviorProfile, Relationship, IntelligenceReport } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { TimelineLanes } from '../components/TimelineLanes'
+import { NetworkGraph } from '../components/NetworkGraph'
 
 function PlatformBadge({ source }: { source: string }) {
   return <span className={`platform-icon p-${source}`}>{source}</span>
@@ -128,6 +129,12 @@ export default function EntityDetailPage() {
   useEffect(() => {
     if (!id || tab !== 'relationships') return
     api.getRelationships(id).then(r => setRelationships(r.data)).catch(() => setRelationships([]))
+  }, [id, tab])
+
+  const [network, setNetwork] = useState<Awaited<ReturnType<typeof api.getEntityNetwork>> | null>(null)
+  useEffect(() => {
+    if (!id || tab !== 'relationships') return
+    api.getEntityNetwork(id).then(setNetwork).catch(() => setNetwork(null))
   }, [id, tab])
 
   useEffect(() => {
@@ -576,6 +583,12 @@ export default function EntityDetailPage() {
 
       {tab === 'relationships' && (
         <>
+          {network && network.nodes.length > 0 && (
+            <div className="card" style={{ marginBottom: '0.75rem' }}>
+              <div className="text-sm mb-1" style={{ fontWeight: 600 }}>Connection graph <span className="text-muted">(click to pivot)</span></div>
+              <NetworkGraph data={network} />
+            </div>
+          )}
           {relationships.length === 0 ? (
             <div className="empty-state">No relationships found</div>
           ) : (

@@ -416,6 +416,12 @@ export const api = {
 
   getEntity: (id: string) => get<EntityDetail>(`/entities/${id}`),
 
+  getEntityNetwork: (entityId: string) =>
+    get<{
+      center: { id: string; name: string | null; face: string | null }
+      nodes: { id: string; name: string | null; weight: number; types: string[]; face: string | null }[]
+    }>(`/entities/${entityId}/network`),
+
   getTimelineLanes: (entityId: string) =>
     get<{
       lanes: { source: string; events: { t: number; type: string | null }[] }[]
