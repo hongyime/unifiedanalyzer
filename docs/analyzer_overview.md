@@ -206,7 +206,34 @@ cleanly (one running now). **The pipeline is live and healthy.**
 - **`entity_merge_log`=0** — merge candidates are surfaced but (apparently) not
   auto-applied; human-in-the-loop only.
 
-## 10. Improvement ideas (seeds for the second opinion)
+## 10.5 Implemented from the second-opinion review (2026-06-26)
+
+Acted on after a fine-tooth-comb external review. Each ships behind its run gate
+and was verified on live data:
+
+- **Face clustering → `media_face_match`** (`face_clustering.py`): clusters the
+  ArcFace corpus (agglomerative, average-linkage cosine) and propagates
+  `entity_faces` attribution across single-dominant-entity clusters
+  (group-photo guarded, signals-only). Grew `entity_faces` 13→308 on first run;
+  the existing match signal now reads a real corpus. Drive faces cross-referenced.
+- **Temporal significance gate** (`temporal_correlation.py`): `temporal_copost`
+  now requires Poisson significance over the pair's overlapping window
+  (Bonferroni-adjusted), not a raw count — dropped 34→9 chance-level pairs.
+- **`social_graph_overlap`** (`graph_overlap.py`): Jaccard of interaction
+  neighborhoods as an **association** `entity_relationship` (deliberately not a
+  same-person signal — friends share group-mates). 63 pairs found.
+- **Calibrated scoring** (`identity_calibration.py`): logistic-regression
+  classifier over per-signal feature vectors replaces noisy-OR **when a model is
+  trained** (`export`/`train` CLI), else noisy-OR fallback. Handles signal
+  correlation + gives calibrated probabilities; `entity_relationships.sources.method`
+  records which was used.
+
+Review critiques that were **already handled** (the original doc oversimplified):
+the resolver is target-anchored + exact-first + multi-signal (§4.1); `shared_website`
+already covers cross-platform link matching; signals are deleted+recomputed each
+run (not fossilized); `media_perceptual_match`/`media_gps_colocation` already exist.
+
+## 10. Improvement ideas (remaining)
 
 1. **Close the face→identity loop.** Cluster the whole face index (FAISS kNN →
    graph clustering), promote clusters to person candidates, and emit

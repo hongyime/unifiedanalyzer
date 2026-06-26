@@ -75,6 +75,18 @@ The schema is applied idempotently on startup. To force a one-off:
 Face worker (`python -m src.face_worker …`): `loop` (continuous), `ingest [N]`
 (one collector batch), `scan [N]` (one drive-scan batch), or no-arg (schema only).
 
+**Identity-scorer calibration** (optional — improves merge precision). The scorer
+uses noisy-OR by default; train a logistic-regression model to replace it:
+
+```bash
+# 1) export candidate pairs + per-signal features to label (fill label col: 1/0)
+docker exec docker-scheduler-1 python -m src.pipeline.identity_calibration export /app/media_derived/pairs.csv
+# 2) after labeling ~200 pairs, train (auto-loaded by the scorer next run)
+docker exec docker-scheduler-1 python -m src.pipeline.identity_calibration train /app/media_derived/pairs.csv
+```
+
+No model present → the scorer falls back to noisy-OR, so this is purely additive.
+
 ## Drive face-scanning (W / X / Y / Z)
 
 `face_worker.ingest_drive_media()` walks `DRIVE_SOURCES` and runs the same
