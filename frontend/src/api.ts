@@ -416,6 +416,15 @@ export const api = {
 
   getEntity: (id: string) => get<EntityDetail>(`/entities/${id}`),
 
+  getTimelineLanes: (entityId: string) =>
+    get<{
+      lanes: { source: string; events: { t: number; type: string | null }[] }[]
+      alerts: { type: string; t: number }[]
+      min_t: number | null
+      max_t: number | null
+      total: number
+    }>(`/entities/${entityId}/timeline-lanes`),
+
   getTimeline: (entityId: string, page = 1, source = '', type = '') => {
     let q = `/entities/${entityId}/timeline?page=${page}&per_page=50`
     if (source) q += `&source=${source}`

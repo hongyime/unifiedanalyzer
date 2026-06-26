@@ -6,6 +6,40 @@ from src.db.connection import get_analyzer_pool
 router = APIRouter(tags=["timeline"])
 
 
+@router.get("/entities/{entity_id}/timeline-lanes")
+async def timeline_lanes(entity_id: str, max_events: int = Query(2500, ge=1, le=8000)):
+    """Per-platform event timestamps for the swimlane timeline chart, plus alert
+    markers and the overall time range. Epochs (float seconds) keep the payload
+    small and let the client lay out the x-axis without date parsing per point."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT source, event_type, extract(epoch FROM occurred_at) AS ts
+            FROM timeline_events
+            WHERE entity_id = $1::uuid AND occurred_at > '2010-01-01'
+            ORDER BY occurred_at
+            LIMIT $2
+        """, entity_id, max_events)
+        alert_rows = await conn.fetch("""
+            SELECT alert_type, extract(epoch FROM detected_at) AS ts
+            FROM alerts
+            WHERE entity_id = $1::uuid AND detected_at > '2010-01-01'
+            ORDER BY detected_at
+        """, entity_id)
+
+    lanes: dict[str, list] = {}
+    for r in rows:
+        lanes.setdefault(r["source"], []).append({"t": float(r["ts"]), "type": r["event_type"]})
+    all_ts = [e["t"] for evs in lanes.values() for e in evs]
+    return {
+        "lanes": [{"source": s, "events": evs} for s, evs in sorted(lanes.items(), key=lambda kv: -len(kv[1]))],
+        "alerts": [{"type": a["alert_type"], "t": float(a["ts"])} for a in alert_rows],
+        "min_t": min(all_ts) if all_ts else None,
+        "max_t": max(all_ts) if all_ts else None,
+        "total": len(all_ts),
+    }
+
+
 @router.get("/entities/{entity_id}/timeline")
 async def get_entity_timeline(
     entity_id: str,

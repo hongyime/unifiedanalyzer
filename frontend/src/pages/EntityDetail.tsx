@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { api, EntityDetail, TimelineEvent, BehaviorProfile, Relationship, IntelligenceReport } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
+import { TimelineLanes } from '../components/TimelineLanes'
 
 function PlatformBadge({ source }: { source: string }) {
   return <span className={`platform-icon p-${source}`}>{source}</span>
@@ -112,6 +113,12 @@ export default function EntityDetailPage() {
       setEventsTotal(r.total)
     })
   }, [id, tab, eventsPage])
+
+  const [lanes, setLanes] = useState<Awaited<ReturnType<typeof api.getTimelineLanes>> | null>(null)
+  useEffect(() => {
+    if (!id || tab !== 'timeline') return
+    api.getTimelineLanes(id).then(setLanes).catch(() => setLanes(null))
+  }, [id, tab])
 
   useEffect(() => {
     if (!id || tab !== 'behavior') return
@@ -336,6 +343,15 @@ export default function EntityDetailPage() {
 
       {tab === 'timeline' && (
         <>
+          {lanes && lanes.total > 0 && (
+            <div className="card" style={{ marginBottom: '0.75rem' }}>
+              <div className="flex-between mb-1">
+                <div className="text-sm" style={{ fontWeight: 600 }}>Activity across platforms</div>
+                <div className="text-sm text-muted">{lanes.total.toLocaleString()} events</div>
+              </div>
+              <TimelineLanes data={lanes} />
+            </div>
+          )}
           {events.length === 0 ? (
             <div className="empty-state">No timeline events</div>
           ) : (
