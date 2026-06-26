@@ -83,6 +83,34 @@ class FaceDetector:
 
         logger.info(f"Initializing FaceDetector with model: {model_name} (root={root})")
 
+        # Cap ONNXRuntime intra-op threads so InsightFace's CPU sessions don't
+        # fan out to ALL cores (the cause of face_worker's 250% CPU spikes). The
+        # pip onnxruntime wheel ignores OMP_NUM_THREADS for its intra-op pool and
+        # FaceAnalysis doesn't expose session options — so we patch
+        # InferenceSession to inject a capped SessionOptions. FACE_ONNX_THREADS
+        # sets the ceiling (0/unset = library default). Complements the
+        # container's hard `cpus:` cgroup cap; this keeps it from thrashing
+        # within that budget.
+        _onnx_threads = int(os.getenv("FACE_ONNX_THREADS", "0") or 0)
+        if _onnx_threads > 0:
+            try:
+                import onnxruntime as _ort
+                if not getattr(_ort, "_intra_op_capped", False):
+                    _orig_session = _ort.InferenceSession
+
+                    def _capped_session(*args, **kwargs):
+                        so = kwargs.get("sess_options") or _ort.SessionOptions()
+                        so.intra_op_num_threads = _onnx_threads
+                        so.inter_op_num_threads = 1
+                        kwargs["sess_options"] = so
+                        return _orig_session(*args, **kwargs)
+
+                    _ort.InferenceSession = _capped_session
+                    _ort._intra_op_capped = True
+                    logger.info("Capped ONNXRuntime intra-op threads to %d", _onnx_threads)
+            except Exception:
+                logger.warning("Could not cap ONNXRuntime threads", exc_info=True)
+
         self.app = FaceAnalysis(
             name=model_name,
             root=root,

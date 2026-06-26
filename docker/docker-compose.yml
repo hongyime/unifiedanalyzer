@@ -86,7 +86,10 @@ services:
     image: unifiedanalyzer:latest
     depends_on:
       - analyzer
-    command: ["python", "-m", "src.face_worker", "loop"]
+    # nice the worker so the collectors (Telegram/WA/IG + RabbitMQ/Postgres) win
+    # CPU contention. Combined with the hard cpus cap below, face_worker becomes
+    # a low-priority background trickle that can't starve the shared box.
+    command: ["nice", "-n", "10", "python", "-m", "src.face_worker", "loop"]
     env_file:
       - ../.env
     environment:
@@ -95,6 +98,17 @@ services:
       MEDIA_DERIVED_PATH: /app/media_derived
       COLLECTOR_MEDIA_ROOT: /app/collector_root
       FACE_MODEL_ROOT: /app/media_derived/faces
+      # ---- CPU containment (face_worker is the box's heaviest consumer) ----
+      # Cap ML/BLAS/cv2 threading so ONNX/numpy don't fan out to ALL cores (the
+      # cause of the 250% spikes). The hard `cpus:` cgroup limit below is the
+      # guaranteed ceiling; these keep it from thrashing within that budget.
+      # FACE_ONNX_THREADS is read by the detector to cap ONNX intra-op threads.
+      OMP_NUM_THREADS: "${FACE_WORKER_THREADS:-2}"
+      MKL_NUM_THREADS: "${FACE_WORKER_THREADS:-2}"
+      OPENBLAS_NUM_THREADS: "${FACE_WORKER_THREADS:-2}"
+      NUMEXPR_NUM_THREADS: "${FACE_WORKER_THREADS:-2}"
+      VECLIB_MAXIMUM_THREADS: "${FACE_WORKER_THREADS:-2}"
+      FACE_ONNX_THREADS: "${FACE_ONNX_THREADS:-2}"
       # ---- Drive face-scanning (W/X/Y/Z) ----
       # DriveScanner walks these container paths and feeds image files through
       # the SAME InsightFace detect->index flow as collector media (see
@@ -139,6 +153,10 @@ services:
     # Soft CPU priority — same as the scheduler: ONNX face inference yields to
     # host-critical neighbours under contention rather than pegging cores.
     cpu_shares: 512
+    # HARD CPU ceiling (cgroup): face_worker physically cannot exceed this many
+    # cores no matter how many threads ONNX/cv2 spawn — the single most important
+    # guard against saturating the shared box. Default 2.0; tune via env.
+    cpus: "${FACE_WORKER_MAX_CPUS:-2.0}"
 
 # CIFS volumes for the W:/X: drives on Tailscale host Prawn-E14. Credentials
 # come from .env (SMB_HOST/SMB_USER/SMB_PASS, gitignored) — pass
