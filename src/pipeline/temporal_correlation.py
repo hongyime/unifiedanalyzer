@@ -12,9 +12,12 @@ Filters out timeline_events with bogus 1970 timestamps.
 """
 import json
 import logging
+import os
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
-from math import sqrt
+from math import sqrt, exp, log10
+
+from scipy.stats import poisson
 
 from src.db.connection import get_analyzer_pool
 
@@ -24,7 +27,14 @@ _MIN_EVENTS = 5              # skip entities with too few events
 _HOUR_SIM_THRESHOLD = 0.90   # cosine similarity for hour distribution
 _COPOST_WINDOW_MIN = 60      # minutes: co-post window
 _COPOST_MIN_DAYS = 3         # minimum co-post days to flag
-_COPOST_CONFIDENCE = 0.70    # confidence for temporal_copost signal
+_COPOST_MIN_EVENTS = 3       # minimum co-post coincidence events to consider
+_COPOST_CONFIDENCE = 0.70    # base confidence for temporal_copost signal
+# Significance gate: a pair is only flagged when the observed number of co-post
+# coincidences is unlikely under independence. Correlated posting times happen
+# by chance (timezone overlap, both active evenings) — a raw count flags those.
+# We model expected coincidences as Poisson over the pair's OVERLAPPING active
+# window and require p < threshold, Bonferroni-adjusted for the pair count.
+_COPOST_PVALUE = float(os.getenv("TEMPORAL_COPOST_PVALUE", "0.01"))
 _EPOCH_FLOOR = datetime(2010, 1, 1, tzinfo=timezone.utc)
 
 
@@ -97,30 +107,63 @@ async def correlate_activity() -> dict:
     for e in events:
         entity_events[e["entity_id"]].append(e["occurred_at"])
 
-    # For pairs with enough data, compute co-post days
+    # For pairs with enough data, compute co-post coincidences + significance.
     active_entities = [eid for eid, evts in entity_events.items() if len(evts) >= _MIN_EVENTS]
-    copost_pairs: list[tuple[str, str, int, float]] = []  # (a, b, copost_days, confidence)
+    # (a, b, copost_days, k_coincidences, p_value, confidence)
+    copost_pairs: list[tuple[str, str, int, int, float, float]] = []
 
     window = timedelta(minutes=_COPOST_WINDOW_MIN)
+    # Bonferroni: we evaluate up to C(n,2) pairs; divide the per-test alpha by
+    # the number of pairs so the family-wise false-positive rate stays at
+    # _COPOST_PVALUE rather than ballooning with the pair count.
+    n_pairs = len(active_entities) * (len(active_entities) - 1) // 2
+    pval_threshold = _COPOST_PVALUE / max(1, n_pairs)
+
     for i, eid_a in enumerate(active_entities):
         for eid_b in active_entities[i + 1:]:
             ts_a = entity_events[eid_a]
             ts_b = entity_events[eid_b]
-            # Merge and scan for windows where both post close together
+            # Restrict to the window where BOTH are active so one entity's long
+            # history can't inflate the rate estimate (and so chance is modeled
+            # over the period the two could actually have co-posted).
+            lo = max(ts_a[0], ts_b[0])
+            hi = min(ts_a[-1], ts_b[-1])
+            if hi <= lo:
+                continue
+            span_min = (hi - lo).total_seconds() / 60.0
+            a_ov = [t for t in ts_a if lo <= t <= hi]
+            b_ov = [t for t in ts_b if lo <= t <= hi]
+            if len(a_ov) < _MIN_EVENTS or len(b_ov) < _MIN_EVENTS or span_min <= 0:
+                continue
+
+            # Observed: A events with >=1 B event within +/- window (each A
+            # event counted once). Two-pointer over sorted timestamps.
+            k = 0
             copost_days: set[str] = set()
             j = 0
-            for ts in ts_a:
-                # Find all ts_b events within window of ts
-                while j < len(ts_b) and ts_b[j] < ts - window:
+            for ts in a_ov:
+                while j < len(b_ov) and b_ov[j] < ts - window:
                     j += 1
-                k = j
-                while k < len(ts_b) and ts_b[k] <= ts + window:
-                    copost_days.add(ts.strftime("%Y-%m-%d"))
+                if j < len(b_ov) and b_ov[j] <= ts + window:
                     k += 1
-            if len(copost_days) >= _COPOST_MIN_DAYS:
-                # Scale confidence by number of co-post days (cap at 20)
-                conf = min(_COPOST_CONFIDENCE + (len(copost_days) - _COPOST_MIN_DAYS) * 0.02, 0.85)
-                copost_pairs.append((eid_a, eid_b, len(copost_days), round(conf, 3)))
+                    copost_days.add(ts.strftime("%Y-%m-%d"))
+            if k < _COPOST_MIN_EVENTS or len(copost_days) < _COPOST_MIN_DAYS:
+                continue
+
+            # Expected under independence: prob a given A event has >=1 B event
+            # within +/- window ~ 1 - exp(-rate_b * 2*window) (Poisson approx of
+            # at-least-one B arrival in the 2*window interval). lambda = N_a*p_hit.
+            rate_b = len(b_ov) / span_min            # B events per minute
+            p_hit = 1.0 - exp(-rate_b * 2.0 * _COPOST_WINDOW_MIN)
+            lam = len(a_ov) * p_hit
+            pval = float(poisson.sf(k - 1, lam)) if lam > 0 else 0.0
+            if pval > pval_threshold:
+                continue  # not significant — chance-level co-posting
+
+            # Confidence scales with significance (more standard deviations from
+            # chance -> higher), capped.
+            conf = min(0.90, _COPOST_CONFIDENCE + min(0.20, -log10(max(pval, 1e-30)) * 0.02))
+            copost_pairs.append((eid_a, eid_b, len(copost_days), k, pval, round(conf, 3)))
 
     stats = {
         "entities_analyzed": len(hour_dists),
@@ -153,8 +196,8 @@ async def correlate_activity() -> dict:
         if copost_pairs:
             signal_rows = [
                 (eid_a, "temporal_copost", "timeline", None, None, None,
-                 "timeline", eid_b, f"copost_days:{days}", conf)
-                for eid_a, eid_b, days, conf in copost_pairs
+                 "timeline", eid_b, f"copost_days:{days},events:{k},p:{pval:.2e}", conf)
+                for eid_a, eid_b, days, k, pval, conf in copost_pairs
             ]
             await conn.executemany("""
                 INSERT INTO identity_signals
