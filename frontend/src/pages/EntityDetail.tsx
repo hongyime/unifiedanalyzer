@@ -4,6 +4,7 @@ import { api, EntityDetail, TimelineEvent, BehaviorProfile, Relationship, Intell
 import { FaceAvatar } from '../components/FaceAvatar'
 import { TimelineLanes } from '../components/TimelineLanes'
 import { NetworkGraph } from '../components/NetworkGraph'
+import { IdentitySummary } from '../components/IdentitySummary'
 
 function PlatformBadge({ source }: { source: string }) {
   return <span className={`platform-icon p-${source}`}>{source}</span>
@@ -297,6 +298,7 @@ export default function EntityDetailPage() {
 
       {tab === 'identity' && (
         <>
+          <IdentitySummary entity={entity} />
           <h3 style={{ fontSize: '1.1rem', marginBottom: '0.75rem' }}>Platform Links</h3>
           <table>
             <thead>
