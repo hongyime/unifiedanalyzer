@@ -194,3 +194,19 @@ CREATE TABLE IF NOT EXISTS entity_faces (
 );
 CREATE INDEX IF NOT EXISTS idx_entity_faces_entity ON entity_faces(entity_id);
 CREATE INDEX IF NOT EXISTS idx_entity_faces_face   ON entity_faces(face_id);
+
+-- Calibration labels: ground-truth same/different decisions captured straight
+-- from the dashboard (entity merge = same person; "not same" dismiss =
+-- different). Drives src/pipeline/identity_calibration.py — no CSV needed.
+-- NO FK to entities (a merge deletes the source entity, but the label must
+-- survive). Pair is stored normalized (entity_a < entity_b) so each pair has a
+-- single latest decision (upsert on PK).
+CREATE TABLE IF NOT EXISTS identity_labels (
+    entity_a    UUID NOT NULL,
+    entity_b    UUID NOT NULL,
+    features    JSONB NOT NULL,      -- {signal_type: max_confidence} snapshot at decision time
+    label       SMALLINT NOT NULL,   -- 1 = same person, 0 = different
+    source      VARCHAR(30),
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (entity_a, entity_b)
+);

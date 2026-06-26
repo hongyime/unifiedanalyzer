@@ -35,6 +35,7 @@ from src.pipeline.media_analysis_tier1 import (
 )
 from src.pipeline.identity_scorer import compute_identity_scores
 from src.pipeline.face_clustering import run_face_clustering
+from src.pipeline.identity_calibration import maybe_retrain
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
 logger = logging.getLogger(__name__)
@@ -271,6 +272,14 @@ async def run_incremental() -> dict:
         except Exception:
             logger.exception("Face-match signal rebuild failed (non-fatal)")
 
+        # Retrain the calibrated scorer from dashboard-captured labels (entity
+        # merges / "not same" dismisses) when enough have accumulated, then score
+        # with the fresh model. No-op until ~20 labels exist (noisy-OR until then).
+        try:
+            await maybe_retrain()
+        except Exception:
+            logger.exception("Calibration retrain failed (non-fatal)")
+
         try:
             await compute_identity_scores()
         except Exception:
@@ -436,6 +445,14 @@ async def run_full_resolution() -> dict:
             await rebuild_face_match_signals()
         except Exception:
             logger.exception("Face-match signal rebuild failed (non-fatal)")
+
+        # Retrain the calibrated scorer from dashboard-captured labels (entity
+        # merges / "not same" dismisses) when enough have accumulated, then score
+        # with the fresh model. No-op until ~20 labels exist (noisy-OR until then).
+        try:
+            await maybe_retrain()
+        except Exception:
+            logger.exception("Calibration retrain failed (non-fatal)")
 
         try:
             await compute_identity_scores()

@@ -401,6 +401,9 @@ export const api = {
   splitEntity: (entityId: string, linkIds: string[], reason = '') =>
     post<{ ok: boolean; new_entity_id: string }>(`/entities/${entityId}/split`, { link_ids: linkIds, reason }),
 
+  dismissMatch: (entityA: string, entityB: string) =>
+    post<{ ok: boolean }>('/entities/dismiss-match', { entity_a: entityA, entity_b: entityB }),
+
   updateEntitySettings: (entityId: string, settings: { silence_threshold_days?: number | null; notes?: string }) =>
     patch<{ ok: boolean }>(`/entities/${entityId}/settings`, settings),
 

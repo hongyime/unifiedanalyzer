@@ -150,6 +150,32 @@ export default function EntityDetailPage() {
     }
   }
 
+  // Same-person candidate decisions. These double as ground-truth labels for the
+  // calibrated scorer (merge = same person, dismiss = different) — captured
+  // server-side into identity_labels, no CSV.
+  const handleConfirmSame = async (otherId: string) => {
+    if (!id) return
+    try {
+      const result = await api.mergeEntities([id, otherId], 'Confirmed same person from candidates')
+      setActionMsg('Merged — labeled as same person')
+      navigate(`/entities/${result.target_entity_id}`)
+    } catch (e: any) {
+      setActionMsg(`Merge failed: ${e.message}`)
+    }
+  }
+
+  const handleDismissMatch = async (otherId: string) => {
+    if (!id) return
+    try {
+      await api.dismissMatch(id, otherId)
+      setActionMsg('Dismissed — labeled as different people')
+      const fresh = await api.getIntelligence(id)
+      setIntelligence(fresh)
+    } catch (e: any) {
+      setActionMsg(`Dismiss failed: ${e.message}`)
+    }
+  }
+
   const handleSaveSettings = async () => {
     if (!id) return
     try {
@@ -654,6 +680,7 @@ export default function EntityDetailPage() {
                         <th>Probability</th>
                         <th>Cross-platform</th>
                         <th>Contributing Signals</th>
+                        <th>Action</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -677,6 +704,17 @@ export default function EntityDetailPage() {
                           </td>
                           <td className="text-sm text-muted">
                             {c.contributing_signals.map(s => `${s.type} (${s.confidence})`).join(', ')}
+                          </td>
+                          <td>
+                            <div className="flex gap-1">
+                              <button onClick={() => handleConfirmSame(c.entity_id)}>Same &rarr; merge</button>
+                              <button
+                                onClick={() => handleDismissMatch(c.entity_id)}
+                                style={{ borderColor: 'var(--orange)', color: 'var(--orange)' }}
+                              >
+                                Not same
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}

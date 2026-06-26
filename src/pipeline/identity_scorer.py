@@ -76,6 +76,14 @@ async def compute_identity_scores() -> dict:
         for l in link_rows:
             entity_platforms.setdefault(l["entity_id"], set()).add(l["source"])
 
+        # Pairs the user dismissed in the dashboard ("not the same person").
+        # Stored normalized (entity_a < entity_b) just like _pair_key, so a
+        # dismissed candidate never re-surfaces on the next rebuild.
+        dismissed_rows = await conn.fetch(
+            "SELECT entity_a::text AS a, entity_b::text AS b FROM identity_labels WHERE label = 0"
+        )
+        dismissed = {(r["a"], r["b"]) for r in dismissed_rows}
+
     # --- Aggregate contributions per normalized pair ---
     # pair_key -> list of (signal_type, confidence)
     pair_contributions: dict[tuple[str, str], list[tuple[str, float]]] = {}
@@ -111,6 +119,8 @@ async def compute_identity_scores() -> dict:
     scoring_method = "calibrated" if model is not None else "noisy_or"
     results: list[dict] = []
     for (a, b), contributions in pair_contributions.items():
+        if (a, b) in dismissed:
+            continue  # user said these are different people
         breakdown = [{"type": t, "confidence": round(c, 4)} for t, c in contributions]
 
         if model is not None:

@@ -1,8 +1,11 @@
 import json
+from itertools import combinations
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.db.connection import get_analyzer_pool
+from src.pipeline.identity_calibration import record_label
 
 router = APIRouter(tags=["entity-actions"])
 
@@ -10,6 +13,11 @@ router = APIRouter(tags=["entity-actions"])
 class MergeRequest(BaseModel):
     source_entity_ids: list[str]
     reason: str = ""
+
+
+class DismissMatchRequest(BaseModel):
+    entity_a: str
+    entity_b: str
 
 
 class SplitRequest(BaseModel):
@@ -40,6 +48,16 @@ async def merge_entities(req: MergeRequest):
         primary = max(entities, key=lambda e: e["confidence_score"])
         target_id = primary["id"]
         others = [e["id"] for e in entities if e["id"] != target_id]
+
+        # Capture "same person" labels (1) for every merged pair BEFORE the
+        # mutations below move/delete their identity_signals — this is the
+        # ground truth that trains the calibrated scorer (no CSV). Snapshots
+        # each pair's current feature vector.
+        for a, b in combinations(req.source_entity_ids, 2):
+            try:
+                await record_label(conn, a, b, 1, "dashboard_merge")
+            except Exception:
+                pass  # labelling must never block a merge
 
         for oid in others:
             await conn.execute("""
@@ -78,6 +96,26 @@ async def merge_entities(req: MergeRequest):
         """, req.source_entity_ids, target_id, req.reason)
 
     return {"ok": True, "target_entity_id": str(target_id), "merged": len(others)}
+
+
+@router.post("/entities/dismiss-match")
+async def dismiss_match(req: DismissMatchRequest):
+    """User said two same-person CANDIDATES are NOT the same person. Records a
+    negative (0) label for the calibrated scorer and removes the current
+    same_person_probability suggestion so it stops surfacing."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        try:
+            await record_label(conn, req.entity_a, req.entity_b, 0, "dashboard_dismiss")
+        except Exception:
+            pass
+        await conn.execute("""
+            DELETE FROM entity_relationships
+            WHERE relationship_type = 'same_person_probability'
+              AND ((entity_a_id = $1::uuid AND entity_b_id = $2::uuid)
+                OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
+        """, req.entity_a, req.entity_b)
+    return {"ok": True}
 
 
 @router.post("/entities/{entity_id}/split")
