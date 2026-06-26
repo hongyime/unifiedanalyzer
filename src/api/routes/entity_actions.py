@@ -20,6 +20,22 @@ class DismissMatchRequest(BaseModel):
     entity_b: str
 
 
+class WatchRequest(BaseModel):
+    status: str | None = None  # priority | watching | archive | null
+
+
+@router.patch("/entities/{entity_id}/watch")
+async def set_watch(entity_id: str, req: WatchRequest):
+    """Set the user-curated watchlist tier on an entity."""
+    s = req.status if req.status in ("priority", "watching", "archive") else None
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE entities SET watch_status = $1, updated_at = NOW() WHERE id = $2::uuid", s, entity_id
+        )
+    return {"ok": True, "watch_status": s}
+
+
 class SplitRequest(BaseModel):
     link_ids: list[str]
     reason: str = ""

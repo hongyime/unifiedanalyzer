@@ -72,6 +72,7 @@ export interface TriageData {
 export interface EntityDetail {
   id: string
   tier: string
+  watch_status?: string | null
   canonical_name: string | null
   confidence_score: number
   signal_count: number
@@ -517,6 +518,14 @@ export const api = {
   getFaceStats: () => get<FaceStats>('/face/stats'),
   getFaceIdentities: (page = 1) =>
     get<FaceIdentityList>(`/face/identities?page=${page}&page_size=50`),
+
+  getSimilarFaces: (faceId: number, k = 40) =>
+    get<{ matches: { face_id: number; cluster_id: number | null; similarity: number; crop_url: string; entity_id: string | null; entity_name: string | null }[] }>(
+      `/face/gallery/faces/${faceId}/similar?k=${k}`,
+    ),
+
+  setWatch: (entityId: string, status: string | null) =>
+    patch<{ ok: boolean; watch_status: string | null }>(`/entities/${entityId}/watch`, { status }),
 
   getFaceGallery: (page = 1, pageSize = 60) =>
     get<{

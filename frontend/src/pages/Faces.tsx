@@ -42,6 +42,15 @@ export default function FacesPage() {
     api.getFaceGallery(gPage, 64).then(setGallery).catch(() => setGallery(null))
   }, [hasFaces, gPage])
 
+  // "Who is this?" face search: click a face -> kNN similar matches.
+  type Sim = Awaited<ReturnType<typeof api.getSimilarFaces>>
+  const [simFor, setSimFor] = useState<number | null>(null)
+  const [sim, setSim] = useState<Sim | null>(null)
+  const openSimilar = (faceId: number) => {
+    setSimFor(faceId); setSim(null)
+    api.getSimilarFaces(faceId, 48).then(setSim).catch(() => setSim({ matches: [] }))
+  }
+
   if (stats.isError) {
     return (
       <div>
@@ -78,16 +87,43 @@ export default function FacesPage() {
         </div>
       ) : (
         <>
+          {simFor != null && (
+            <div className="mb-3 rounded-lg border border-accent bg-card p-3">
+              <div className="mb-2 flex items-center justify-between text-sm font-medium">
+                <span>Similar to face #{simFor} <span className="text-muted">— who is this?</span></span>
+                <button onClick={() => setSimFor(null)} className="text-xs text-muted">close ✕</button>
+              </div>
+              {!sim ? (
+                <div className="text-sm text-muted">Searching…</div>
+              ) : sim.matches.length === 0 ? (
+                <div className="text-sm text-muted">No matches.</div>
+              ) : (
+                <div className="grid grid-cols-4 gap-2 sm:grid-cols-8 md:grid-cols-12">
+                  {sim.matches.map((m) => (
+                    <a key={m.face_id} href={m.entity_id ? `/entities/${m.entity_id}` : undefined}
+                      title={`${Math.round(m.similarity * 100)}% · cluster ${m.cluster_id ?? '—'}${m.entity_name ? ' · ' + m.entity_name : ''}`}
+                      className="relative block aspect-square overflow-hidden rounded border border-border">
+                      <img src={m.crop_url} loading="lazy" className="h-full w-full object-cover"
+                        onError={(e) => { const t = e.currentTarget.closest('a') as HTMLElement | null; if (t) t.style.display = 'none' }} />
+                      <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-center text-[9px] text-white">{Math.round(m.similarity * 100)}%</span>
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <div className="mb-2 text-sm font-medium">
             Detected faces{' '}
             <span className="text-muted">({(gallery?.total ?? 0).toLocaleString()})</span>
+            <span className="text-muted"> — click a face to find similar</span>
           </div>
           <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10">
             {gallery?.faces.map((f) => (
               <div
                 key={f.face_id}
+                onClick={() => openSimilar(f.face_id)}
                 title={`face #${f.face_id} · cluster ${f.cluster_id ?? '—'} · q${f.quality}`}
-                className="group relative aspect-square overflow-hidden rounded-lg border border-border bg-card"
+                className="group relative aspect-square cursor-pointer overflow-hidden rounded-lg border border-border bg-card"
               >
                 <img
                   src={f.crop_url}

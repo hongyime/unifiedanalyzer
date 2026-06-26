@@ -223,6 +223,7 @@ async def get_entity(entity_id: str):
     return {
         "id": str(entity["id"]),
         "tier": entity["tier"],
+        "watch_status": entity["watch_status"],
         "canonical_name": entity["canonical_name"],
         "face_crop_url": face_crop_url(_rep.get(entity_id)),
         "confidence_score": entity["confidence_score"],

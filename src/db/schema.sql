@@ -201,6 +201,11 @@ CREATE INDEX IF NOT EXISTS idx_entity_faces_face   ON entity_faces(face_id);
 -- NO FK to entities (a merge deletes the source entity, but the label must
 -- survive). Pair is stored normalized (entity_a < entity_b) so each pair has a
 -- single latest decision (upsert on PK).
+-- Watchlist tier (user-curated): priority | watching | archive | NULL.
+-- The triage queue + alerts can prioritise/suppress by this.
+ALTER TABLE entities ADD COLUMN IF NOT EXISTS watch_status VARCHAR(20);
+CREATE INDEX IF NOT EXISTS idx_entities_watch ON entities(watch_status) WHERE watch_status IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS identity_labels (
     entity_a    UUID NOT NULL,
     entity_b    UUID NOT NULL,

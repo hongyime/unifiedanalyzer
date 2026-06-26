@@ -221,6 +221,22 @@ export default function EntityDetailPage() {
             <div>
               <h2 style={{ marginBottom: '0.25rem' }}>{entity.canonical_name || '(unnamed)'}</h2>
               <div className="text-sm text-muted">{entity.tier} &middot; {entity.platform_links.length} platforms</div>
+              <div className="flex gap-1" style={{ marginTop: '0.4rem' }}>
+                {(['priority', 'watching', 'archive'] as const).map((st) => (
+                  <button
+                    key={st}
+                    onClick={async () => {
+                      const next = entity.watch_status === st ? null : st
+                      await api.setWatch(entity.id, next)
+                      setEntity({ ...entity, watch_status: next })
+                    }}
+                    className={entity.watch_status === st ? 'primary' : ''}
+                    style={{ fontSize: '0.7rem', padding: '2px 8px', textTransform: 'capitalize' }}
+                  >
+                    {st}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
           <div style={{ textAlign: 'right' }}>

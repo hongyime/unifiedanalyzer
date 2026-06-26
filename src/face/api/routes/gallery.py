@@ -89,6 +89,33 @@ def list_clusters(
     return {"clusters": clusters, "total": total, "page": page, "page_size": page_size}
 
 
+@router.get("/faces/{face_id}/similar")
+def similar_faces(face_id: int, k: int = Query(40, ge=1, le=120), db: Session = Depends(get_db)):
+    """"Who is this?" — kNN over the ArcFace corpus (pgvector cosine). Returns
+    the most similar faces with similarity, cluster, and bridged entity. Powers
+    face search + the face->entity bridging triage."""
+    rows = db.execute(text("""
+        SELECT f.id AS face_id, f.cluster_id,
+               1 - (f.embedding_vec <=> t.embedding_vec) AS sim,
+               (SELECT ef.entity_id FROM public.entity_faces ef WHERE ef.face_id = f.id LIMIT 1) AS entity_id,
+               (SELECT e.canonical_name FROM public.entity_faces ef
+                  JOIN public.entities e ON e.id = ef.entity_id
+                  WHERE ef.face_id = f.id LIMIT 1) AS entity_name
+        FROM facetracker.faces f, facetracker.faces t
+        WHERE t.id = :fid AND f.id != :fid AND f.embedding_vec IS NOT NULL
+        ORDER BY f.embedding_vec <=> t.embedding_vec
+        LIMIT :k
+    """), {"fid": face_id, "k": k}).fetchall()
+    return {"matches": [{
+        "face_id": r.face_id,
+        "cluster_id": r.cluster_id,
+        "similarity": round(float(r.sim), 4),
+        "crop_url": f"/api/face/gallery/faces/{r.face_id}/crop",
+        "entity_id": str(r.entity_id) if r.entity_id else None,
+        "entity_name": r.entity_name,
+    } for r in rows]}
+
+
 @router.get("/faces/{face_id}/crop")
 def face_crop(face_id: int, db: Session = Depends(get_db)):
     """Crop the face from its source image (bbox + margin) and return a JPEG.
