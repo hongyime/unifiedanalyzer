@@ -16,6 +16,12 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return res.json()
 }
 
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json()
+}
+
 export interface Entity {
   id: string
   tier: string
@@ -467,6 +473,15 @@ export const api = {
     get<{ candidates: ReviewCandidate[]; total: number }>(`/review/candidates?limit=${limit}`),
 
   getTriage: () => get<TriageData>('/triage'),
+
+  getCases: () => get<{ cases: { id: string; name: string; notes: string | null; items: number; updated_at: string | null }[] }>('/cases'),
+  createCase: (name: string) => post<{ ok: boolean; id: string }>('/cases', { name }),
+  getCase: (id: string) =>
+    get<{ id: string; name: string; notes: string | null; items: { id: string; item_type: string; ref_id: string | null; note: string | null; entity_name: string | null; face: string | null; created_at: string | null }[] }>(`/cases/${id}`),
+  addCaseItem: (caseId: string, item: { item_type: string; ref_id?: string; note?: string }) =>
+    post<{ ok: boolean; id: string }>(`/cases/${caseId}/items`, item),
+  deleteCaseItem: (caseId: string, itemId: string) => del<{ ok: boolean }>(`/cases/${caseId}/items/${itemId}`),
+  deleteCase: (id: string) => del<{ ok: boolean }>(`/cases/${id}`),
 
   searchEntities: (q: string, limit = 12) =>
     get<{ results: { id: string; canonical_name: string | null; tier: string; platforms: number; face: string | null }[] }>(

@@ -201,6 +201,24 @@ CREATE INDEX IF NOT EXISTS idx_entity_faces_face   ON entity_faces(face_id);
 -- NO FK to entities (a merge deletes the source entity, but the label must
 -- survive). Pair is stored normalized (entity_a < entity_b) so each pair has a
 -- single latest decision (upsert on PK).
+-- Saved investigations ("cases"): a pinboard of entities/media/notes/links.
+CREATE TABLE IF NOT EXISTS cases (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS case_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    case_id UUID NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    item_type VARCHAR(20) NOT NULL,   -- entity | media | note | link
+    ref_id TEXT,                      -- entity_id / media_item_id / url
+    note TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_case_items_case ON case_items(case_id);
+
 -- Watchlist tier (user-curated): priority | watching | archive | NULL.
 -- The triage queue + alerts can prioritise/suppress by this.
 ALTER TABLE entities ADD COLUMN IF NOT EXISTS watch_status VARCHAR(20);

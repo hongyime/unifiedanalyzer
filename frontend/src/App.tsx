@@ -1,9 +1,10 @@
 import { Routes, Route, NavLink } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import {
-  Bell, Users, Network, Play, Activity, Images, Circle, ScanFace, ListChecks,
+  Bell, Users, Network, Play, Activity, Images, Circle, ScanFace, ListChecks, FolderOpen,
 } from 'lucide-react'
 import TriagePage from './pages/Triage'
+import CasesPage from './pages/Cases'
 import AlertsPage from './pages/Alerts'
 import ReviewPage from './pages/Review'
 import EntitiesPage from './pages/Entities'
@@ -23,6 +24,7 @@ const NAV = [
   { to: '/communities', label: 'Communities', icon: Network },
   { to: '/media', label: 'Media', icon: Images },
   { to: '/faces', label: 'Faces', icon: ScanFace },
+  { to: '/cases', label: 'Cases', icon: FolderOpen },
   { to: '/runs', label: 'Runs', icon: Play },
   { to: '/collectors', label: 'Collectors', icon: Activity },
 ]
@@ -129,6 +131,7 @@ function App() {
           <Route path="/communities" element={<CommunitiesPage />} />
           <Route path="/media" element={<MediaPage />} />
           <Route path="/faces" element={<FacesPage />} />
+          <Route path="/cases" element={<CasesPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/collectors" element={<CollectorHealthPage />} />
         </Routes>

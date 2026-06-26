@@ -96,6 +96,9 @@ export default function EntityDetailPage() {
   const [mergeTarget, setMergeTarget] = useState('')
   const [relationships, setRelationships] = useState<Relationship[]>([])
   const [actionMsg, setActionMsg] = useState('')
+  const [cases, setCases] = useState<{ id: string; name: string }[]>([])
+  const [pinCase, setPinCase] = useState('')
+  useEffect(() => { api.getCases().then(d => setCases(d.cases)).catch(() => {}) }, [])
 
   useEffect(() => {
     if (!id) return
@@ -252,6 +255,27 @@ export default function EntityDetailPage() {
             >
               Export JSON
             </a>
+            <div className="flex gap-1" style={{ marginTop: '0.35rem', justifyContent: 'flex-end', alignItems: 'center' }}>
+              <select
+                value={pinCase}
+                onChange={(e) => setPinCase(e.target.value)}
+                className="rounded-md border border-border bg-card px-1 py-0.5 text-xs"
+              >
+                <option value="">Pin to case…</option>
+                {cases.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <button
+                disabled={!pinCase}
+                style={{ fontSize: '0.7rem', padding: '2px 8px' }}
+                onClick={async () => {
+                  if (!pinCase || !id) return
+                  await api.addCaseItem(pinCase, { item_type: 'entity', ref_id: id })
+                  setActionMsg('Pinned to case')
+                }}
+              >
+                Pin
+              </button>
+            </div>
           </div>
         </div>
       </div>
