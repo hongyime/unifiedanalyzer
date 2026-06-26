@@ -10,6 +10,7 @@ from src.pipeline.group_graph import build_whatsapp_group_graph, build_telegram_
 from src.pipeline.strava_patterns import analyze_strava_patterns
 from src.pipeline.bio_nlp import analyze_bios
 from src.pipeline.graph_analytics import compute_graph_analytics
+from src.pipeline.graph_overlap import compute_graph_overlap
 from src.pipeline.bio_mention import detect_bio_mentions
 from src.pipeline.location_inference import infer_locations
 from src.pipeline.content_fingerprint import fingerprint_content
@@ -182,6 +183,11 @@ async def run_incremental() -> dict:
             logger.exception("Graph analytics failed (non-fatal)")
 
         try:
+            await compute_graph_overlap()
+        except Exception:
+            logger.exception("Graph overlap failed (non-fatal)")
+
+        try:
             await detect_bio_mentions()
         except Exception:
             logger.exception("Bio mention detection failed (non-fatal)")
@@ -341,6 +347,11 @@ async def run_full_resolution() -> dict:
             await compute_graph_analytics()
         except Exception:
             logger.exception("Graph analytics failed (non-fatal)")
+
+        try:
+            await compute_graph_overlap()
+        except Exception:
+            logger.exception("Graph overlap failed (non-fatal)")
 
         try:
             await detect_bio_mentions()
