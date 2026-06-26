@@ -65,8 +65,16 @@ order. Each reads collector data and/or prior analyzer output and writes
 signals/results:
 
 1. **`resolve_entities`** (entity_resolver) — clusters platform accounts
-   (`social_users`, profiles) into unified **`entities`**; fuzzy username/name
-   matching (rapidfuzz), writes `entity_platform_links`.
+   (`social_users`, profiles) into unified **`entities`**, writing
+   `entity_platform_links`. **Conservative + target-anchored**: entities are
+   seeded from your actual collection targets (not blind global clustering).
+   Order of precedence is high-precision-first — **username-exact** match across
+   platforms (Phase 1), then phone / commit-email / profile-photo-SHA256
+   enrichment (Phase 3); **fuzzy name is only used as a *secondary* signal that
+   requires a second independent signal** ("name alone is insufficient"), and
+   `IDENTITY_MIN_SIGNALS=2` independent signals are required overall. So
+   over-merging on a common name like "John Smith" is guarded against at the
+   resolver level, not just down-weighted later.
 2. **`build_timeline(since)`** — merges every dated item (posts, messages,
    activities, comments…) across platforms into **`timeline_events`** per
    entity. Incremental by `since`.
@@ -175,9 +183,20 @@ cleanly (one running now). **The pipeline is live and healthy.**
 
 ## 9. Known gaps / data-gated signals (candid)
 
+> **Note (2026-06-26):** the `media_face_match`, `media_perceptual_match`
+> (pHash), and `media_gps_colocation` signal *types already exist and are scored*
+> — `incremental_runner` deletes+recomputes most signal types every run (so
+> signals are re-evaluated, not fossilized). The gap below is **data**, not
+> plumbing: the face signal is starved because faces aren't clustered/bridged.
+> Active work to close these: see the face-clustering + new-signal workstreams.
+
 - **Face → identity is barely wired** (`entity_faces`=13 vs 2,266 faces). The
-  richest media source is underused. Drive faces add more faces with *zero*
-  entity links.
+  `media_face_match` signal pipeline exists (scorer weight 0.50) but is starved
+  because `rebuild_face_match_signals` only joins faces already bridged to
+  entities. **Fix in progress: cluster the face index → auto-propagate
+  `entity_faces` → emit cross-entity `media_face_match` signals** (signals-only,
+  no auto-merge). Drive faces (no owner) get cross-referenced against the
+  collector index.
 - **Several signals are data-gated**, not broken: `location_inference` notes IG
   post geo + Strava timezone activate "once scraper backfills". `commit_email`,
   `whatsapp_phone`, `shared_website` fire rarely (1–2 rows).

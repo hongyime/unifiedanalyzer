@@ -33,6 +33,7 @@ from src.pipeline.media_analysis_tier1 import (
     rebuild_face_match_signals,
 )
 from src.pipeline.identity_scorer import compute_identity_scores
+from src.pipeline.face_clustering import run_face_clustering
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
 logger = logging.getLogger(__name__)
@@ -248,6 +249,15 @@ async def run_incremental() -> dict:
         except Exception:
             logger.exception("Media face analysis failed (non-fatal)")
 
+        # Cluster the InsightFace corpus + propagate entity_faces attribution
+        # across clusters (signals-only, group-photo guarded) so the bridged
+        # corpus the face-match signal reads from actually has data. Must run
+        # BEFORE rebuild_face_match_signals.
+        try:
+            await run_face_clustering()
+        except Exception:
+            logger.exception("Face clustering failed (non-fatal)")
+
         # F3: rebuild the InsightFace-backed media_face_match signal independently
         # of the SFace face step above (which skips when its models are missing).
         try:
@@ -399,6 +409,15 @@ async def run_full_resolution() -> dict:
             await analyze_media_faces()
         except Exception:
             logger.exception("Media face analysis failed (non-fatal)")
+
+        # Cluster the InsightFace corpus + propagate entity_faces attribution
+        # across clusters (signals-only, group-photo guarded) so the bridged
+        # corpus the face-match signal reads from actually has data. Must run
+        # BEFORE rebuild_face_match_signals.
+        try:
+            await run_face_clustering()
+        except Exception:
+            logger.exception("Face clustering failed (non-fatal)")
 
         # F3: rebuild the InsightFace-backed media_face_match signal independently
         # of the SFace face step above (which skips when its models are missing).
