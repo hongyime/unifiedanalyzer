@@ -24,6 +24,7 @@ import json
 import logging
 
 from src.db.connection import get_analyzer_pool
+from src.pipeline.identity_calibration import pair_feature_vector, get_model, predict_proba
 
 logger = logging.getLogger(__name__)
 
@@ -101,17 +102,25 @@ async def compute_identity_scores() -> dict:
         key = _pair_key(src_eid, tgt_eid)
         pair_contributions.setdefault(key, []).append((sig_type, confidence))
 
-    # --- Compute combined score per pair via probabilistic OR ---
+    # --- Compute combined score per pair ---
+    # Calibrated logistic-regression model when one has been trained
+    # (src/pipeline/identity_calibration.py), else fall back to the hand-set
+    # noisy-OR. The model handles signal correlation + gives a calibrated
+    # probability; the fallback keeps behaviour identical until a model exists.
+    model = get_model()
+    scoring_method = "calibrated" if model is not None else "noisy_or"
     results: list[dict] = []
     for (a, b), contributions in pair_contributions.items():
-        prob_none = 1.0
-        breakdown = []
-        for sig_type, confidence in contributions:
-            contribution = _TYPE_WEIGHT[sig_type] * confidence
-            prob_none *= (1 - contribution)
-            breakdown.append({"type": sig_type, "confidence": round(confidence, 4)})
+        breakdown = [{"type": t, "confidence": round(c, 4)} for t, c in contributions]
 
-        score = 1 - prob_none
+        if model is not None:
+            score = predict_proba(model, pair_feature_vector(contributions))
+        else:
+            prob_none = 1.0
+            for sig_type, confidence in contributions:
+                prob_none *= (1 - _TYPE_WEIGHT[sig_type] * confidence)
+            score = 1 - prob_none
+
         if score < _MIN_SCORE:
             continue
 
@@ -132,6 +141,7 @@ async def compute_identity_scores() -> dict:
     for r in results:
         sources = {
             "score": round(r["score"], 4),
+            "method": scoring_method,
             "contributing_signals": r["breakdown"],
         }
         insert_rows.append((
