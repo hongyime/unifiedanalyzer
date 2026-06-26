@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import {
   Bell, Users, Network, Play, Activity, Images, Circle, ScanFace, ListChecks,
 } from 'lucide-react'
+import TriagePage from './pages/Triage'
 import AlertsPage from './pages/Alerts'
 import ReviewPage from './pages/Review'
 import EntitiesPage from './pages/Entities'
@@ -13,10 +14,11 @@ import CommunitiesPage from './pages/Communities'
 import MediaPage from './pages/Media'
 import FacesPage from './pages/Faces'
 import { openHealthSocket, LiveHealth } from './api'
+import { CommandPalette } from './components/CommandPalette'
 
 const NAV = [
-  { to: '/', label: 'Alerts', icon: Bell, end: true },
-  { to: '/review', label: 'Review', icon: ListChecks },
+  { to: '/', label: 'Triage', icon: ListChecks, end: true },
+  { to: '/alerts', label: 'Alerts', icon: Bell },
   { to: '/entities', label: 'Entities', icon: Users },
   { to: '/communities', label: 'Communities', icon: Network },
   { to: '/media', label: 'Media', icon: Images },
@@ -53,8 +55,12 @@ function App() {
 
   return (
     <div className="flex min-h-screen">
+      <CommandPalette />
       <nav className="flex w-56 flex-col gap-1 border-r border-border bg-card p-4">
-        <h1 className="mb-6 text-lg font-bold text-accent">Analyzer</h1>
+        <div className="mb-6 flex items-center justify-between">
+          <h1 className="text-lg font-bold text-accent">Analyzer</h1>
+          <kbd className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted">⌘K</kbd>
+        </div>
         {NAV.map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}
@@ -115,7 +121,8 @@ function App() {
 
       <main className="max-w-[1200px] flex-1 p-8">
         <Routes>
-          <Route path="/" element={<AlertsPage />} />
+          <Route path="/" element={<TriagePage />} />
+          <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/review" element={<ReviewPage />} />
           <Route path="/entities" element={<EntitiesPage />} />
           <Route path="/entities/:id" element={<EntityDetailPage />} />

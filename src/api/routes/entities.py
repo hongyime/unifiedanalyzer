@@ -162,6 +162,36 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
     return {"candidates": candidates, "total": len(candidates)}
 
 
+@router.get("/search/entities")
+async def search_entities(q: str = Query(..., min_length=1), limit: int = Query(12, ge=1, le=50)):
+    """Jump-to-anything search across entity names + platform handles. Powers the
+    Cmd-K command palette."""
+    pool = get_analyzer_pool()
+    like = f"%{q}%"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT e.id, e.canonical_name, e.tier,
+                   (SELECT count(*) FROM entity_platform_links epl WHERE epl.entity_id = e.id) AS platforms
+            FROM entities e
+            WHERE e.canonical_name ILIKE $1
+               OR EXISTS (
+                   SELECT 1 FROM entity_platform_links epl
+                   WHERE epl.entity_id = e.id
+                     AND (epl.platform_username ILIKE $1 OR epl.platform_name ILIKE $1)
+               )
+            ORDER BY e.confidence_score DESC NULLS LAST
+            LIMIT $2
+        """, like, limit)
+        rep = await representative_faces(conn, [str(r["id"]) for r in rows])
+    return {"results": [{
+        "id": str(r["id"]),
+        "canonical_name": r["canonical_name"],
+        "tier": r["tier"],
+        "platforms": r["platforms"],
+        "face": face_crop_url(rep.get(str(r["id"]))),
+    } for r in rows]}
+
+
 @router.get("/entities/{entity_id}")
 async def get_entity(entity_id: str):
     pool = get_analyzer_pool()

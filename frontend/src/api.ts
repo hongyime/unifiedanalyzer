@@ -41,6 +41,34 @@ export interface ReviewCandidate {
   face_b: string | null
 }
 
+export interface TriageAlert {
+  id: string
+  alert_type: string
+  severity: string | null
+  title: string | null
+  detail: string | null
+  entity_id: string | null
+  entity_name: string | null
+  detected_at: string | null
+  is_read: boolean
+  face: string | null
+}
+
+export interface TriageData {
+  coverage: {
+    entities: number
+    with_faces: number
+    with_faces_pct: number
+    multi_platform: number
+    multi_platform_pct: number
+    merge_backlog: number
+    unread_alerts: number
+  }
+  merge_candidates: ReviewCandidate[]
+  alerts: TriageAlert[]
+  new_entities: { id: string; canonical_name: string | null; tier: string; platforms: number; face: string | null }[]
+}
+
 export interface EntityDetail {
   id: string
   tier: string
@@ -421,6 +449,13 @@ export const api = {
 
   getReviewCandidates: (limit = 50) =>
     get<{ candidates: ReviewCandidate[]; total: number }>(`/review/candidates?limit=${limit}`),
+
+  getTriage: () => get<TriageData>('/triage'),
+
+  searchEntities: (q: string, limit = 12) =>
+    get<{ results: { id: string; canonical_name: string | null; tier: string; platforms: number; face: string | null }[] }>(
+      `/search/entities?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
 
   updateEntitySettings: (entityId: string, settings: { silence_threshold_days?: number | null; notes?: string }) =>
     patch<{ ok: boolean }>(`/entities/${entityId}/settings`, settings),
