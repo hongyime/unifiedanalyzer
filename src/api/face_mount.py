@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Face route modules to mount, each contributing a `router` (APIRouter).
 # Imported individually so one failing module (e.g. a FAISS-heavy import in
 # `search`) does not drop the others.
-_FACE_ROUTE_MODULES = ("stats", "identity", "files", "search")
+_FACE_ROUTE_MODULES = ("stats", "identity", "files", "search", "gallery")
 
 
 def mount_face_api(app, prefix: str = "/api/face") -> list[str]:

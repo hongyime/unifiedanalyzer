@@ -449,4 +449,12 @@ export const api = {
   getFaceStats: () => get<FaceStats>('/face/stats'),
   getFaceIdentities: (page = 1) =>
     get<FaceIdentityList>(`/face/identities?page=${page}&page_size=50`),
+
+  getFaceGallery: (page = 1, pageSize = 60) =>
+    get<{
+      faces: { face_id: number; cluster_id: number | null; quality: number; crop_url: string; source: string }[]
+      total: number
+      page: number
+      page_size: number
+    }>(`/face/gallery/faces?page=${page}&page_size=${pageSize}`),
 }
