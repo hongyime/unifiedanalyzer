@@ -82,7 +82,11 @@ class Face(Base):
     
     # Embedding stored as halfvec (16-bit float)
     embedding_vec = Column(Vector(512))
-    
+
+    # Person-cluster assignment from src/pipeline/face_clustering.py (added via
+    # ALTER TABLE there; declared here so the ORM can read/filter on it).
+    cluster_id = Column(Integer, index=True)
+
     thumbnail_path = Column(Text)
     
     # Tracking info (for video frames)
