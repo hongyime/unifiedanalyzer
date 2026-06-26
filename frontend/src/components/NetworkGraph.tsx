@@ -29,7 +29,7 @@ export function NetworkGraph({ data }: { data: Net }) {
         <line
           key={'e' + n.id}
           x1={cx} y1={cy} x2={n.x} y2={n.y}
-          stroke="var(--border, #2a2a33)"
+          stroke="var(--color-border, #2a2a33)"
           strokeWidth={0.5 + 3 * ((n.weight || 0) / maxW)}
           opacity={0.5}
         />
@@ -40,18 +40,18 @@ export function NetworkGraph({ data }: { data: Net }) {
           <foreignObject x={n.x - 16} y={n.y - 16} width={32} height={32}>
             <FaceAvatar url={n.face} name={n.name} size={32} />
           </foreignObject>
-          <text x={n.x} y={n.y + 28} fontSize={9} fill="var(--muted, #8a8a99)" textAnchor="middle">
+          <text x={n.x} y={n.y + 28} fontSize={9} fill="var(--color-muted, #8a8a99)" textAnchor="middle">
             {(n.name || n.id.slice(0, 6)).slice(0, 16)}
           </text>
         </g>
       ))}
 
       <g>
-        <circle cx={cx} cy={cy} r={26} fill="none" stroke="var(--accent, #863bff)" strokeWidth={2} />
+        <circle cx={cx} cy={cy} r={26} fill="none" stroke="var(--color-accent, #863bff)" strokeWidth={2} />
         <foreignObject x={cx - 24} y={cy - 24} width={48} height={48}>
           <FaceAvatar url={data.center.face} name={data.center.name} size={48} />
         </foreignObject>
-        <text x={cx} y={cy + 42} fontSize={11} fontWeight={600} fill="var(--fg, #e8e8ea)" textAnchor="middle">
+        <text x={cx} y={cy + 42} fontSize={11} fontWeight={600} fill="var(--color-fg, #e8e8ea)" textAnchor="middle">
           {(data.center.name || 'center').slice(0, 18)}
         </text>
       </g>

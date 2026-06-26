@@ -64,7 +64,7 @@ export default function ReviewPage() {
               </div>
               <div className="flex gap-1">
                 <button onClick={() => confirm(c)}>Same &rarr; merge</button>
-                <button onClick={() => dismiss(c)} style={{ borderColor: 'var(--orange)', color: 'var(--orange)' }}>
+                <button onClick={() => dismiss(c)} style={{ borderColor: 'var(--color-orange)', color: 'var(--color-orange)' }}>
                   Not same
                 </button>
               </div>

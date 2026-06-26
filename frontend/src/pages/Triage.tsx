@@ -100,7 +100,7 @@ export default function TriagePage() {
                   </div>
                   <div className="flex gap-1">
                     <button onClick={(e) => { e.stopPropagation(); doMerge(c) }}>Same</button>
-                    <button onClick={(e) => { e.stopPropagation(); doDismiss(c) }} style={{ borderColor: 'var(--orange)', color: 'var(--orange)' }}>Not</button>
+                    <button onClick={(e) => { e.stopPropagation(); doDismiss(c) }} style={{ borderColor: 'var(--color-orange)', color: 'var(--color-orange)' }}>Not</button>
                   </div>
                 </div>
               ))}

@@ -341,7 +341,7 @@ export default function EntityDetailPage() {
 
           {selectedLinks.size > 0 && (
             <div className="flex gap-1" style={{ marginTop: '0.75rem' }}>
-              <button onClick={handleSplit} style={{ borderColor: 'var(--orange)', color: 'var(--orange)' }}>
+              <button onClick={handleSplit} style={{ borderColor: 'var(--color-orange)', color: 'var(--color-orange)' }}>
                 Split {selectedLinks.size} selected into new entity
               </button>
             </div>
@@ -469,11 +469,11 @@ export default function EntityDetailPage() {
                       <PlatformBadge source={s.source} />
                       <div style={{ flex: 1 }}>
                         <div style={{
-                          height: '6px', borderRadius: '3px', background: 'var(--border)',
+                          height: '6px', borderRadius: '3px', background: 'var(--color-border)',
                         }}>
                           <div style={{
                             height: '100%', borderRadius: '3px', width: `${pct * 100}%`,
-                            background: 'var(--accent)',
+                            background: 'var(--color-accent)',
                           }} />
                         </div>
                       </div>
@@ -791,7 +791,7 @@ export default function EntityDetailPage() {
                               <button onClick={() => handleConfirmSame(c.entity_id)}>Same &rarr; merge</button>
                               <button
                                 onClick={() => handleDismissMatch(c.entity_id)}
-                                style={{ borderColor: 'var(--orange)', color: 'var(--orange)' }}
+                                style={{ borderColor: 'var(--color-orange)', color: 'var(--color-orange)' }}
                               >
                                 Not same
                               </button>
@@ -859,7 +859,7 @@ export default function EntityDetailPage() {
               rows={3}
               style={{
                 width: '100%', maxWidth: '500px', padding: '0.5rem 0.75rem',
-                borderRadius: '6px', border: '1px solid var(--border)',
+                borderRadius: '6px', border: '1px solid var(--color-border)',
                 background: 'var(--bg)', color: 'var(--text)', fontSize: '0.875rem',
                 resize: 'vertical',
               }}

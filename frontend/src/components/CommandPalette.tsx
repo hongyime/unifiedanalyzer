@@ -56,7 +56,7 @@ export function CommandPalette() {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{ width: 'min(560px, 92vw)', background: 'var(--card, #17171c)', border: '1px solid var(--border, #2a2a33)', borderRadius: 12, overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}
+        style={{ width: 'min(560px, 92vw)', background: 'var(--color-card, #17171c)', border: '1px solid var(--color-border, #2a2a33)', borderRadius: 12, overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}
       >
         <input
           ref={inputRef}
@@ -68,27 +68,27 @@ export function CommandPalette() {
             else if (e.key === 'Enter' && results[sel]) go(results[sel])
           }}
           placeholder="Search people, handles…"
-          style={{ width: '100%', padding: '14px 16px', background: 'transparent', border: 'none', outline: 'none', color: 'var(--fg, #e8e8ea)', fontSize: 15 }}
+          style={{ width: '100%', padding: '14px 16px', background: 'transparent', border: 'none', outline: 'none', color: 'var(--color-fg, #e8e8ea)', fontSize: 15 }}
         />
-        <div style={{ maxHeight: '50vh', overflowY: 'auto', borderTop: '1px solid var(--border, #2a2a33)' }}>
+        <div style={{ maxHeight: '50vh', overflowY: 'auto', borderTop: '1px solid var(--color-border, #2a2a33)' }}>
           {results.map((r, i) => (
             <div
               key={r.id}
               onClick={() => go(r)}
               onMouseEnter={() => setSel(i)}
-              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', cursor: 'pointer', background: i === sel ? 'var(--hover, #22222a)' : 'transparent' }}
+              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', cursor: 'pointer', background: i === sel ? 'var(--color-hover, #22222a)' : 'transparent' }}
             >
               <FaceAvatar url={r.face} name={r.canonical_name} size={30} />
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {r.canonical_name || r.id.slice(0, 8)}
                 </div>
-                <div style={{ fontSize: 11, color: 'var(--muted, #8a8a99)' }}>{r.tier} · {r.platforms} platforms</div>
+                <div style={{ fontSize: 11, color: 'var(--color-muted, #8a8a99)' }}>{r.tier} · {r.platforms} platforms</div>
               </div>
             </div>
           ))}
           {q.trim() && results.length === 0 && (
-            <div style={{ padding: 14, fontSize: 13, color: 'var(--muted, #8a8a99)' }}>No matches</div>
+            <div style={{ padding: 14, fontSize: 13, color: 'var(--color-muted, #8a8a99)' }}>No matches</div>
           )}
         </div>
       </div>

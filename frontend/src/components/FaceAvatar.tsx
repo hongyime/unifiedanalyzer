@@ -26,11 +26,11 @@ export function FaceAvatar({
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
-    background: 'var(--card, #17171c)',
-    border: '1px solid var(--border, #2a2a33)',
+    background: 'var(--color-card, #17171c)',
+    border: '1px solid var(--color-border, #2a2a33)',
     fontSize: Math.round(size * 0.4),
     fontWeight: 600,
-    color: 'var(--muted, #8a8a99)',
+    color: 'var(--color-muted, #8a8a99)',
     flexShrink: 0,
   }
   return (

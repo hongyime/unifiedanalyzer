@@ -42,8 +42,8 @@ export function TimelineLanes({ data }: { data: Data }) {
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }}>
       {yearTicks.map((t) => (
         <g key={t.y}>
-          <line x1={t.x} y1={padT - 4} x2={t.x} y2={H} stroke="var(--border, #2a2a33)" strokeWidth={1} />
-          <text x={t.x + 3} y={padT - 8} fontSize={9} fill="var(--muted, #8a8a99)">{t.y}</text>
+          <line x1={t.x} y1={padT - 4} x2={t.x} y2={H} stroke="var(--color-border, #2a2a33)" strokeWidth={1} />
+          <text x={t.x + 3} y={padT - 8} fontSize={9} fill="var(--color-muted, #8a8a99)">{t.y}</text>
         </g>
       ))}
       {alerts.map((a, i) => (
@@ -56,12 +56,12 @@ export function TimelineLanes({ data }: { data: Data }) {
         const col = colorFor(lane.source)
         return (
           <g key={lane.source}>
-            <text x={0} y={y + 3} fontSize={10} fill="var(--fg, #e8e8ea)">{lane.source}</text>
-            <line x1={padL} y1={y} x2={W - padR} y2={y} stroke="var(--border, #222)" strokeWidth={0.5} />
+            <text x={0} y={y + 3} fontSize={10} fill="var(--color-fg, #e8e8ea)">{lane.source}</text>
+            <line x1={padL} y1={y} x2={W - padR} y2={y} stroke="var(--color-border, #222)" strokeWidth={0.5} />
             {lane.events.map((e, ei) => (
               <circle key={ei} cx={x(e.t)} cy={y} r={2.2} fill={col} opacity={0.8} />
             ))}
-            <text x={W - padR + 2} y={y + 3} fontSize={8} fill="var(--muted, #8a8a99)" textAnchor="start">
+            <text x={W - padR + 2} y={y + 3} fontSize={8} fill="var(--color-muted, #8a8a99)" textAnchor="start">
               {lane.events.length}
             </text>
           </g>
