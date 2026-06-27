@@ -2,12 +2,41 @@
 with annotations. The difference between a database and a tool you work in.
 """
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 
 from src.db.connection import get_analyzer_pool
 from src.api.face_lookup import representative_faces, face_crop_url
 
 router = APIRouter(tags=["cases"])
+
+
+@router.get("/cases/{case_id}/export")
+async def export_case(case_id: str, format: str = "json"):
+    """Download a case as a shareable dossier (json|csv)."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        c = await conn.fetchrow("SELECT id, name, notes FROM cases WHERE id = $1::uuid", case_id)
+        if not c:
+            raise HTTPException(404, "Case not found")
+        items = await conn.fetch("""
+            SELECT ci.item_type, ci.ref_id, ci.note,
+                   (SELECT canonical_name FROM entities e WHERE e.id::text = ci.ref_id) AS name
+            FROM case_items ci WHERE ci.case_id = $1::uuid ORDER BY ci.created_at
+        """, case_id)
+    if format == "csv":
+        rows = ["item_type,ref_id,name,note"]
+        for it in items:
+            def q(v):
+                return '"' + str(v or "").replace('"', "'") + '"'
+            rows.append(f"{it['item_type']},{q(it['ref_id'])},{q(it['name'])},{q(it['note'])}")
+        return PlainTextResponse("\n".join(rows), headers={
+            "Content-Disposition": f'attachment; filename="case-{c["name"]}.csv"'})
+    return JSONResponse({
+        "name": c["name"], "notes": c["notes"],
+        "items": [{"item_type": it["item_type"], "ref_id": it["ref_id"],
+                   "name": it["name"], "note": it["note"]} for it in items],
+    }, headers={"Content-Disposition": f'attachment; filename="case-{c["name"]}.json"'})
 
 
 class CaseCreate(BaseModel):

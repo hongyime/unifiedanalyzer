@@ -69,7 +69,13 @@ export default function CasesPage() {
             <div className="empty-state">Select or create a case</div>
           ) : (
             <div>
-              <div className="mb-2 text-lg font-semibold">{detail.name}</div>
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-lg font-semibold">{detail.name}</div>
+                <div className="flex gap-2 text-sm">
+                  <a href={api.exportCaseUrl(detail.id, 'json')}>Export JSON</a>
+                  <a href={api.exportCaseUrl(detail.id, 'csv')}>Export CSV</a>
+                </div>
+              </div>
               {detail.items.length === 0 ? (
                 <div className="empty-state">Empty — pin entities from their profile (Pin to case)</div>
               ) : (

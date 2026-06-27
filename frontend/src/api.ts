@@ -494,6 +494,7 @@ export const api = {
     post<{ ok: boolean; id: string }>(`/cases/${caseId}/items`, item),
   deleteCaseItem: (caseId: string, itemId: string) => del<{ ok: boolean }>(`/cases/${caseId}/items/${itemId}`),
   deleteCase: (id: string) => del<{ ok: boolean }>(`/cases/${id}`),
+  exportCaseUrl: (id: string, format: 'json' | 'csv' = 'json') => `${BASE}/cases/${id}/export?format=${format}`,
 
   searchEntities: (q: string, limit = 12) =>
     get<{ results: { id: string; canonical_name: string | null; tier: string; platforms: number; face: string | null }[] }>(
