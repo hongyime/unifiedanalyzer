@@ -423,6 +423,18 @@ export const api = {
 
   getEntity: (id: string) => get<EntityDetail>(`/entities/${id}`),
 
+  getEntityGeo: (entityId: string) =>
+    get<{
+      routes: { name: string | null; type: string | null; date: string | null; points: [number, number][] }[]
+      points: { lat: number; lng: number; label: string | null; source: string }[]
+      counts: { routes: number; points: number }
+    }>(`/entities/${entityId}/geo`),
+
+  getEntityAssociates: (entityId: string) =>
+    get<{ associates: { username: string; full_name: string | null; shared: number; entity_id: string | null; entity_name: string | null; face: string | null }[] }>(
+      `/entities/${entityId}/associates`,
+    ),
+
   getEntityNetwork: (entityId: string) =>
     get<{
       center: { id: string; name: string | null; face: string | null }

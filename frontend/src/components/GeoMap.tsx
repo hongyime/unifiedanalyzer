@@ -1,0 +1,59 @@
+import { useEffect, useRef } from 'react'
+import 'leaflet/dist/leaflet.css'
+import L from 'leaflet'
+
+/**
+ * Geo map (Leaflet, imperative). Strava routes as polylines + start points,
+ * Instagram tagged-place pins. Tiles load client-side from OpenStreetMap.
+ * Populates as the collector fills strava_gps_streams / IG post geo.
+ */
+type Geo = {
+  routes: { name: string | null; type: string | null; date: string | null; points: [number, number][] }[]
+  points: { lat: number; lng: number; label: string | null; source: string }[]
+  counts: { routes: number; points: number }
+}
+
+export function GeoMap({ data }: { data: Geo }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const mapRef = useRef<L.Map | null>(null)
+
+  useEffect(() => {
+    if (!ref.current) return
+    if (!mapRef.current) {
+      mapRef.current = L.map(ref.current, { scrollWheelZoom: false }).setView([1.35, 103.82], 11)
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap',
+      }).addTo(mapRef.current)
+    }
+    const map = mapRef.current
+    const layer = L.layerGroup().addTo(map)
+    const bounds: [number, number][] = []
+
+    data.routes.forEach((r) => {
+      const latlngs = r.points.map((p) => [p[0], p[1]] as [number, number])
+      if (latlngs.length >= 2) {
+        L.polyline(latlngs, { color: '#fc4c02', weight: 2, opacity: 0.7 })
+          .bindPopup(`${r.name || 'activity'}${r.date ? ' · ' + r.date.slice(0, 10) : ''}`)
+          .addTo(layer)
+        latlngs.forEach((ll) => bounds.push(ll))
+      }
+    })
+    data.points.forEach((p) => {
+      L.circleMarker([p.lat, p.lng], {
+        radius: 4,
+        color: p.source === 'strava' ? '#fc4c02' : '#e1306c',
+        fillOpacity: 0.6,
+      })
+        .bindPopup(p.label || p.source)
+        .addTo(layer)
+      bounds.push([p.lat, p.lng])
+    })
+
+    if (bounds.length) map.fitBounds(bounds, { padding: [24, 24], maxZoom: 14 })
+    setTimeout(() => map.invalidateSize(), 50)
+    return () => { layer.remove() }
+  }, [data])
+
+  return <div ref={ref} style={{ height: 420, borderRadius: 8, overflow: 'hidden', zIndex: 0 }} />
+}

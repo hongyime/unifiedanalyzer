@@ -1,9 +1,176 @@
 from fastapi import APIRouter, Query
 
-from src.db.connection import get_analyzer_pool
+from src.db.connection import get_analyzer_pool, get_collector_pool
 from src.api.face_lookup import representative_faces, face_crop_url
 
 router = APIRouter(tags=["graph"])
+
+
+def _decode_polyline(s: str) -> list[list[float]]:
+    """Decode a Google encoded polyline (strava summary_polyline) -> [[lat,lng]]."""
+    points: list[list[float]] = []
+    index = lat = lng = 0
+    n = len(s)
+    while index < n:
+        for is_lat in (True, False):
+            shift = result = 0
+            while True:
+                b = ord(s[index]) - 63
+                index += 1
+                result |= (b & 0x1f) << shift
+                shift += 5
+                if b < 0x20:
+                    break
+            d = ~(result >> 1) if (result & 1) else (result >> 1)
+            if is_lat:
+                lat += d
+            else:
+                lng += d
+        points.append([lat / 1e5, lng / 1e5])
+    return points
+
+
+def _parse_latlng(s) -> list[float] | None:
+    if not s:
+        return None
+    try:
+        parts = str(s).strip("[]() ").split(",")
+        return [float(parts[0]), float(parts[1])]
+    except (ValueError, IndexError):
+        return None
+
+
+def _as_latlng_list(raw) -> list[list[float]]:
+    """strava_gps_streams.latlng -> [[lat,lng],...]. asyncpg may hand back jsonb
+    as a str; normalize."""
+    import json as _json
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for p in raw:
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            out.append([float(p[0]), float(p[1])])
+    return out
+
+
+def _downsample(pts: list, target: int = 120) -> list:
+    """Thin a track to ~target points to keep the payload small (full-res Strava
+    streams can be thousands of points)."""
+    if len(pts) <= target:
+        return pts
+    step = len(pts) / target
+    return [pts[int(i * step)] for i in range(target)] + [pts[-1]]
+
+
+@router.get("/entities/{entity_id}/geo")
+async def entity_geo(entity_id: str):
+    """Geo footprint for the map: Strava route polylines + start points, and
+    Instagram tagged-place pins. Reads the collector DB."""
+    analyzer = get_analyzer_pool()
+    collector = get_collector_pool()
+    async with analyzer.acquire() as conn:
+        links = await conn.fetch(
+            "SELECT source, platform_id FROM entity_platform_links WHERE entity_id = $1::uuid", entity_id
+        )
+    strava_ids = [l["platform_id"] for l in links if l["source"] == "strava" and l["platform_id"]]
+    ig_ids = [l["platform_id"] for l in links if l["source"] == "instagram" and l["platform_id"]]
+
+    routes: list[dict] = []
+    points: list[dict] = []
+    async with collector.acquire() as cc:
+        if strava_ids:
+            acts = await cc.fetch("""
+                SELECT a.name, a.start_date, a.type, a.start_latlng, s.latlng::text AS latlng
+                FROM strava_activities a
+                JOIN strava_athletes ath ON ath.id = a.athlete_id
+                JOIN strava_gps_streams s ON s.activity_id = a.id
+                WHERE ath.platform_athlete_id::text = ANY($1::text[])
+                  AND s.latlng IS NOT NULL AND jsonb_array_length(s.latlng) > 1
+                ORDER BY a.start_date DESC NULLS LAST LIMIT 80
+            """, strava_ids)
+            for r in acts:
+                pts = _downsample(_as_latlng_list(r["latlng"]))
+                if len(pts) >= 2:
+                    routes.append({"name": r["name"], "type": r["type"],
+                                   "date": r["start_date"].isoformat() if r["start_date"] else None,
+                                   "points": pts})
+                sp = _parse_latlng(r["start_latlng"])
+                if sp:
+                    points.append({"lat": sp[0], "lng": sp[1], "label": r["name"], "source": "strava"})
+        if ig_ids:
+            posts = await cc.fetch("""
+                SELECT p.location_name, p.location_lat, p.location_lng
+                FROM instagram_posts p
+                JOIN instagram_profiles pr ON pr.id = p.profile_id
+                WHERE pr.platform_user_id::text = ANY($1::text[]) AND p.location_lat IS NOT NULL
+                ORDER BY p.platform_created_at DESC NULLS LAST LIMIT 300
+            """, ig_ids)
+            for p in posts:
+                points.append({"lat": float(p["location_lat"]), "lng": float(p["location_lng"]),
+                               "label": p["location_name"], "source": "instagram"})
+
+    return {"routes": routes, "points": points,
+            "counts": {"routes": len(routes), "points": len(points)}}
+
+
+@router.get("/entities/{entity_id}/associates")
+async def entity_associates(entity_id: str, limit: int = Query(40, ge=1, le=100)):
+    """"Seen with" — people tagged in the same Instagram posts the entity owns
+    (edge_media_to_tagged_user), ranked by shared-post count, resolved to
+    entities where the tagged username maps to one."""
+    analyzer = get_analyzer_pool()
+    collector = get_collector_pool()
+    async with analyzer.acquire() as conn:
+        links = await conn.fetch(
+            "SELECT platform_id FROM entity_platform_links WHERE entity_id = $1::uuid AND source = 'instagram'", entity_id
+        )
+    ig_ids = [l["platform_id"] for l in links if l["platform_id"]]
+    if not ig_ids:
+        return {"associates": []}
+
+    async with collector.acquire() as cc:
+        rows = await cc.fetch("""
+            SELECT u->'node'->'user'->>'username'        AS username,
+                   max(u->'node'->'user'->>'full_name')  AS full_name,
+                   count(*)                              AS shared
+            FROM instagram_posts p
+            JOIN instagram_profiles pr ON pr.id = p.profile_id,
+                 jsonb_array_elements(p.metadata->'edge_media_to_tagged_user'->'edges') u
+            WHERE pr.platform_user_id::text = ANY($1::text[])
+              AND p.metadata->'edge_media_to_tagged_user' IS NOT NULL
+            GROUP BY 1 ORDER BY shared DESC LIMIT $2
+        """, ig_ids, limit)
+
+    usernames = [r["username"] for r in rows if r["username"]]
+    ent_map: dict[str, tuple[str, str]] = {}
+    rep: dict = {}
+    if usernames:
+        async with analyzer.acquire() as conn:
+            erows = await conn.fetch("""
+                SELECT lower(platform_username) AS u, entity_id::text AS eid,
+                       (SELECT canonical_name FROM entities e WHERE e.id = epl.entity_id) AS name
+                FROM entity_platform_links epl
+                WHERE source = 'instagram' AND lower(platform_username) = ANY($1::text[])
+            """, [u.lower() for u in usernames])
+            ent_map = {r["u"]: (r["eid"], r["name"]) for r in erows}
+            rep = await representative_faces(conn, [v[0] for v in ent_map.values()])
+
+    associates = []
+    for r in rows:
+        if not r["username"]:
+            continue
+        eid, ename = ent_map.get(r["username"].lower(), (None, None))
+        associates.append({
+            "username": r["username"], "full_name": r["full_name"], "shared": r["shared"],
+            "entity_id": eid, "entity_name": ename,
+            "face": face_crop_url(rep.get(eid)) if eid else None,
+        })
+    return {"associates": associates}
 
 
 @router.get("/entities/{entity_id}/network")

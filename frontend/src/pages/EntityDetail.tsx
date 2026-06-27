@@ -5,6 +5,7 @@ import { FaceAvatar } from '../components/FaceAvatar'
 import { TimelineLanes } from '../components/TimelineLanes'
 import { NetworkGraph } from '../components/NetworkGraph'
 import { IdentitySummary } from '../components/IdentitySummary'
+import { GeoMap } from '../components/GeoMap'
 
 function PlatformBadge({ source }: { source: string }) {
   return <span className={`platform-icon p-${source}`}>{source}</span>
@@ -87,7 +88,7 @@ export default function EntityDetailPage() {
   const [events, setEvents] = useState<TimelineEvent[]>([])
   const [eventsTotal, setEventsTotal] = useState(0)
   const [eventsPage, setEventsPage] = useState(1)
-  const [tab, setTab] = useState<'identity' | 'timeline' | 'behavior' | 'relationships' | 'intelligence' | 'settings'>('identity')
+  const [tab, setTab] = useState<'identity' | 'timeline' | 'map' | 'behavior' | 'relationships' | 'intelligence' | 'settings'>('identity')
   const [loading, setLoading] = useState(true)
   const [behavior, setBehavior] = useState<BehaviorProfile | null>(null)
   const [intelligence, setIntelligence] = useState<IntelligenceReport | null>(null)
@@ -136,9 +137,17 @@ export default function EntityDetailPage() {
   }, [id, tab])
 
   const [network, setNetwork] = useState<Awaited<ReturnType<typeof api.getEntityNetwork>> | null>(null)
+  const [associates, setAssociates] = useState<Awaited<ReturnType<typeof api.getEntityAssociates>> | null>(null)
   useEffect(() => {
     if (!id || tab !== 'relationships') return
     api.getEntityNetwork(id).then(setNetwork).catch(() => setNetwork(null))
+    api.getEntityAssociates(id).then(setAssociates).catch(() => setAssociates(null))
+  }, [id, tab])
+
+  const [geo, setGeo] = useState<Awaited<ReturnType<typeof api.getEntityGeo>> | null>(null)
+  useEffect(() => {
+    if (!id || tab !== 'map') return
+    api.getEntityGeo(id).then(setGeo).catch(() => setGeo(null))
   }, [id, tab])
 
   useEffect(() => {
@@ -290,6 +299,7 @@ export default function EntityDetailPage() {
       <div className="flex gap-1 mb-2">
         <button className={tab === 'identity' ? 'primary' : ''} onClick={() => setTab('identity')}>Identity</button>
         <button className={tab === 'timeline' ? 'primary' : ''} onClick={() => setTab('timeline')}>Timeline</button>
+        <button className={tab === 'map' ? 'primary' : ''} onClick={() => setTab('map')}>Map</button>
         <button className={tab === 'behavior' ? 'primary' : ''} onClick={() => setTab('behavior')}>Behavior</button>
         <button className={tab === 'relationships' ? 'primary' : ''} onClick={() => setTab('relationships')}>Relationships</button>
         <button className={tab === 'intelligence' ? 'primary' : ''} onClick={() => setTab('intelligence')}>Intelligence</button>
@@ -425,6 +435,24 @@ export default function EntityDetailPage() {
                 </div>
               </div>
             </>
+          )}
+        </>
+      )}
+
+      {tab === 'map' && (
+        <>
+          {geo && (geo.counts.routes > 0 || geo.counts.points > 0) ? (
+            <div className="card">
+              <div className="flex-between mb-1">
+                <div className="text-sm" style={{ fontWeight: 600 }}>Geo footprint</div>
+                <div className="text-sm text-muted">{geo.counts.routes} routes · {geo.counts.points} places</div>
+              </div>
+              <GeoMap data={geo} />
+            </div>
+          ) : (
+            <div className="empty-state">
+              No geo signals yet — Strava routes + Instagram places appear here as the collector populates them.
+            </div>
           )}
         </>
       )}
@@ -629,6 +657,25 @@ export default function EntityDetailPage() {
             <div className="card" style={{ marginBottom: '0.75rem' }}>
               <div className="text-sm mb-1" style={{ fontWeight: 600 }}>Connection graph <span className="text-muted">(click to pivot)</span></div>
               <NetworkGraph data={network} />
+            </div>
+          )}
+          {associates && associates.associates.length > 0 && (
+            <div className="card" style={{ marginBottom: '0.75rem' }}>
+              <div className="text-sm mb-2" style={{ fontWeight: 600 }}>Seen with <span className="text-muted">(co-tagged in photos)</span></div>
+              <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+                {associates.associates.map((a, i) => {
+                  const chip = (
+                    <span className="flex gap-1" style={{ alignItems: 'center', border: '1px solid var(--color-border)', borderRadius: 999, padding: '2px 8px 2px 2px', fontSize: '0.75rem' }}>
+                      <FaceAvatar url={a.face} name={a.entity_name || a.full_name || a.username} size={22} />
+                      <span>{a.entity_name || a.full_name || a.username}</span>
+                      <span className="text-muted">×{a.shared}</span>
+                    </span>
+                  )
+                  return a.entity_id
+                    ? <Link key={i} to={`/entities/${a.entity_id}`}>{chip}</Link>
+                    : <span key={i}>{chip}</span>
+                })}
+              </div>
             </div>
           )}
           {relationships.length === 0 ? (
