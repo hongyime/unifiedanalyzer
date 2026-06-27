@@ -82,6 +82,7 @@ async def entity_geo(entity_id: str):
 
     routes: list[dict] = []
     points: list[dict] = []
+    ig_place_names: list[str] = []
     async with collector.acquire() as cc:
         if strava_ids:
             # Prefer full-res gps_streams.latlng; fall back to the (now
@@ -119,6 +120,26 @@ async def entity_geo(entity_id: str):
             for p in posts:
                 points.append({"lat": float(p["location_lat"]), "lng": float(p["location_lng"]),
                                "label": p["location_name"], "source": "instagram"})
+            # IG stores only place NAMES (no coords); collect them to resolve via
+            # the geocode cache below.
+            named = await cc.fetch("""
+                SELECT DISTINCT p.location_name
+                FROM instagram_posts p
+                JOIN instagram_profiles pr ON pr.id = p.profile_id
+                WHERE pr.platform_user_id::text = ANY($1::text[])
+                  AND p.location_name IS NOT NULL AND p.location_name <> ''
+                LIMIT 500
+            """, ig_ids)
+            ig_place_names = [r["location_name"] for r in named]
+
+    # Geocoded IG place-name pins (cache lives in the analyzer DB).
+    if ig_place_names:
+        async with analyzer.acquire() as conn:
+            geo = await conn.fetch(
+                "SELECT place_name, lat, lng FROM geocode_cache "
+                "WHERE status = 'ok' AND place_name = ANY($1::text[])", ig_place_names)
+        for g in geo:
+            points.append({"lat": g["lat"], "lng": g["lng"], "label": g["place_name"], "source": "instagram"})
 
     return {"routes": routes, "points": points,
             "counts": {"routes": len(routes), "points": len(points)}}

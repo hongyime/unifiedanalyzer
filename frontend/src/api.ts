@@ -423,6 +423,19 @@ export const api = {
 
   getEntity: (id: string) => get<EntityDetail>(`/entities/${id}`),
 
+  getChangelog: (entityId: string) =>
+    get<{
+      since: string | null
+      additions: {
+        platform_links: { source: string; username: string | null; at: string | null }[]
+        timeline_events: number
+        alerts: { alert_type: string; title: string | null; detail: string | null; at: string | null }[]
+      }
+      deletions: { platform: string; text: string | null; deleted_at: string | null }[]
+      total_changes: number
+    }>(`/entities/${entityId}/changelog`),
+  markReviewed: (entityId: string) => post<{ ok: boolean }>(`/entities/${entityId}/mark-reviewed`),
+
   getEntityGeo: (entityId: string) =>
     get<{
       routes: { name: string | null; type: string | null; date: string | null; points: [number, number][] }[]

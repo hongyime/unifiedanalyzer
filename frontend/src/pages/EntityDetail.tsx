@@ -88,7 +88,7 @@ export default function EntityDetailPage() {
   const [events, setEvents] = useState<TimelineEvent[]>([])
   const [eventsTotal, setEventsTotal] = useState(0)
   const [eventsPage, setEventsPage] = useState(1)
-  const [tab, setTab] = useState<'identity' | 'timeline' | 'map' | 'behavior' | 'relationships' | 'intelligence' | 'settings'>('identity')
+  const [tab, setTab] = useState<'identity' | 'changes' | 'timeline' | 'map' | 'behavior' | 'relationships' | 'intelligence' | 'settings'>('identity')
   const [loading, setLoading] = useState(true)
   const [behavior, setBehavior] = useState<BehaviorProfile | null>(null)
   const [intelligence, setIntelligence] = useState<IntelligenceReport | null>(null)
@@ -149,6 +149,10 @@ export default function EntityDetailPage() {
     if (!id || tab !== 'map') return
     api.getEntityGeo(id).then(setGeo).catch(() => setGeo(null))
   }, [id, tab])
+
+  const [changelog, setChangelog] = useState<Awaited<ReturnType<typeof api.getChangelog>> | null>(null)
+  const loadChangelog = () => { if (id) api.getChangelog(id).then(setChangelog).catch(() => setChangelog(null)) }
+  useEffect(() => { if (id && tab === 'changes') loadChangelog() }, [id, tab])
 
   useEffect(() => {
     if (!id || tab !== 'intelligence') return
@@ -298,6 +302,9 @@ export default function EntityDetailPage() {
 
       <div className="flex gap-1 mb-2">
         <button className={tab === 'identity' ? 'primary' : ''} onClick={() => setTab('identity')}>Identity</button>
+        <button className={tab === 'changes' ? 'primary' : ''} onClick={() => setTab('changes')}>
+          Changes{changelog && changelog.total_changes > 0 ? ` (${changelog.total_changes})` : ''}
+        </button>
         <button className={tab === 'timeline' ? 'primary' : ''} onClick={() => setTab('timeline')}>Timeline</button>
         <button className={tab === 'map' ? 'primary' : ''} onClick={() => setTab('map')}>Map</button>
         <button className={tab === 'behavior' ? 'primary' : ''} onClick={() => setTab('behavior')}>Behavior</button>
@@ -396,6 +403,68 @@ export default function EntityDetailPage() {
                 ))}
               </tbody>
             </table>
+          )}
+        </>
+      )}
+
+      {tab === 'changes' && (
+        <>
+          {!changelog ? (
+            <div className="empty-state">Loading…</div>
+          ) : (
+            <>
+              <div className="flex-between mb-2">
+                <div className="text-sm text-muted">
+                  Since {changelog.since ? changelog.since.slice(0, 10) : '—'} · {changelog.total_changes} changes
+                </div>
+                <button onClick={async () => { if (id) { await api.markReviewed(id); loadChangelog() } }}>Mark reviewed</button>
+              </div>
+              {changelog.total_changes === 0 ? (
+                <div className="empty-state">Nothing new since your last visit 👍</div>
+              ) : (
+                <>
+                  {changelog.deletions.length > 0 && (
+                    <div className="card" style={{ marginBottom: '0.75rem', borderColor: 'var(--color-red)' }}>
+                      <div className="text-sm mb-1" style={{ fontWeight: 600, color: 'var(--color-red)' }}>
+                        🗑 Deleted messages ({changelog.deletions.length})
+                      </div>
+                      {changelog.deletions.map((d, i) => (
+                        <div key={i} className="text-sm" style={{ marginBottom: '0.25rem' }}>
+                          <span className="badge badge-gray">{d.platform}</span>{' '}
+                          <span className="text-muted">{d.deleted_at?.slice(0, 10)}</span>{' '}
+                          {d.text ? (d.text.length > 120 ? d.text.slice(0, 120) + '…' : d.text) : <span className="text-muted">(no text / media)</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {changelog.additions.platform_links.length > 0 && (
+                    <div className="card" style={{ marginBottom: '0.75rem' }}>
+                      <div className="text-sm mb-1" style={{ fontWeight: 600 }}>🆕 New accounts linked ({changelog.additions.platform_links.length})</div>
+                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+                        {changelog.additions.platform_links.map((l, i) => (
+                          <span key={i} className={`platform-icon p-${l.source}`}>{l.source}:{l.username}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {changelog.additions.alerts.length > 0 && (
+                    <div className="card" style={{ marginBottom: '0.75rem' }}>
+                      <div className="text-sm mb-1" style={{ fontWeight: 600 }}>⚠ New alerts ({changelog.additions.alerts.length})</div>
+                      {changelog.additions.alerts.map((a, i) => (
+                        <div key={i} className="text-sm" style={{ marginBottom: '0.2rem' }}>
+                          <span className="badge badge-blue">{a.alert_type}</span> {a.title || a.detail}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {changelog.additions.timeline_events > 0 && (
+                    <div className="card">
+                      <div className="text-sm"><b>{changelog.additions.timeline_events.toLocaleString()}</b> <span className="text-muted">new timeline events since last visit</span></div>
+                    </div>
+                  )}
+                </>
+              )}
+            </>
           )}
         </>
       )}

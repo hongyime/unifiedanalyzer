@@ -201,6 +201,23 @@ CREATE INDEX IF NOT EXISTS idx_entity_faces_face   ON entity_faces(face_id);
 -- NO FK to entities (a merge deletes the source entity, but the label must
 -- survive). Pair is stored normalized (entity_a < entity_b) so each pair has a
 -- single latest decision (upsert on PK).
+-- Per-entity "last reviewed" marker for the what-changed-since-last-viewed feed.
+CREATE TABLE IF NOT EXISTS entity_views (
+    entity_id      UUID PRIMARY KEY,
+    last_viewed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Geocode cache: Instagram only stores location_name (no lat/lng), so we geocode
+-- place names (trickled via Nominatim, cached here) to put IG pins on the map.
+CREATE TABLE IF NOT EXISTS geocode_cache (
+    place_name  TEXT PRIMARY KEY,
+    lat         DOUBLE PRECISION,
+    lng         DOUBLE PRECISION,
+    status      VARCHAR(20) DEFAULT 'pending',   -- pending | ok | notfound
+    geocoded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_geocode_pending ON geocode_cache(status) WHERE status = 'pending';
+
 -- Saved investigations ("cases"): a pinboard of entities/media/notes/links.
 CREATE TABLE IF NOT EXISTS cases (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

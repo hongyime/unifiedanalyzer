@@ -24,6 +24,7 @@ from src.api.routes.metrics import router as metrics_router
 from src.api.routes.media import router as media_router
 from src.api.routes.triage import router as triage_router
 from src.api.routes.cases import router as cases_router
+from src.api.routes.changelog import router as changelog_router
 from src.api.websocket import router as websocket_router
 
 logging.basicConfig(
@@ -62,6 +63,7 @@ app.include_router(metrics_router, prefix="/api")
 app.include_router(media_router, prefix="/api")
 app.include_router(triage_router, prefix="/api")
 app.include_router(cases_router, prefix="/api")
+app.include_router(changelog_router, prefix="/api")
 # Websocket router mounted at root so the path is exactly /ws/health.
 app.include_router(websocket_router)
 
