@@ -2,8 +2,9 @@
 
 > A runthrough of how the analyzer works, written for a technical reader (or a
 > second-opinion LLM) to critique and suggest improvements. Reflects the state
-> of the codebase + live DB as of 2026-06-25. Numbers in the "Live state"
-> section are real row counts from the running system.
+> of the codebase + live DB as of 2026-07-03. Numbers in the "Live state"
+> section are real row counts from the running system. Recent operational
+> hardening + fixes are in §11.
 
 ---
 
@@ -119,11 +120,16 @@ signals/results:
 - Loads collector image/profile media, runs **InsightFace** (ONNX) →
   embeddings → `facetracker.images` / `facetracker.faces` (512-d pgvector).
 - Bridges a detected face to an entity via the media item's owner →
-  `public.entity_faces` (media_attribution).
+  `public.entity_faces` (media_attribution). Two feeds populate the bridge:
+  (a) `face_clustering.py` propagates attribution across single-dominant-entity
+  clusters; (b) `face_worker.relink_entity_faces()` retroactively links
+  already-indexed faces whose media item has *since* resolved to an entity —
+  it runs every ~30min (`FACE_WORKER_RELINK_INTERVAL`) so the bridge stays
+  current as `entity_platform_links` grows, plus a `relink` CLI for backfill.
 - FAISS outbox/reaper pattern for an ANN index alongside the pgvector column.
-- **This is the least-developed link:** faces are detected in volume but very
-  few are bridged to entities (see Live state). Face → identity clustering is
-  the biggest open opportunity.
+- Bridge fullness is capped by `entity_platform_links` coverage: only person
+  media (telegram/whatsapp/lemon8/instagram/github) can attribute; search/website/
+  beeper media have query-hash/domain/group-JID "owners" that correctly never link.
 
 ## 6. The identity model (how it all converges)
 
@@ -162,24 +168,27 @@ top-down walk of the multi-TB network drives over Tailscale is slow; a
 resumable cursor is a TODO. These drive faces are currently detected but not
 yet clustered to entities — see Improvement ideas.
 
-## 8. Live state (real counts, 2026-06-25)
+## 8. Live state (real counts, 2026-07-03)
 
 | Table | Rows | Read |
 |---|---|---|
-| `timeline_events` | 2,669,227 | unified cross-platform timeline — very healthy |
-| `media_analysis` | 178,122 | per-media analysis (exif/ocr/phash/faces/pdf) — healthy |
-| `alerts` | 986 | SILENCE_GAP 924, COORDINATED_POSTING 59, NEW_ACTIVITY 3 |
-| `entity_platform_links` | 842 | accounts mapped to entities |
-| `entities` | 658 | resolved people |
-| `behavioral_profiles` | 570 | active-hours/timezone profiles |
-| `entity_relationships` | 368 | association graph edges |
-| `identity_signals` | 242 | real_name_fuzzy 166, temporal_copost 34, group_cooccurrence 20, username_exact 12, cross_platform_link 3, content_similarity 3, shared_website 2, commit_email 1, whatsapp_phone 1 |
-| `facetracker.faces` | ~2,266 | detected faces (collector + new drive faces) |
-| `entity_faces` | 13 | **faces bridged to entities — very sparse (key gap)** |
-| `entity_merge_log` | 0 | no merges executed yet |
+| `timeline_events` | 6,027,862 | unified cross-platform timeline — very healthy (2.7M→6.0M as collection caught up) |
+| `media_analysis` | 350,054 | per-media analysis (exif/ocr/phash/faces/pdf) — healthy |
+| `alerts` | 1,899 | SILENCE_GAP 1766, COORDINATED_POSTING 127, NEW_ACTIVITY 6 |
+| `entity_platform_links` | 1,393 | accounts mapped to entities |
+| `entities` | 1,047 | resolved people |
+| `behavioral_profiles` | 957 | active-hours/timezone profiles |
+| `entity_relationships` | 19,156 | association graph edges (jumped as `social_graph_overlap` matured) |
+| `identity_signals` | 530 | real_name_fuzzy 313, group_cooccurrence 135, content_similarity 47, username_exact 17, whatsapp_phone 5, temporal_copost 5, cross_platform_link 3, commit_email 2, shared_website 2, phone_match 1 |
+| `facetracker.faces` | 10,124 | detected faces (collector + drive faces) |
+| `facetracker.face_clusters` | 6,515 | ArcFace clusters (face_clustering.py) |
+| `entity_faces` | 574 | faces bridged to entities — recovered from a 0 regression (see §11) and now self-growing |
+| `entity_merge_log` | 0 | no merges executed yet (human-in-the-loop) |
 
 `analysis_runs`: incremental every ~2h + full_resolution ~daily, completing
-cleanly (one running now). **The pipeline is live and healthy.**
+cleanly. **The pipeline is live and healthy.** Note `media_face_match` is still 0
+— the corpus is distinct people; the signal only fires on a genuine
+same-person-across-two-entities face collision.
 
 ## 9. Known gaps / data-gated signals (candid)
 
@@ -251,6 +260,62 @@ run (not fossilized); `media_perceptual_match`/`media_gps_colocation` already ex
 6. **Auto-merge above a confidence threshold** with `entity_merge_log` audit +
    undo, instead of leaving everything manual.
 
+## 11. Operational hardening + fixes (2026-07-02/03)
+
+A run of reliability/performance work after the Z: reformat + Docker migration:
+
+- **Scheduler split into its own process.** The pipeline's blocking cv2/ffmpeg/
+  pdf/ONNX work used to run inside the API's uvicorn loop and froze the dashboard
+  for the whole run (~1.5h during backfill). Now `analyzer` (API only,
+  `RUN_SCHEDULER=0`), `scheduler`, and `face_worker` are three independent
+  processes — API stays ~220ms mid-run.
+- **entity_faces relink fix (R7).** The bridge had regressed to **0** despite
+  ~10k faces: faces were linked to entities ONLY at index time, but
+  `entity_platform_links` keeps growing, so faces indexed before their owner's
+  link existed were never bridged. Added `relink_entity_faces()` (retroactive,
+  idempotent, wired into the loop) → bridge recovered 0→**574** and self-grows.
+- **Phase-6 media stack fixed in-container.** Added `ffmpeg` (6H video frames) +
+  `tesseract` (6D OCR) to the image; restored the YuNet/SFace ONNX models to Z:;
+  decoupled the InsightFace `media_face_match` rebuild from the SFace models.
+- **PDF-image extraction perf.** `extract_pdf_images` writes to the Docker→Windows
+  `Z:` bind-mount (~200ms+/file). Parallelized the independent writes over a
+  thread pool: **~2700ms → 103ms per image** in-container (writes stay on Z:, so
+  the vhdx doesn't grow).
+- **Feature B — "what changed since last viewed"** (`api/routes/changelog.py`):
+  per-entity feed of additions (new links/events/alerts by `created_at > last
+  viewed`) UNION deletions from the collector's deletion tracking on the 3
+  messaging platforms (telegram `metadata->>'deleted'`, beeper/whatsapp
+  `is_deleted`+`deleted_at`). Fixed a 12s telegram seq-scan with a partial index
+  (`idx_tg_messages_deleted_sender`) → 4.5ms; endpoint returns in ~2.7s.
+  `entity_views.last_viewed_at` + `mark-reviewed` clear the feed.
+- **C:/Docker disk safety** (C: is space-capped; the WSL2 vhdx lives on C:):
+  container log caps (3×10MB/service), a safe weekly auto-prune
+  (`docker/prune-safe.ps1`, dangling images + build cache only — never
+  `--volumes`/`-a`), and analyzer `cpu_shares:512` so it can't starve host
+  neighbours. See memory `docker-windows-bindmount-slow` for the storage model.
+
+## 12. Improvement ideas (remaining — for review)
+
+Superset of §10; the face→identity loop and calibration are the highest-leverage:
+
+1. **`media_face_match` still emits 0.** entity_faces is populated (574) but no
+   cross-entity face collision exists yet in this corpus. Widen bridge coverage
+   (more `entity_platform_links`) and/or emit signals from **shared face
+   clusters** (two entities whose faces land in the same cluster) rather than
+   only same-media attribution.
+2. **Drive-face → entity attribution.** 3.7k drive faces (W/X/Y/Z) are indexed
+   but have no platform owner; cross-reference them against the collector face
+   clusters to attribute + emit signals.
+3. **Resumable drive scan** (mtime/dir cursor) so multi-TB SMB drives index
+   incrementally instead of re-walking.
+4. **Train the calibrated scorer** (`identity_calibration.py`) on a labeled pair
+   set — currently noisy-OR fallback with hand-set weights.
+5. **Auto-merge above a confidence threshold** with `entity_merge_log` audit +
+   undo (currently human-in-the-loop; `entity_merge_log`=0).
+6. **Cross-source pHash media dedup** to link the same image across platforms/disk.
+7. **Deletion tracking beyond messaging** — social posts don't emit deletion
+   events; a "post stopped appearing" heuristic could flag likely removals.
+
 ---
 
 ### Key files
@@ -259,5 +324,8 @@ run (not fossilized); `media_perceptual_match`/`media_gps_colocation` already ex
   `content_fingerprint.py`, `bio_nlp.py`, `bio_mention.py`
 - Signals: `location_inference.py`, `route_similarity.py`, `strava_patterns.py`,
   `group_graph.py`, `behavioral_profiler.py`, `timeline_builder.py`, `alert_engine.py`
-- Face engine: `src/face_worker.py`, `src/face/` (engine/detector, storage, discovery/scanner)
-- API/dashboard: `src/api/routes/{intelligence,timeline,metrics,media}.py`
+- Face engine: `src/face_worker.py` (ingest + `relink_entity_faces`), `src/face/`
+  (engine/detector, storage, discovery/scanner), `src/pipeline/face_clustering.py`
+- API/dashboard: `src/api/routes/{intelligence,timeline,metrics,media,changelog}.py`
+- Ops/deploy: `docker/docker-compose.yml` (3 processes, log caps, cpu_shares),
+  `docker/Dockerfile.dashboard`, `docker/prune-safe.ps1` (safe weekly auto-prune)
