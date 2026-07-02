@@ -412,6 +412,86 @@ def ingest_drive_media(limit: int = 200) -> dict:
     return stats
 
 
+def relink_entity_faces(limit: int | None = None) -> dict:
+    """Backfill public.entity_faces for already-indexed collector faces whose
+    media_item NOW resolves to an analyzer entity.
+
+    Faces are bridged at INDEX time by ingest_collector_media, but
+    entity_platform_links keeps growing as the analyzer's entity resolution runs
+    — so a face indexed BEFORE its owner's platform link existed was never
+    linked, and (being already indexed) is never revisited by the ingest dedup.
+    That left public.entity_faces empty even though ~950+ indexed media items
+    were resolvable. This re-resolves indexed-but-unlinked collector faces and
+    inserts the missing rows. Idempotent (ON CONFLICT DO NOTHING); bounded by
+    `limit` (None = all). Drive-scanned faces (40-char sha1 file_hash, no
+    platform owner) are excluded — only collector faces (UUID file_hash =
+    media_item id) can attribute.
+    """
+    from sqlalchemy import create_engine, text
+
+    stats = {"faces_checked": 0, "linked": 0}
+    analyzer_engine = create_engine(
+        analyzer_sqlalchemy_url(),
+        connect_args={"options": f"-csearch_path={FACE_DB_SCHEMA},public"},
+        pool_pre_ping=True,
+    )
+    collector_engine = create_engine(_collector_sqlalchemy_url(), pool_pre_ping=True)
+    _wait_for_db(analyzer_engine)
+    _wait_for_db(collector_engine)
+    try:
+        with analyzer_engine.connect() as aconn:
+            lookup = _build_entity_lookup(aconn)
+            q = (
+                "SELECT f.id AS face_id, i.file_hash AS mid, f.quality_score AS q "
+                "FROM faces f JOIN images i ON i.id = f.image_id "
+                "WHERE i.file_hash ~* '^[0-9a-f-]{36}$' "
+                "AND NOT EXISTS (SELECT 1 FROM public.entity_faces ef WHERE ef.face_id = f.id)"
+            )
+            if limit:
+                q += f" LIMIT {int(limit)}"
+            faces = aconn.execute(text(q)).fetchall()
+        stats["faces_checked"] = len(faces)
+        if not faces:
+            return stats
+
+        # Resolve each distinct media_item -> (source, entity_id) from collector.
+        mids = list({f.mid for f in faces})
+        attr: dict[str, tuple] = {}
+        with collector_engine.connect() as cconn:
+            CH = 5000
+            for i in range(0, len(mids), CH):
+                for _id, src, eid in cconn.execute(
+                    text("SELECT id::text, source, entity_id FROM media_items "
+                         "WHERE id = ANY(CAST(:ids AS uuid[]))"),
+                    {"ids": mids[i:i + CH]},
+                ).fetchall():
+                    attr[_id] = (src, eid)
+
+        with analyzer_engine.begin() as aconn:
+            for f in faces:
+                a = attr.get(f.mid)
+                if not a:
+                    continue
+                src, eid_raw = a
+                eid = lookup.get((src, eid_raw)) or (
+                    lookup.get((src, eid_raw.lower())) if eid_raw else None
+                )
+                if not eid:
+                    continue
+                aconn.execute(
+                    text("INSERT INTO public.entity_faces "
+                         "(entity_id, face_id, media_item_id, confidence, method) "
+                         "VALUES (:e, :f, :m, :c, 'media_attribution_relink') "
+                         "ON CONFLICT (entity_id, face_id) DO NOTHING"),
+                    {"e": eid, "f": f.face_id, "m": f.mid, "c": float(f.q or 0.0)},
+                )
+                stats["linked"] += 1
+    finally:
+        analyzer_engine.dispose()
+        collector_engine.dispose()
+    return stats
+
+
 def loop(batch: int, interval: int) -> None:
     """Run ingest_collector_media in a continuous loop (the intended end-state:
     a separate long-running worker process, see docs/facetracker_merge_plan.md §6).
@@ -433,9 +513,14 @@ def loop(batch: int, interval: int) -> None:
     drive_limit = int(os.getenv("FACE_WORKER_DRIVE_BATCH", "200"))
     drive_interval = int(os.getenv("FACE_WORKER_DRIVE_INTERVAL", "3600"))
     drive_every = max(1, drive_interval // max(1, interval))
+    # Re-attribution cadence: faces are bridged at index time, but entity links
+    # keep growing, so periodically re-link already-indexed faces that have since
+    # become resolvable. Cheaper than the drive walk; every ~30min by default.
+    relink_interval = int(os.getenv("FACE_WORKER_RELINK_INTERVAL", "1800"))
+    relink_every = max(1, relink_interval // max(1, interval))
     logger.info(
-        "Face worker loop: batch=%d interval=%ds | drive_batch=%d drive_every=%d ticks",
-        batch, interval, drive_limit, drive_every,
+        "Face worker loop: batch=%d interval=%ds | drive_batch=%d drive_every=%d | relink_every=%d ticks",
+        batch, interval, drive_limit, drive_every, relink_every,
     )
     tick = 0
     while True:
@@ -445,6 +530,14 @@ def loop(batch: int, interval: int) -> None:
                 logger.info("collector ingest tick: %s", stats)
         except Exception:
             logger.exception("collector ingest tick failed (will retry next interval)")
+
+        if tick % relink_every == 0:
+            try:
+                rstats = relink_entity_faces()
+                if rstats.get("linked"):
+                    logger.info("entity_faces relink tick: %s", rstats)
+            except Exception:
+                logger.exception("entity_faces relink tick failed (will retry next cycle)")
 
         if tick % drive_every == 0:
             try:
@@ -475,6 +568,12 @@ def main() -> None:
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else 200
         logger.info("Drive scan (limit=%d)…", limit)
         logger.info("drive scan stats: %s", ingest_drive_media(limit))
+    elif cmd == "relink":
+        # One-shot backfill of public.entity_faces for already-indexed faces whose
+        # media_item now resolves to an entity (limit optional; default all).
+        limit = int(sys.argv[2]) if len(sys.argv) > 2 else None
+        logger.info("entity_faces relink (limit=%s)…", limit)
+        logger.info("relink stats: %s", relink_entity_faces(limit))
     elif cmd == "loop":
         batch = int(os.getenv("FACE_WORKER_BATCH", "50"))
         interval = int(os.getenv("FACE_WORKER_INTERVAL", "300"))
