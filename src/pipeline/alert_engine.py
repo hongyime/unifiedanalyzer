@@ -77,6 +77,15 @@ async def _detect_silence_gaps() -> int:
     min_days = _env_int("SILENCE_GAP_MIN_DAYS", 3)
     max_days = _env_int("SILENCE_GAP_MAX_DAYS", 30)
 
+    # P1-3 (identity_system_review_plan.md): SILENCE_GAP must not fire when the
+    # silence is explained by a COLLECTION gap rather than the subject going quiet.
+    # On a scraper, if a source stalls, every entity on it appears to go silent at
+    # once (this is why SILENCE_GAP was ~93% of all alerts). Suppress the alert for
+    # an entity whose most-recent-event source has itself produced no events for
+    # ANYONE within source_stale_days — i.e. the source (not the person) stopped.
+    suppress_on_source_stall = _env_bool("SILENCE_GAP_SUPPRESS_ON_SOURCE_STALL", True)
+    source_stale_days = _env_int("SILENCE_GAP_SOURCE_STALE_DAYS", 2)
+
     now = datetime.now(timezone.utc)
     count = 0
 
@@ -86,6 +95,23 @@ async def _detect_silence_gaps() -> int:
             FROM entities e
             WHERE e.tier = 'primary'
         """)
+
+        # Per-source global last event: is the SOURCE still collecting at all?
+        source_health_rows = await conn.fetch("""
+            SELECT source, MAX(occurred_at) AS last_event
+            FROM timeline_events
+            GROUP BY source
+        """)
+        source_last_event = {r["source"]: r["last_event"] for r in source_health_rows}
+
+        # Each entity's most-recent event and the source it came from, in one scan.
+        entity_last_source_rows = await conn.fetch("""
+            SELECT DISTINCT ON (entity_id) entity_id, source
+            FROM timeline_events
+            WHERE entity_id IS NOT NULL
+            ORDER BY entity_id, occurred_at DESC
+        """)
+        entity_last_source = {r["entity_id"]: r["source"] for r in entity_last_source_rows}
 
         for entity in entities:
             eid = entity["id"]
@@ -120,6 +146,15 @@ async def _detect_silence_gaps() -> int:
 
             gap_days = (now - last_event).total_seconds() / 86400.0
             if gap_days >= threshold_days:
+                # P1-3: is this entity's silence just a stalled source? If the
+                # source of its latest event has produced nothing for anyone in
+                # source_stale_days, the gap is a collection outage — skip.
+                if suppress_on_source_stall:
+                    last_src = entity_last_source.get(eid)
+                    src_last = source_last_event.get(last_src)
+                    if src_last is not None and (now - src_last).days >= source_stale_days:
+                        continue
+
                 existing = await conn.fetchval("""
                     SELECT id FROM alerts
                     WHERE entity_id = $1
