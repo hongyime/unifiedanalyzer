@@ -228,6 +228,11 @@ async def _insert_batch(pool, batch: list[tuple]) -> None:
             INSERT INTO timeline_events
                 (entity_id, source, event_type, source_record_id, occurred_at, title)
             VALUES ($1::uuid, $2, $3, $4, $5, $6)
-            ON CONFLICT (source, event_type, source_record_id)
+            -- P2-5: 4-col conflict target (includes occurred_at) so the upsert
+            -- works on the month-partitioned table, where every unique key must
+            -- include the partition column. occurred_at is deterministic per
+            -- (source,event_type,source_record_id), so this preserves the old
+            -- 3-col semantics. Backed by idx_timeline_uniq4.
+            ON CONFLICT (source, event_type, source_record_id, occurred_at)
             DO UPDATE SET entity_id = EXCLUDED.entity_id
         """, batch)

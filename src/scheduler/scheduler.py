@@ -83,6 +83,21 @@ async def _build_daily_digest() -> dict:
             GROUP BY e.canonical_name
             ORDER BY cnt DESC LIMIT 1
         """)
+        try:
+            faces_linked = await conn.fetchval("SELECT COUNT(*) FROM entity_faces")
+        except Exception:
+            faces_linked = 0
+        try:
+            failing_rows = await conn.fetch("""
+                WITH latest AS (
+                    SELECT DISTINCT ON (phase) phase, status
+                    FROM run_phase_status ORDER BY phase, created_at DESC
+                )
+                SELECT phase FROM latest WHERE status = 'failed'
+            """)
+            failing_phases = [r["phase"] for r in failing_rows]
+        except Exception:
+            failing_phases = []
 
     collector_issues = await _check_collector_health()
 
@@ -90,11 +105,13 @@ async def _build_daily_digest() -> dict:
         "entity_count": entity_count,
         "primary": primary,
         "secondary": secondary,
+        "faces_linked": faces_linked or 0,
         "alerts_24h": alerts_24h,
         "unread": unread,
         "events_24h": events_24h,
         "runs_24h": runs_24h,
         "failed_runs": failed_runs,
+        "failing_phases": failing_phases,
         "most_active": f"{most_active['canonical_name']} ({most_active['cnt']} events)"
             if most_active else None,
         "collectors_down": [i["source"] for i in collector_issues],
@@ -104,39 +121,85 @@ async def _build_daily_digest() -> dict:
 async def _build_status() -> dict:
     """Compact current-state snapshot for the periodic status heartbeat.
 
-    Lighter than _build_daily_digest: just the numbers the group wants at a
-    glance, plus the facetracker face count (merge) and the last completed run.
+    Reports ACCURATE live state: entity tier breakdown, faces DETECTED vs
+    actually LINKED to entities (these differ by orders of magnitude — most
+    detected faces are untracked web/search media), whether a run is in progress
+    (with heartbeat freshness) vs the last completed run, any pipeline phases
+    currently failing (run_phase_status), and quiet collector sources.
     """
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         entity_count = await conn.fetchval("SELECT COUNT(*) FROM entities")
+        primary = await conn.fetchval("SELECT COUNT(*) FROM entities WHERE tier = 'primary'")
+        secondary = await conn.fetchval("SELECT COUNT(*) FROM entities WHERE tier = 'secondary'")
         alerts_24h = await conn.fetchval(
             "SELECT COUNT(*) FROM alerts WHERE detected_at > NOW() - INTERVAL '24 hours'"
         )
         unread = await conn.fetchval("SELECT COUNT(*) FROM alerts WHERE is_read = false")
         # Faces live in the facetracker schema (merge); tolerate it being absent.
+        # DETECTED = all faces in the corpus; LINKED = faces actually bridged to a
+        # tracked entity (public.entity_faces). Reporting only the former is
+        # misleading (it's dominated by untracked search/website media).
         try:
-            face_count = await conn.fetchval("SELECT COUNT(*) FROM facetracker.faces")
+            faces_detected = await conn.fetchval("SELECT COUNT(*) FROM facetracker.faces")
         except Exception:
-            face_count = 0
+            faces_detected = 0
+        try:
+            faces_linked = await conn.fetchval("SELECT COUNT(*) FROM entity_faces")
+        except Exception:
+            faces_linked = 0
+
+        # Current in-progress run (if any) + its heartbeat freshness.
+        running = await conn.fetchrow(
+            "SELECT run_type, started_at, heartbeat_at FROM analysis_runs "
+            "WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+        )
         last = await conn.fetchrow(
             "SELECT run_type, finished_at FROM analysis_runs "
             "WHERE status = 'completed' AND finished_at IS NOT NULL "
             "ORDER BY finished_at DESC LIMIT 1"
         )
+        failed_24h = await conn.fetchval(
+            "SELECT COUNT(*) FROM analysis_runs "
+            "WHERE status = 'failed' AND finished_at > NOW() - INTERVAL '24 hours'"
+        )
+        # Pipeline phases whose most-recent run failed (P2-3 run_phase_status).
+        try:
+            failing_rows = await conn.fetch("""
+                WITH latest AS (
+                    SELECT DISTINCT ON (phase) phase, status
+                    FROM run_phase_status ORDER BY phase, created_at DESC
+                )
+                SELECT phase FROM latest WHERE status = 'failed'
+            """)
+            failing_phases = [r["phase"] for r in failing_rows]
+        except Exception:
+            failing_phases = []
 
-    last_run = None
-    if last and last["finished_at"]:
-        last_run = f"{last['run_type']} @ {last['finished_at'].strftime('%Y-%m-%d %H:%M UTC')}"
+    now = datetime.now(timezone.utc)
+    run_state = None
+    if running:
+        mins = int((now - running["started_at"]).total_seconds() // 60)
+        hb = running["heartbeat_at"]
+        hb_age = int((now - hb).total_seconds()) if hb else None
+        hb_str = f", heartbeat {hb_age}s ago" if hb_age is not None else ""
+        run_state = f"running {running['run_type']} ({mins}m{hb_str})"
+    elif last and last["finished_at"]:
+        run_state = f"idle · last {last['run_type']} @ {last['finished_at'].strftime('%Y-%m-%d %H:%M UTC')}"
 
     issues = await _check_collector_health()
     return {
         "db_ok": True,
         "entity_count": entity_count or 0,
-        "face_count": face_count or 0,
+        "primary": primary or 0,
+        "secondary": secondary or 0,
+        "faces_detected": faces_detected or 0,
+        "faces_linked": faces_linked or 0,
         "alerts_24h": alerts_24h or 0,
         "unread": unread or 0,
-        "last_run": last_run,
+        "run_state": run_state,
+        "failed_runs_24h": failed_24h or 0,
+        "failing_phases": failing_phases,
         "collectors_down": [i["source"] for i in issues],
     }
 

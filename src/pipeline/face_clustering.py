@@ -44,9 +44,17 @@ logger = logging.getLogger(__name__)
 # existing media_face_match builder uses 0.40. We cluster a touch stricter
 # (precision-first — over-splitting is safer than merging two people).
 _CLUSTER_THRESHOLD = float(os.getenv("FACE_CLUSTER_THRESHOLD", "0.50"))
-# Max faces to cluster per pass (top-N by quality). Keeps the O(n^2) distance
-# matrix bounded; raise once a kNN-graph backend replaces agglomerative.
+# Max faces to cluster per pass (top-N by quality). With the FAISS-kNN backend
+# (P2-6) the memory cost is O(n*k) not O(n^2), so this can be raised well past
+# the old agglomerative ceiling.
 _FACE_CLUSTER_MAX = int(os.getenv("FACE_CLUSTER_MAX", "20000"))
+# P2-6: neighbours per face in the kNN graph. Cluster = connected component over
+# MUTUAL kNN edges at/above _CLUSTER_THRESHOLD. Mutual-kNN (both faces list each
+# other) resists the single-linkage chaining that a plain threshold graph — or
+# single-linkage agglomerative — suffers, which is why the old code used
+# average-linkage. Combined with the P1-2 propagation purity gate, two distinct
+# people are far less likely to merge through one borderline bridge face.
+_FACE_KNN = int(os.getenv("FACE_CLUSTER_KNN", "20"))
 # Group-photo guard: only propagate attribution to sibling faces from images
 # with at most this many detected faces (selfies/portraits, not crowds).
 _MAX_PROPAGATE_FACE_COUNT = int(os.getenv("FACE_CLUSTER_MAX_GROUP_FACES", "3"))
@@ -83,13 +91,74 @@ async def _ensure_schema(conn) -> None:
     """)
 
 
+def _knn_connected_components(M: "np.ndarray", threshold: float, k: int) -> "np.ndarray":
+    """P2-6: cluster normalized embeddings via a FAISS mutual-kNN graph +
+    connected components. O(n*k) memory instead of the agglomerative O(n^2)
+    distance matrix, so it scales to 100k+ faces. Returns an int label per row.
+
+    Edges are MUTUAL (i in j's top-k AND j in i's top-k) and >= threshold cosine —
+    mutual-kNN resists single-linkage chaining. Falls back to sklearn if faiss is
+    unavailable so clustering never hard-fails on a missing optional dep."""
+    n = len(M)
+    k = min(k + 1, n)  # +1 because the first neighbour is the face itself
+    try:
+        import faiss
+        index = faiss.IndexFlatIP(M.shape[1])  # inner product on normalized = cosine
+        index.add(M)
+        sims, idxs = index.search(M, k)
+    except Exception:
+        logger.warning("faiss unavailable; falling back to agglomerative clustering", exc_info=True)
+        from sklearn.cluster import AgglomerativeClustering
+        return AgglomerativeClustering(
+            n_clusters=None, metric="cosine", linkage="average",
+            distance_threshold=1.0 - threshold,
+        ).fit_predict(M)
+
+    # Directed neighbour sets at/above threshold (excluding self), then keep only
+    # mutual edges.
+    neighbours: list[set[int]] = [set() for _ in range(n)]
+    for i in range(n):
+        for sim, j in zip(sims[i], idxs[i]):
+            if j != i and j >= 0 and sim >= threshold:
+                neighbours[i].add(int(j))
+
+    # Union-find over mutual edges.
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in neighbours[i]:
+            if i in neighbours[j]:  # mutual
+                union(i, j)
+
+    # Compact roots into contiguous label ids.
+    labels = np.empty(n, dtype=np.int64)
+    root_to_label: dict[int, int] = {}
+    for i in range(n):
+        r = find(i)
+        lbl = root_to_label.get(r)
+        if lbl is None:
+            lbl = len(root_to_label)
+            root_to_label[r] = lbl
+        labels[i] = lbl
+    return labels
+
+
 async def cluster_faces() -> dict:
     """Cluster facetracker.faces by embedding; write cluster_id back. Returns
-    stats. Uses average-linkage agglomerative clustering on cosine distance
-    (average linkage avoids the single-linkage chaining that merges distinct
-    people through a borderline bridge face)."""
-    from sklearn.cluster import AgglomerativeClustering
-
+    stats. P2-6: uses a FAISS mutual-kNN graph + connected components (O(n*k)
+    memory), replacing the old average-linkage agglomerative O(n^2) matrix so it
+    scales past ~30-50k faces."""
     analyzer = get_analyzer_pool()
     async with analyzer.acquire() as conn:
         await _ensure_schema(conn)
@@ -106,17 +175,12 @@ async def cluster_faces() -> dict:
 
     face_ids = [r["id"] for r in rows]
     M = np.asarray([json.loads(r["emb"]) for r in rows], dtype=np.float32)
-    # Normalize so cosine distance = 1 - dot.
+    # Normalize so inner product = cosine similarity.
     norms = np.linalg.norm(M, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     M /= norms
 
-    labels = AgglomerativeClustering(
-        n_clusters=None,
-        metric="cosine",
-        linkage="average",
-        distance_threshold=1.0 - _CLUSTER_THRESHOLD,
-    ).fit_predict(M)
+    labels = _knn_connected_components(M, _CLUSTER_THRESHOLD, _FACE_KNN)
 
     # Persist assignments + cluster sizes.
     sizes: dict[int, int] = {}

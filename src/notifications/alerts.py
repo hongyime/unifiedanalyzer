@@ -85,12 +85,15 @@ async def notify_daily_digest(digest: dict):
     url = telegram.get_dashboard_url()
     lines = ["\U0001f4ca <b>Daily Digest</b>\n"]
     lines.append(f"Entities: {digest['entity_count']} ({digest['primary']} primary, {digest['secondary']} secondary)")
+    lines.append(f"Faces linked to entities: {digest.get('faces_linked', 0)}")
     lines.append(f"Alerts (24h): {digest['alerts_24h']} ({digest['unread']} unread)")
     lines.append(f"Events (24h): {digest['events_24h']}")
     lines.append(f"Runs (24h): {digest['runs_24h']} ({digest['failed_runs']} failed)")
 
     if digest.get("most_active"):
         lines.append(f"Most active: {digest['most_active']}")
+    if digest.get("failing_phases"):
+        lines.append(f"⚠️ Failing phases: {', '.join(digest['failing_phases'])}")
     if digest.get("collectors_down"):
         lines.append(f"⚠️ Collectors down: {', '.join(digest['collectors_down'])}")
 
@@ -125,12 +128,31 @@ async def notify_status(s: dict):
     when nothing eventful happened. Built by scheduler._build_status.
     """
     url = telegram.get_dashboard_url()
-    icon = "✅" if s.get("db_ok") else "⚠️"
+    # Warn-icon the header if anything is actually wrong (DB down, a run failed in
+    # the last 24h, or a pipeline phase is failing) — not just a fixed ✅.
+    healthy = (
+        s.get("db_ok")
+        and not s.get("failed_runs_24h")
+        and not s.get("failing_phases")
+    )
+    icon = "✅" if healthy else "⚠️"
     lines = [f"{icon} <b>UnifiedAnalyzer status</b>"]
-    lines.append(f"Entities: {s.get('entity_count', 0)} · Faces: {s.get('face_count', 0)}")
+    lines.append(
+        f"Entities: {s.get('entity_count', 0)} "
+        f"({s.get('primary', 0)} primary, {s.get('secondary', 0)} secondary)"
+    )
+    # Faces: detected corpus vs actually linked to a tracked entity.
+    lines.append(
+        f"Faces: {s.get('faces_detected', 0)} detected, "
+        f"{s.get('faces_linked', 0)} linked to entities"
+    )
     lines.append(f"Alerts: {s.get('alerts_24h', 0)} (24h), {s.get('unread', 0)} unread")
-    if s.get("last_run"):
-        lines.append(f"Last run: {s['last_run']}")
+    if s.get("run_state"):
+        lines.append(f"Pipeline: {s['run_state']}")
+    if s.get("failed_runs_24h"):
+        lines.append(f"⚠️ Failed runs (24h): {s['failed_runs_24h']}")
+    if s.get("failing_phases"):
+        lines.append(f"⚠️ Failing phases: {', '.join(s['failing_phases'])}")
     if s.get("collectors_down"):
         lines.append(f"⚠️ Collectors quiet: {', '.join(s['collectors_down'])}")
     lines.append(f"\n{url}")

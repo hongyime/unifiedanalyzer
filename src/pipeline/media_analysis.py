@@ -11,6 +11,7 @@ backfill the entire 120k-item backlog in one sitting.
 See docs/media_analysis_plan.md for the full spec. Tier 1 (6D/6F/6H) lives in
 src/pipeline/media_analysis_tier1.py.
 """
+import json
 import logging
 import os
 import concurrent.futures
@@ -70,12 +71,46 @@ def _dms_to_decimal(dms, ref) -> float | None:
     return decimal
 
 
-def _extract_exif_gps(path) -> tuple[float | None, float | None, datetime | None]:
+# P2-7 device fingerprint EXIF tags. A SERIAL number identifies a *physical*
+# camera body/lens — same serial across two accounts' media is strong same-owner
+# evidence. Make+Model alone (e.g. "Apple iPhone 13") is NOT distinctive, so a
+# fingerprint is only emitted when a serial is present.
+_EXIF_MAKE = 271          # 0x010F
+_EXIF_MODEL = 272         # 0x0110
+_EXIF_BODY_SERIAL = 42033  # 0xA431 BodySerialNumber
+_EXIF_LENS_MODEL = 42036   # 0xA434 LensModel
+_EXIF_LENS_SERIAL = 42037  # 0xA435 LensSerialNumber
+
+
+def _extract_exif_device(exif, exif_ifd) -> dict | None:
+    """Build a device fingerprint dict from EXIF, or None if no serial number is
+    present (Make+Model alone is too common to be identity evidence)."""
+    make = exif.get(_EXIF_MAKE)
+    model = exif.get(_EXIF_MODEL)
+    body_serial = exif_ifd.get(_EXIF_BODY_SERIAL)
+    lens_serial = exif_ifd.get(_EXIF_LENS_SERIAL)
+    lens_model = exif_ifd.get(_EXIF_LENS_MODEL)
+
+    def _clean(v):
+        s = str(v).strip() if v is not None else ""
+        return s or None
+
+    body_serial, lens_serial = _clean(body_serial), _clean(lens_serial)
+    if not body_serial and not lens_serial:
+        return None  # no physical-camera identifier -> not distinctive enough
+    return {
+        "make": _clean(make), "model": _clean(model),
+        "lens_model": _clean(lens_model),
+        "body_serial": body_serial, "lens_serial": lens_serial,
+    }
+
+
+def _extract_exif_gps(path) -> tuple[float | None, float | None, datetime | None, dict | None]:
     try:
         with Image.open(path) as img:
             exif = img.getexif()
             if not exif:
-                return None, None, None
+                return None, None, None, None
             lat = lon = None
             gps = exif.get_ifd(ExifTags.IFD.GPSInfo)
             if gps:
@@ -93,10 +128,11 @@ def _extract_exif_gps(path) -> tuple[float | None, float | None, datetime | None
                     taken_at = datetime.strptime(str(dt_str), "%Y:%m:%d %H:%M:%S").replace(tzinfo=timezone.utc)
                 except ValueError:
                     taken_at = None
-            return lat, lon, taken_at
+            device = _extract_exif_device(exif, exif_ifd)
+            return lat, lon, taken_at, device
     except Exception:
         logger.debug("EXIF read failed for %s", path, exc_info=True)
-        return None, None, None
+        return None, None, None, None
 
 
 async def analyze_media_exif(limit: int | None = None) -> dict:
@@ -111,23 +147,97 @@ async def analyze_media_exif(limit: int | None = None) -> dict:
         path = resolve_media_path(item["file_path"])
         if path is None:
             continue  # missing/unreadable — leave unprocessed, retry next run
-        lat, lon, taken_at = _extract_exif_gps(path)
+        lat, lon, taken_at, device = _extract_exif_gps(path)
         if lat is not None and lon is not None:
             stats["with_gps"] += 1
+        if device:
+            stats["with_device"] = stats.get("with_device", 0) + 1
         rows.append({
             "media_item_id": item["id"], "source": item["source"],
             "content_type": item["content_type"], "analysis_type": "exif_gps",
             "gps_lat": lat, "gps_lon": lon, "taken_at": taken_at,
-            "model_version": "pillow-exif-v1",
+            # P2-7: store the device fingerprint alongside GPS in result_json.
+            "result_json": {"device": device} if device else None,
+            "model_version": "pillow-exif-v2",
         })
     await upsert_media_analysis(rows)
     stats["processed"] = len(rows)
 
-    # Idle-cycle skip: no new EXIF rows -> GPS clusters unchanged (CPU saver).
+    # Idle-cycle skip: no new EXIF rows -> clusters unchanged (CPU saver).
     if stats["processed"]:
         stats["media_gps_colocation_signals"] = await _build_gps_colocation_signals()
+        stats["media_device_match_signals"] = await _build_device_match_signals()
     logger.info("6A EXIF GPS: %s", stats)
     return stats
+
+
+async def _build_device_match_signals() -> int:
+    """P2-7: emit `media_device_match` when two DIFFERENT entities have media from
+    the same physical camera (identical body/lens serial). Fan-out filtered
+    (exactly 2 entities) and cross-platform, mirroring the GPS/pHash builders."""
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        dev_rows = await conn.fetch("""
+            SELECT media_item_id, parent_media_item_id, result_json
+            FROM media_analysis
+            WHERE analysis_type = 'exif_gps'
+              AND result_json IS NOT NULL
+              AND result_json -> 'device' IS NOT NULL
+        """)
+
+    new_signals: list[tuple] = []
+    if dev_rows:
+        real_ids = list({r["parent_media_item_id"] or r["media_item_id"] for r in dev_rows})
+        item_entities = await fetch_media_item_entities(real_ids)
+        entity_lookup = await build_entity_lookup()
+
+        # fingerprint -> [(eid, source, media_item_id), ...]
+        buckets: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+        for r in dev_rows:
+            raw = r["result_json"]
+            dev = (raw if isinstance(raw, dict) else json.loads(raw)).get("device") or {}
+            serial = dev.get("body_serial") or dev.get("lens_serial")
+            if not serial:
+                continue
+            # Fingerprint keyed on the physical-camera serial (+ make/model for
+            # readability). Serial alone already identifies the body/lens.
+            fp = "|".join(str(dev.get(k) or "") for k in ("make", "model", "body_serial", "lens_serial"))
+            real_id = r["parent_media_item_id"] or r["media_item_id"]
+            src = item_entities.get(real_id)
+            if not src:
+                continue
+            source, raw_eid = src
+            eid = lookup_entity(entity_lookup, source, raw_eid)
+            if not eid:
+                continue
+            buckets[fp].append((eid, source, r["media_item_id"]))
+
+        for fp, entries in buckets.items():
+            distinct_entities = {eid for eid, _, _ in entries}
+            if len(distinct_entities) != 2:
+                continue  # fan-out filter: a shared serial across >2 = suspect
+            a_eid, b_eid = sorted(distinct_entities)
+            # require the two entities to be on different platforms
+            a_srcs = {src for eid, src, _ in entries if eid == a_eid}
+            b_srcs = {src for eid, src, _ in entries if eid == b_eid}
+            if a_srcs == b_srcs and len(a_srcs) == 1:
+                continue  # same single platform — not cross-identity evidence
+            a_mid = next(m for eid, _, m in entries if eid == a_eid)
+            new_signals.append((
+                a_eid, "media_device_match", "multi", "media_items", "exif_device", a_mid,
+                "multi", b_eid, fp, 0.65,
+            ))
+
+    async with analyzer.acquire() as conn:
+        await conn.execute("DELETE FROM identity_signals WHERE signal_type = 'media_device_match'")
+        if new_signals:
+            await conn.executemany("""
+                INSERT INTO identity_signals
+                    (entity_id, signal_type, source_platform, source_table, source_column,
+                     source_record_id, target_platform, target_record_id, value, confidence)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """, new_signals)
+    return len(new_signals)
 
 
 async def _build_gps_colocation_signals() -> int:

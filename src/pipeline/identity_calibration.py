@@ -33,7 +33,7 @@ FEATURE_ORDER = [
     "email_match", "phone_match", "bio_mention", "cross_platform_link",
     "content_similarity", "temporal_copost", "shared_website",
     "shared_route_origin", "group_cooccurrence", "media_gps_colocation",
-    "media_perceptual_match", "media_face_match",
+    "media_perceptual_match", "media_face_match", "media_device_match",
 ]
 
 _MODEL_PATH = os.getenv(

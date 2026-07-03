@@ -68,6 +68,27 @@ CREATE TABLE IF NOT EXISTS timeline_events (
 CREATE INDEX IF NOT EXISTS idx_timeline_entity_time ON timeline_events(entity_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_timeline_time ON timeline_events(occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_timeline_source ON timeline_events(source);
+-- P2-5 (identity_system_review_plan.md): 4-column unique key including the
+-- partition key occurred_at. A month-partitioned timeline_events (see
+-- src/db/migrations/001_partition_timeline_events.sql) REQUIRES occurred_at in
+-- every unique key, so build_timeline upserts on this 4-col target. On the
+-- NON-partitioned (fresh / pre-migration) table we add it as a plain index so the
+-- upsert works before partitioning; on the partitioned table the migration
+-- supplies the equivalent UNIQUE constraint (timeline_events_uniq4), so we must
+-- NOT try to build idx_timeline_uniq4 there (it would rebuild a duplicate 4-col
+-- index across all partitions on every startup). Hence the guard.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_partitioned_table pt
+        JOIN pg_class c ON c.oid = pt.partrelid WHERE c.relname = 'timeline_events'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM pg_indexes WHERE indexname = 'idx_timeline_uniq4'
+    ) THEN
+        CREATE UNIQUE INDEX idx_timeline_uniq4
+            ON timeline_events(source, event_type, source_record_id, occurred_at);
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS alerts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

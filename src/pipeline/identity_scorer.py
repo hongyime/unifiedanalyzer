@@ -57,6 +57,8 @@ _TYPE_WEIGHT = {
     "media_gps_colocation": 0.40,
     "media_perceptual_match": 0.35,
     "media_face_match": 0.50,
+    # P2-7: same physical camera (EXIF body/lens serial) across two entities.
+    "media_device_match": 0.55,
 }
 
 _MIN_SCORE = 0.10
