@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 
 from src.db.connection import get_analyzer_pool
@@ -42,23 +44,71 @@ from src.notifications.alerts import notify_run_summary, notify_error, notify_ne
 logger = logging.getLogger(__name__)
 
 
+# P0-3 (identity_system_review_plan.md): a legitimate run heartbeats every ~60s
+# while it executes (see _run_with_heartbeat). The stale-lock cleaner reclaims a
+# lock only when the heartbeat (falling back to started_at for pre-heartbeat rows)
+# has been silent longer than this, so a genuinely long run (full-res is routinely
+# 2-5h) is never reclaimed mid-flight, while a crashed run is freed shortly after
+# its heartbeat stops. The old fixed 30-min-since-start timeout reclaimed EVERY
+# real full-res's lock, letting an API-triggered run_incremental start concurrently
+# and double-write.
+#
+# CAVEAT: some resolver/media phases are CPU-bound and synchronous (e.g. Phase 4.5
+# fuzzy-matches tens of thousands of username-less profiles), which blocks the
+# event loop so the heartbeat task cannot fire meanwhile. The threshold must
+# therefore exceed the longest single synchronous phase, not just the heartbeat
+# interval — hence 30 min, comfortably above observed phase blocks yet far below
+# the 2-5h total runtime the old start-based timeout kept tripping on.
+_STALE_HEARTBEAT_MINUTES = int(os.getenv("STALE_RUN_HEARTBEAT_MINUTES", "30"))
+_HEARTBEAT_INTERVAL_SECONDS = 60
+
+
 async def _is_run_locked() -> bool:
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         cleaned = await conn.fetchval("""
             UPDATE analysis_runs
             SET status = 'failed', finished_at = NOW(),
-                error_message = 'Stale lock — cleaned up automatically'
+                error_message = 'Stale lock (heartbeat silent) — cleaned up automatically'
             WHERE status = 'running'
-              AND started_at < NOW() - INTERVAL '30 minutes'
+              AND COALESCE(heartbeat_at, started_at) < NOW() - make_interval(mins => $1)
             RETURNING id
-        """)
+        """, _STALE_HEARTBEAT_MINUTES)
         if cleaned:
             logger.warning("Cleaned up stale run lock: %s", cleaned)
         row = await conn.fetchval("""
             SELECT id FROM analysis_runs WHERE status = 'running' LIMIT 1
         """)
     return row is not None
+
+
+async def _heartbeat_loop(run_id: str) -> None:
+    """Bump heartbeat_at every _HEARTBEAT_INTERVAL_SECONDS while a run executes.
+    Cancelled by _run_with_heartbeat when the run finishes. Errors are swallowed
+    so a transient DB hiccup never kills the run it is guarding."""
+    pool = get_analyzer_pool()
+    while True:
+        try:
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE analysis_runs SET heartbeat_at = NOW() WHERE id = $1::uuid",
+                    run_id,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Heartbeat update failed (non-fatal)", exc_info=True)
+
+
+async def _stop_heartbeat(hb: asyncio.Task) -> None:
+    """Cancel a heartbeat task started with asyncio.create_task(_heartbeat_loop(...))
+    and await its teardown. Safe to call from a finally block."""
+    hb.cancel()
+    try:
+        await hb
+    except asyncio.CancelledError:
+        pass
 
 
 async def clear_orphaned_run_locks() -> int:
@@ -97,7 +147,8 @@ async def _create_run(run_type: str) -> str:
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         return await conn.fetchval("""
-            INSERT INTO analysis_runs (run_type, status) VALUES ($1, 'running') RETURNING id::text
+            INSERT INTO analysis_runs (run_type, status, heartbeat_at)
+            VALUES ($1, 'running', NOW()) RETURNING id::text
         """, run_type)
 
 
@@ -143,6 +194,7 @@ async def run_incremental() -> dict:
 
     run_id = await _create_run("incremental")
     stats = {"entities": 0, "events": 0, "alerts": 0, "signals": 0}
+    heartbeat = asyncio.create_task(_heartbeat_loop(run_id))
 
     try:
         since = await get_last_run_time("incremental")
@@ -305,8 +357,31 @@ async def run_incremental() -> dict:
         await _finish_run(run_id, stats, error=str(e))
         await notify_error("incremental", str(e))
         raise
+    finally:
+        await _stop_heartbeat(heartbeat)
 
     return stats
+
+
+async def hard_reset_entities() -> None:
+    """DESTRUCTIVE, manual-only: delete all entities + platform links so the next
+    resolution rebuilds the identity graph from scratch with fresh UUIDs.
+
+    Via the schema FKs this CASCADE-deletes entity_faces, identity_signals,
+    entity_relationships and behavioral_profiles, NULLs timeline_events.entity_id,
+    and orphans identity_labels / entity_views / case_items (which have no FK and
+    keep dead UUIDs). This is exactly the damage P0-1 removed from the automatic
+    12h full-resolution path — it lives here as an explicit opt-in only. Run it
+    solely when you deliberately want to discard the current identity graph, then
+    follow with `python -m src.main full` to repopulate."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM entity_platform_links")
+        await conn.execute("DELETE FROM entities")
+    logger.warning(
+        "hard_reset_entities: all entities + platform links deleted (CASCADE wiped "
+        "entity_faces/signals/relationships). Run a full resolution to rebuild."
+    )
 
 
 async def run_full_resolution() -> dict:
@@ -316,16 +391,28 @@ async def run_full_resolution() -> dict:
 
     run_id = await _create_run("full_resolution")
     stats = {"entities": 0, "events": 0, "alerts": 0, "signals": 0}
+    heartbeat = asyncio.create_task(_heartbeat_loop(run_id))
 
     try:
-        # Full resolution: clear and rebuild entities
-        # Preserve bio_mention signals — they are rebuilt by detect_bio_mentions() below
-        pool = get_analyzer_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM identity_signals WHERE signal_type NOT IN ('bio_mention', 'content_similarity', 'temporal_copost', 'group_cooccurrence', 'email_match', 'cross_platform_link', 'phone_match', 'shared_website', 'shared_route_origin', 'media_gps_colocation', 'media_perceptual_match', 'media_face_match')")
-            await conn.execute("DELETE FROM entity_platform_links")
-            await conn.execute("DELETE FROM entities")
-
+        # P0-1 (identity_system_review_plan.md): full resolution re-resolves every
+        # entity but MUST NOT delete entities/links first. resolve_entities() is
+        # already idempotent and self-cleaning — it UPSERTs entity_platform_links,
+        # recovers each entity's existing UUID from those links, handles
+        # splits/merges, and deletes orphaned entities at the end. The former
+        # `DELETE FROM entity_platform_links; DELETE FROM entities` here emptied the
+        # links resolve_entities reads for ID recovery, so EVERY entity got a fresh
+        # uuid4() on each ~12h run. Via the schema FKs that CASCADE-wiped
+        # entity_faces and orphaned identity_labels / entity_views / case_items
+        # (all keyed by entity UUID) twice a day. Keeping IDs stable is what makes
+        # bridged faces, human calibration labels, saved cases and review state
+        # durable — the precondition for P1-4 (calibration) to accumulate at all.
+        #
+        # The old `DELETE FROM identity_signals ...` here was additionally dead
+        # code: the `DELETE FROM entities` that followed CASCADE-deleted every
+        # identity_signals row regardless (FK ON DELETE CASCADE, schema.sql:40).
+        #
+        # A destructive from-scratch rebuild is now an explicit opt-in
+        # (hard_reset_entities below), never the automatic 12h path.
         resolver_stats = await resolve_entities()
         stats["entities"] = resolver_stats.get("entities", 0)
         stats["signals"] = resolver_stats.get("signals", 0)
@@ -485,5 +572,7 @@ async def run_full_resolution() -> dict:
         await _finish_run(run_id, stats, error=str(e))
         await notify_error("full resolution", str(e))
         raise
+    finally:
+        await _stop_heartbeat(heartbeat)
 
     return stats

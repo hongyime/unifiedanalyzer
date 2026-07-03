@@ -23,6 +23,11 @@ def main():
     sub.add_parser("scheduler", help="Run the analysis scheduler loop (separate process)")
     sub.add_parser("run", help="Run one incremental analysis cycle")
     sub.add_parser("full", help="Run full identity resolution")
+    hard_reset = sub.add_parser(
+        "hard-reset-entities",
+        help="DESTRUCTIVE: wipe all entities+links (CASCADE wipes faces/signals) then rebuild",
+    )
+    hard_reset.add_argument("--yes", action="store_true", help="Skip the confirmation guard")
     sub.add_parser("schema", help="Apply database schema (idempotent)")
 
     args = parser.parse_args()
@@ -72,6 +77,28 @@ def main():
             try:
                 stats = await run_full_resolution()
                 logger.info("Full resolution complete: %s", stats)
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "hard-reset-entities":
+        if not args.yes:
+            logger.error(
+                "hard-reset-entities is DESTRUCTIVE (wipes all entities, links, "
+                "bridged faces, signals). Re-run with --yes to confirm, then run "
+                "`python -m src.main full` to rebuild."
+            )
+            sys.exit(2)
+        from src.db.connection import init_pools, close_pools
+        from src.pipeline.incremental_runner import hard_reset_entities, run_full_resolution
+
+        async def _run():
+            await init_pools()
+            try:
+                await hard_reset_entities()
+                stats = await run_full_resolution()
+                logger.info("Hard reset + full resolution complete: %s", stats)
             finally:
                 await close_pools()
 

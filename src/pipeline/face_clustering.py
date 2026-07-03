@@ -50,6 +50,20 @@ _FACE_CLUSTER_MAX = int(os.getenv("FACE_CLUSTER_MAX", "20000"))
 # Group-photo guard: only propagate attribution to sibling faces from images
 # with at most this many detected faces (selfies/portraits, not crowds).
 _MAX_PROPAGATE_FACE_COUNT = int(os.getenv("FACE_CLUSTER_MAX_GROUP_FACES", "3"))
+# P1-2 (identity_system_review_plan.md): purity guards on propagation.
+# _PROPAGATE_MIN_SIM: a candidate face is only bridged to the cluster's dominant
+# entity if its cosine similarity to an already-bridged (anchor) face of that
+# entity is at least this — STRICTER than the clustering threshold, so a face that
+# only chained into the cluster through a borderline bridge is not absorbed.
+_PROPAGATE_MIN_SIM = float(os.getenv("FACE_PROPAGATE_MIN_SIM", "0.55"))
+# _PROPAGATE_MIN_QUALITY: skip low-quality crops (blurry/tiny/occluded) whose
+# embeddings are unreliable. 0.0 disables (scale depends on the detector's
+# quality_score); raise once the score distribution is known.
+_PROPAGATE_MIN_QUALITY = float(os.getenv("FACE_PROPAGATE_MIN_QUALITY", "0.0"))
+# Fail-CLOSED default when an image's face_count is unknown (NULL): treat it as a
+# possible crowd so a missing count never silently propagates a bystander to the
+# poster. (Was COALESCE(...,1) — fail-open — which the review flagged.)
+_UNKNOWN_FACE_COUNT = 999
 
 # Internal gate: skip the whole pass when the face corpus hasn't grown.
 _last_face_count = -1
@@ -132,6 +146,31 @@ async def cluster_faces() -> dict:
     return {"faces": len(face_ids), "clusters": len(sizes), "multi_face_clusters": multi}
 
 
+def _normalized_matrix(emb_texts: list[str]) -> "np.ndarray | None":
+    """Parse pgvector text embeddings into an L2-normalized (n, d) matrix, so a
+    dot product is cosine similarity. Returns None if there are no embeddings."""
+    if not emb_texts:
+        return None
+    M = np.asarray([json.loads(t) for t in emb_texts], dtype=np.float32)
+    norms = np.linalg.norm(M, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return M / norms
+
+
+def _passes_purity(cand_emb_text: str, anchors: "np.ndarray | None") -> bool:
+    """True if the candidate face is at least _PROPAGATE_MIN_SIM cosine-similar to
+    any anchor (already-bridged) face of the dominant entity. Without anchors we
+    cannot verify purity, so we fail closed (do not propagate)."""
+    if anchors is None or len(anchors) == 0:
+        return False
+    v = np.asarray(json.loads(cand_emb_text), dtype=np.float32)
+    n = np.linalg.norm(v)
+    if n == 0:
+        return False
+    v /= n
+    return float(np.max(anchors @ v)) >= _PROPAGATE_MIN_SIM
+
+
 async def propagate_entity_faces() -> dict:
     """For each cluster with a single unambiguous dominant entity, bridge the
     cluster's currently-unbridged faces to that entity (group-photo guarded).
@@ -140,7 +179,8 @@ async def propagate_entity_faces() -> dict:
     Returns stats incl. how many drive-origin faces got cross-referenced.
     """
     analyzer = get_analyzer_pool()
-    stats = {"clusters_with_entity": 0, "propagated": 0, "drive_cross_ref": 0, "ambiguous_skipped": 0}
+    stats = {"clusters_with_entity": 0, "propagated": 0, "drive_cross_ref": 0,
+             "ambiguous_skipped": 0, "impurity_skipped": 0}
 
     async with analyzer.acquire() as conn:
         # Per cluster: which entities are already bridged, and to how many faces.
@@ -171,22 +211,46 @@ async def propagate_entity_faces() -> dict:
             entity_id = ents[0][0]
             dominant_updates.append((entity_id, cluster_id))
 
+            # P1-2 purity anchors: embeddings of the faces in THIS cluster already
+            # bridged to the dominant entity. A candidate is only propagated if it
+            # is close to one of these anchors (not merely somewhere in the cluster).
+            anchor_rows = await conn.fetch("""
+                SELECT f.embedding_vec::text AS emb
+                FROM facetracker.faces f
+                JOIN public.entity_faces ef ON ef.face_id = f.id
+                WHERE f.cluster_id = $1 AND ef.entity_id = $2::uuid
+                  AND f.embedding_vec IS NOT NULL
+            """, cluster_id, entity_id)
+            anchors = _normalized_matrix([r["emb"] for r in anchor_rows])
+
             # Candidate sibling faces in this cluster that are NOT yet bridged,
-            # restricted to low-face-count images (group-photo guard). Flag
+            # restricted to low-face-count images (group-photo guard, fail-closed
+            # on unknown face_count) and to sufficiently high-quality crops. Flag
             # drive-origin faces (file_path under /mnt/) for the method label.
             candidates = await conn.fetch("""
-                SELECT f.id AS face_id, i.file_hash AS file_hash, i.file_path,
+                SELECT f.id AS face_id, f.embedding_vec::text AS emb,
+                       i.file_hash AS file_hash, i.file_path,
                        (i.file_path LIKE '/mnt/%') AS is_drive
                 FROM facetracker.faces f
                 JOIN facetracker.images i ON i.id = f.image_id
                 WHERE f.cluster_id = $1
-                  AND COALESCE(i.face_count, 1) <= $2
+                  AND COALESCE(i.face_count, $3) <= $2
+                  AND COALESCE(f.quality_score, 0) >= $4
+                  AND f.embedding_vec IS NOT NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM public.entity_faces ef WHERE ef.face_id = f.id
                   )
-            """, cluster_id, _MAX_PROPAGATE_FACE_COUNT)
+            """, cluster_id, _MAX_PROPAGATE_FACE_COUNT, _UNKNOWN_FACE_COUNT,
+                 _PROPAGATE_MIN_QUALITY)
 
             for c in candidates:
+                # Purity gate: max cosine similarity to any anchor must clear the
+                # (stricter-than-clustering) propagate threshold. If the dominant
+                # entity has no embedded anchor faces we cannot verify purity, so
+                # we skip rather than propagate blind.
+                if not _passes_purity(c["emb"], anchors):
+                    stats["impurity_skipped"] += 1
+                    continue
                 # media_item_id: collector faces store the media id in file_hash;
                 # drive faces store a path sha1 (not a media id) -> leave NULL.
                 media_item_id = None if c["is_drive"] else c["file_hash"]

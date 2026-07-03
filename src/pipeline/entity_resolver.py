@@ -10,6 +10,14 @@ logger = logging.getLogger(__name__)
 
 USERNAME_STRIP_CHARS = "._-"
 NAME_FUZZY_MIN_SCORE = 85
+# P1-1 (identity_system_review_plan.md): name-only linking (no corroborating
+# signal — Phase 4.5 WhatsApp attach) is the single biggest false-merge source
+# (real_name_fuzzy is ~93% of all identity_signals). Demote it: require a
+# distinctive full name (2+ tokens, not a lone common first name) AND a stricter
+# fuzzy threshold before matching two people on name alone.
+NAME_FUZZY_MIN_SCORE_NAME_ONLY = 90
+MIN_NAME_TOKENS = 2
+MIN_NAME_LENGTH = 5
 CONFIDENCE_THRESHOLD = 0.85
 MIN_SIGNALS = 2
 
@@ -59,6 +67,23 @@ def normalize_username(username: str | None) -> str | None:
     if not u or len(u) < MIN_NORMALIZED_LENGTH:
         return None
     return u
+
+
+def name_is_distinctive(name: str | None) -> bool:
+    """P1-1: gate name-ONLY identity linking on a distinctive full name. A lone
+    common first name ("Mike") matching another "Mike" is not evidence two
+    accounts are the same person; a full "Jane Halloran" match is much stronger.
+    Require >= MIN_NAME_TOKENS whitespace-separated tokens and a reasonable
+    length. Used only where a name match is the sole linking signal (Phase 4.5);
+    paths that already require a second corroborating signal (Phase 4) don't need
+    this gate but pass through it cheaply as extra safety."""
+    if not name:
+        return False
+    stripped = name.strip()
+    if len(stripped) < MIN_NAME_LENGTH:
+        return False
+    tokens = [t for t in stripped.split() if t]
+    return len(tokens) >= MIN_NAME_TOKENS
 
 
 def parse_whatsapp_phone(jid: str) -> str | None:
@@ -230,17 +255,26 @@ async def load_profile_photo_hashes() -> dict[str, list[tuple[str, str]]]:
 def compute_confidence(signals: list[SignalMatch]) -> tuple[float, int]:
     """Compute confidence score and independent signal count.
 
-    Deduplicates by (signal_type, source_platform) to count truly independent signals.
+    P0-2 (identity_system_review_plan.md): independence is counted as the number
+    of distinct *signal_type* kinds, NOT distinct (signal_type, source_platform)
+    pairs. The old pair-based count was gameable by a single coincidence: one
+    shared username across N platforms expands (Phase 1) into N pairwise
+    `username_exact` rows with different source_platform values, which the old
+    logic counted as N>=2 "independent" signals — so a lone handle collision
+    (the classic "John Smith" false-merge) satisfied MIN_SIGNALS on its own. The
+    same held for a single shared real name fanned out pairwise. Counting distinct
+    kinds means "2 independent" now genuinely requires two different TYPES of
+    evidence (e.g. a username match AND a name/phone/email/photo match), which is
+    the safe direction for a merge guard (errs toward not-confirmed).
+
+    NOTE: is_confirmed remains a label on the link, not a gate on entity
+    formation — tightening it into a hard gate is a separate, larger decision.
     """
     score = 0.0
-    seen_types: set[str] = set()
-
     for s in signals:
         score += s.confidence
 
-    independent = set()
-    for s in signals:
-        independent.add((s.signal_type, s.source_platform))
+    independent = {s.signal_type for s in signals}
 
     max_possible = 195.0
     normalized = min(score / max_possible, 1.0) if max_possible > 0 else 0.0
@@ -438,13 +472,20 @@ async def resolve_entities() -> dict:
 
     matched_count = 0
     for wp in unassigned_wp:
-        if wp.name:
+        # P1-1: name is the ONLY linking signal here (WhatsApp profiles have no
+        # username), so demote it — only attach on a distinctive full name and a
+        # stricter fuzzy threshold. A lone/short/common name falls through to a
+        # standalone secondary entity instead of being force-merged on a weak
+        # coincidence (the dominant historical false-merge vector).
+        if wp.name and name_is_distinctive(wp.name):
             best_match: EntityCandidate | None = None
             best_profile: PlatformProfile | None = None
             best_score = 0
             for ename, candidate, eprofile in entity_names:
+                if not name_is_distinctive(ename):
+                    continue
                 score = fuzz.token_sort_ratio(wp.name, ename)
-                if score >= NAME_FUZZY_MIN_SCORE and score > best_score:
+                if score >= NAME_FUZZY_MIN_SCORE_NAME_ONLY and score > best_score:
                     best_score = score
                     best_match = candidate
                     best_profile = eprofile
