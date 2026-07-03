@@ -152,6 +152,28 @@ every P0 item below is therefore *more* urgent, not less. The reviewer's stated 
 
 ---
 
+## P2 execution status (2026-07-03)
+Done now (safe, high-value):
+- **P2-1 pool caps:** `DB_MAX_POOL_SIZE` set per service (analyzer 10 / scheduler 6) and
+  face_worker's SQLAlchemy engines bounded (`FACE_DB_POOL_SIZE`/`FACE_DB_MAX_OVERFLOW`, default
+  3+2 per engine) so a drive scan can't exhaust the shared Postgres.
+- **P2-2 Phase 4.5 blocking:** added `name_block_keys` token-prefix index; each of the 28,534
+  username-less WhatsApp profiles now fuzzy-matches only entities sharing a name-token prefix
+  instead of all ~1k, removing the O(n·m) event-loop block. Distinctive-name/threshold match
+  results are preserved.
+- **P2-3 per-phase status:** new `run_phase_status` table; the ~24 non-fatal secondary phases
+  (dedup'd into one shared list used by both runners) are each timed + recorded ok/failed, with
+  a repeated-failure notification (`_alert_on_repeated_phase_failures`, 3-in-a-row).
+- **P2-4 face kNN index:** RESOLVED as no-op — `embedding_vec` is pgvector, but NO code does a
+  `<=>/<->` kNN query (matching uses FAISS `faiss_outbox`; clustering loads all in-memory), so an
+  HNSW index would be pure write overhead. No index added; documented.
+- **P2-8 face-corpus rebuild:** see verification section (relink of ~6.4k collector faces).
+
+Deferred (backlog, need a window / larger effort — do NOT run unattended on the live box):
+- **P2-5 partition timeline_events** — risky migration on the live ~6M-row table.
+- **P2-6 FAISS-kNN face clustering** — large rewrite, not urgent at current scale.
+- **P2-7 new signals (EXIF/pHash/link-in-bio)** — feature projects touching collectors.
+
 ## Explicitly do NOT do
 - ⚪ Auto-merge above a threshold — with uncalibrated weights + (currently) unstable IDs +
   CASCADE deletes, it compounds irreversible errors. Keep human-in-the-loop.

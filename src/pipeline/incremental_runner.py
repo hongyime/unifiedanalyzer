@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from src.db.connection import get_analyzer_pool
@@ -187,6 +188,93 @@ async def _finish_run(run_id: str, stats: dict, error: str | None = None) -> Non
             run_id)
 
 
+# P2-3: the secondary (non-fatal) pipeline phases, shared verbatim by
+# run_incremental and run_full_resolution. Order matters — the media block
+# (6C.2/6H) produces derived pdf_image/video_frame rows that later media phases
+# consume via fetch_unprocessed_derived(), and run_face_clustering must precede
+# rebuild_face_match_signals. Extracted into one list so both runners stay in
+# lockstep and every phase gets timed + status-recorded (was ~16 duplicated
+# try/except blocks per runner).
+def _secondary_phases() -> list[tuple[str, object]]:
+    return [
+        ("whatsapp_group_graph", build_whatsapp_group_graph),
+        ("telegram_group_graph", build_telegram_group_graph),
+        ("strava_patterns", analyze_strava_patterns),
+        ("bio_nlp", analyze_bios),
+        ("graph_analytics", compute_graph_analytics),
+        ("graph_overlap", compute_graph_overlap),
+        ("bio_mention", detect_bio_mentions),
+        ("location_inference", infer_locations),
+        ("content_fingerprint", fingerprint_content),
+        ("temporal_correlation", correlate_activity),
+        ("contact_extraction", extract_contacts),
+        ("route_similarity", analyze_route_similarity),
+        ("media_pdf_text", lambda: analyze_media_pdf_text(limit=MEDIA_PDF_TEXT_BATCH_SIZE)),
+        ("media_pdf_images", lambda: extract_pdf_images(limit=MEDIA_PDF_IMAGE_BATCH_SIZE)),
+        ("media_video_frames", extract_video_frames),
+        ("media_exif", lambda: analyze_media_exif(limit=MEDIA_EXIF_BATCH_SIZE)),
+        ("media_phash", lambda: analyze_media_phash(limit=MEDIA_PHASH_BATCH_SIZE)),
+        ("media_ocr", analyze_media_ocr),
+        ("media_faces", analyze_media_faces),
+        ("face_clustering", run_face_clustering),
+        ("face_match_signals", rebuild_face_match_signals),
+        ("calibration_retrain", maybe_retrain),
+        ("identity_scoring", compute_identity_scores),
+        ("geocode", geocode_step),
+    ]
+
+
+async def _run_phase(run_id: str, run_type: str, name: str, fn) -> None:
+    """Run one non-fatal phase; record ok/failed + duration to run_phase_status.
+    Never raises — a phase failure is logged and persisted, not fatal."""
+    start = time.monotonic()
+    status, err = "ok", None
+    try:
+        await fn()
+    except Exception as e:  # noqa: BLE001 — phases are intentionally non-fatal
+        logger.exception("%s failed (non-fatal)", name)
+        status, err = "failed", str(e)[:2000]
+    duration_ms = int((time.monotonic() - start) * 1000)
+    try:
+        pool = get_analyzer_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO run_phase_status (run_id, run_type, phase, status, duration_ms, error) "
+                "VALUES ($1::uuid, $2, $3, $4, $5, $6)",
+                run_id, run_type, name, status, duration_ms, err)
+    except Exception:
+        logger.debug("phase status write failed (non-fatal)", exc_info=True)
+
+
+async def _run_secondary_phases(run_id: str, run_type: str) -> None:
+    for name, fn in _secondary_phases():
+        await _run_phase(run_id, run_type, name, fn)
+
+
+async def _alert_on_repeated_phase_failures(threshold: int = 3) -> None:
+    """Notify when a phase has failed its last `threshold` runs in a row — the
+    signal the old all-non-fatal design silently swallowed."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            WITH recent AS (
+                SELECT phase, status,
+                       row_number() OVER (PARTITION BY phase ORDER BY created_at DESC) AS rn
+                FROM run_phase_status
+            )
+            SELECT phase FROM recent WHERE rn <= $1
+            GROUP BY phase
+            HAVING count(*) = $1 AND count(*) FILTER (WHERE status = 'failed') = $1
+        """, threshold)
+    if rows:
+        phases = ", ".join(r["phase"] for r in rows)
+        logger.error("Phases failing %d runs in a row: %s", threshold, phases)
+        try:
+            await notify_error("pipeline phases", f"{phases} failed {threshold} runs in a row")
+        except Exception:
+            logger.debug("repeated-failure notify failed (non-fatal)", exc_info=True)
+
+
 async def run_incremental() -> dict:
     if await _is_run_locked():
         logger.warning("Another run is in progress, skipping")
@@ -211,140 +299,12 @@ async def run_incremental() -> dict:
 
         await compute_behavioral_profiles()
 
-        try:
-            await build_whatsapp_group_graph()
-        except Exception:
-            logger.exception("WhatsApp group graph failed (non-fatal)")
-
-        try:
-            await build_telegram_group_graph()
-        except Exception:
-            logger.exception("Telegram group graph failed (non-fatal)")
-
-        try:
-            await analyze_strava_patterns()
-        except Exception:
-            logger.exception("Strava pattern analysis failed (non-fatal)")
-
-        try:
-            await analyze_bios()
-        except Exception:
-            logger.exception("Bio NLP analysis failed (non-fatal)")
-
-        try:
-            await compute_graph_analytics()
-        except Exception:
-            logger.exception("Graph analytics failed (non-fatal)")
-
-        try:
-            await compute_graph_overlap()
-        except Exception:
-            logger.exception("Graph overlap failed (non-fatal)")
-
-        try:
-            await detect_bio_mentions()
-        except Exception:
-            logger.exception("Bio mention detection failed (non-fatal)")
-
-        try:
-            await infer_locations()
-        except Exception:
-            logger.exception("Location inference failed (non-fatal)")
-
-        try:
-            await fingerprint_content()
-        except Exception:
-            logger.exception("Content fingerprint failed (non-fatal)")
-
-        try:
-            await correlate_activity()
-        except Exception:
-            logger.exception("Temporal correlation failed (non-fatal)")
-
-        try:
-            await extract_contacts()
-        except Exception:
-            logger.exception("Contact extraction failed (non-fatal)")
-
-        try:
-            await analyze_route_similarity()
-        except Exception:
-            logger.exception("Route similarity analysis failed (non-fatal)")
-
-        # Phase 6: media content analysis (docs/media_analysis_plan.md).
-        # Order matters — 6C.2/6H produce derived pdf_image/video_frame rows
-        # that 6B/6D/6F also consume via fetch_unprocessed_derived().
-        try:
-            await analyze_media_pdf_text(limit=MEDIA_PDF_TEXT_BATCH_SIZE)
-        except Exception:
-            logger.exception("Media PDF text analysis failed (non-fatal)")
-
-        try:
-            await extract_pdf_images(limit=MEDIA_PDF_IMAGE_BATCH_SIZE)
-        except Exception:
-            logger.exception("Media PDF image extraction failed (non-fatal)")
-
-        try:
-            await extract_video_frames()
-        except Exception:
-            logger.exception("Media video frame extraction failed (non-fatal)")
-
-        try:
-            await analyze_media_exif(limit=MEDIA_EXIF_BATCH_SIZE)
-        except Exception:
-            logger.exception("Media EXIF GPS analysis failed (non-fatal)")
-
-        try:
-            await analyze_media_phash(limit=MEDIA_PHASH_BATCH_SIZE)
-        except Exception:
-            logger.exception("Media perceptual hash analysis failed (non-fatal)")
-
-        try:
-            await analyze_media_ocr()
-        except Exception:
-            logger.exception("Media OCR analysis failed (non-fatal)")
-
-        try:
-            await analyze_media_faces()
-        except Exception:
-            logger.exception("Media face analysis failed (non-fatal)")
-
-        # Cluster the InsightFace corpus + propagate entity_faces attribution
-        # across clusters (signals-only, group-photo guarded) so the bridged
-        # corpus the face-match signal reads from actually has data. Must run
-        # BEFORE rebuild_face_match_signals.
-        try:
-            await run_face_clustering()
-        except Exception:
-            logger.exception("Face clustering failed (non-fatal)")
-
-        # F3: rebuild the InsightFace-backed media_face_match signal independently
-        # of the SFace face step above (which skips when its models are missing).
-        try:
-            await rebuild_face_match_signals()
-        except Exception:
-            logger.exception("Face-match signal rebuild failed (non-fatal)")
-
-        # Retrain the calibrated scorer from dashboard-captured labels (entity
-        # merges / "not same" dismisses) when enough have accumulated, then score
-        # with the fresh model. No-op until ~20 labels exist (noisy-OR until then).
-        try:
-            await maybe_retrain()
-        except Exception:
-            logger.exception("Calibration retrain failed (non-fatal)")
-
-        try:
-            await compute_identity_scores()
-        except Exception:
-            logger.exception("Identity scoring failed (non-fatal)")
-
-        # Trickle-geocode Instagram place names for the map (rate-limited, cached).
-        try:
-            await geocode_step()
-        except Exception:
-            logger.exception("Geocode step failed (non-fatal)")
+        # P2-3: all non-fatal secondary phases (media analysis, graphs, face
+        # clustering, identity scoring, geocode) — each timed + status-recorded.
+        await _run_secondary_phases(run_id, "incremental")
 
         await _finish_run(run_id, stats)
+        await _alert_on_repeated_phase_failures()
         logger.info("Incremental run complete: %s", stats)
         await notify_run_summary("incremental", stats)
 
@@ -426,140 +386,12 @@ async def run_full_resolution() -> dict:
 
         await compute_behavioral_profiles()
 
-        try:
-            await build_whatsapp_group_graph()
-        except Exception:
-            logger.exception("WhatsApp group graph failed (non-fatal)")
-
-        try:
-            await build_telegram_group_graph()
-        except Exception:
-            logger.exception("Telegram group graph failed (non-fatal)")
-
-        try:
-            await analyze_strava_patterns()
-        except Exception:
-            logger.exception("Strava pattern analysis failed (non-fatal)")
-
-        try:
-            await analyze_bios()
-        except Exception:
-            logger.exception("Bio NLP analysis failed (non-fatal)")
-
-        try:
-            await compute_graph_analytics()
-        except Exception:
-            logger.exception("Graph analytics failed (non-fatal)")
-
-        try:
-            await compute_graph_overlap()
-        except Exception:
-            logger.exception("Graph overlap failed (non-fatal)")
-
-        try:
-            await detect_bio_mentions()
-        except Exception:
-            logger.exception("Bio mention detection failed (non-fatal)")
-
-        try:
-            await infer_locations()
-        except Exception:
-            logger.exception("Location inference failed (non-fatal)")
-
-        try:
-            await fingerprint_content()
-        except Exception:
-            logger.exception("Content fingerprint failed (non-fatal)")
-
-        try:
-            await correlate_activity()
-        except Exception:
-            logger.exception("Temporal correlation failed (non-fatal)")
-
-        try:
-            await extract_contacts()
-        except Exception:
-            logger.exception("Contact extraction failed (non-fatal)")
-
-        try:
-            await analyze_route_similarity()
-        except Exception:
-            logger.exception("Route similarity analysis failed (non-fatal)")
-
-        # Phase 6: media content analysis (docs/media_analysis_plan.md).
-        # Order matters — 6C.2/6H produce derived pdf_image/video_frame rows
-        # that 6B/6D/6F also consume via fetch_unprocessed_derived().
-        try:
-            await analyze_media_pdf_text(limit=MEDIA_PDF_TEXT_BATCH_SIZE)
-        except Exception:
-            logger.exception("Media PDF text analysis failed (non-fatal)")
-
-        try:
-            await extract_pdf_images(limit=MEDIA_PDF_IMAGE_BATCH_SIZE)
-        except Exception:
-            logger.exception("Media PDF image extraction failed (non-fatal)")
-
-        try:
-            await extract_video_frames()
-        except Exception:
-            logger.exception("Media video frame extraction failed (non-fatal)")
-
-        try:
-            await analyze_media_exif(limit=MEDIA_EXIF_BATCH_SIZE)
-        except Exception:
-            logger.exception("Media EXIF GPS analysis failed (non-fatal)")
-
-        try:
-            await analyze_media_phash(limit=MEDIA_PHASH_BATCH_SIZE)
-        except Exception:
-            logger.exception("Media perceptual hash analysis failed (non-fatal)")
-
-        try:
-            await analyze_media_ocr()
-        except Exception:
-            logger.exception("Media OCR analysis failed (non-fatal)")
-
-        try:
-            await analyze_media_faces()
-        except Exception:
-            logger.exception("Media face analysis failed (non-fatal)")
-
-        # Cluster the InsightFace corpus + propagate entity_faces attribution
-        # across clusters (signals-only, group-photo guarded) so the bridged
-        # corpus the face-match signal reads from actually has data. Must run
-        # BEFORE rebuild_face_match_signals.
-        try:
-            await run_face_clustering()
-        except Exception:
-            logger.exception("Face clustering failed (non-fatal)")
-
-        # F3: rebuild the InsightFace-backed media_face_match signal independently
-        # of the SFace face step above (which skips when its models are missing).
-        try:
-            await rebuild_face_match_signals()
-        except Exception:
-            logger.exception("Face-match signal rebuild failed (non-fatal)")
-
-        # Retrain the calibrated scorer from dashboard-captured labels (entity
-        # merges / "not same" dismisses) when enough have accumulated, then score
-        # with the fresh model. No-op until ~20 labels exist (noisy-OR until then).
-        try:
-            await maybe_retrain()
-        except Exception:
-            logger.exception("Calibration retrain failed (non-fatal)")
-
-        try:
-            await compute_identity_scores()
-        except Exception:
-            logger.exception("Identity scoring failed (non-fatal)")
-
-        # Trickle-geocode Instagram place names for the map (rate-limited, cached).
-        try:
-            await geocode_step()
-        except Exception:
-            logger.exception("Geocode step failed (non-fatal)")
+        # P2-3: all non-fatal secondary phases (shared with run_incremental),
+        # each timed + status-recorded so a persistently failing step is visible.
+        await _run_secondary_phases(run_id, "full_resolution")
 
         await _finish_run(run_id, stats)
+        await _alert_on_repeated_phase_failures()
         logger.info("Full resolution run complete: %s", stats)
         await notify_run_summary("full resolution", stats)
 

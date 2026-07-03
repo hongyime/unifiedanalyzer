@@ -86,6 +86,20 @@ def name_is_distinctive(name: str | None) -> bool:
     return len(tokens) >= MIN_NAME_TOKENS
 
 
+def name_block_keys(name: str) -> set[str]:
+    """P2-2 (identity_system_review_plan.md): candidate-generation block keys for
+    name matching — the first 3 chars of each length>=3 token, lowercased. Two
+    names with token_sort_ratio >= NAME_FUZZY_MIN_SCORE_NAME_ONLY must share
+    near-identical tokens, hence at least one block key, so restricting fuzzy
+    comparison to entities sharing a key prunes the O(n*m) all-pairs scan (28k+
+    WhatsApp profiles x all entities) without dropping real matches."""
+    keys: set[str] = set()
+    for tok in name.lower().split():
+        if len(tok) >= 3:
+            keys.add(tok[:3])
+    return keys
+
+
 def parse_whatsapp_phone(jid: str) -> str | None:
     if not jid or "@lid" in jid or jid.startswith("status@"):
         return None
@@ -470,6 +484,16 @@ async def resolve_entities() -> dict:
                 entity_names.append((p.name, candidate, p))
                 break
 
+    # P2-2: block index over entity names, so each WhatsApp profile only fuzzy-
+    # matches entities that share a name-token prefix instead of all ~N entities.
+    # Only distinctive names are match-eligible (P1-1), so only they are indexed.
+    block_index: dict[str, list[int]] = {}
+    for idx, (ename, _, _) in enumerate(entity_names):
+        if not name_is_distinctive(ename):
+            continue
+        for key in name_block_keys(ename):
+            block_index.setdefault(key, []).append(idx)
+
     matched_count = 0
     for wp in unassigned_wp:
         # P1-1: name is the ONLY linking signal here (WhatsApp profiles have no
@@ -481,9 +505,13 @@ async def resolve_entities() -> dict:
             best_match: EntityCandidate | None = None
             best_profile: PlatformProfile | None = None
             best_score = 0
-            for ename, candidate, eprofile in entity_names:
-                if not name_is_distinctive(ename):
-                    continue
+            # P2-2: gather only entities sharing a name-token prefix (block) with
+            # this profile; dedupe indices across the profile's block keys.
+            cand_idxs: set[int] = set()
+            for key in name_block_keys(wp.name):
+                cand_idxs.update(block_index.get(key, ()))
+            for idx in cand_idxs:
+                ename, candidate, eprofile = entity_names[idx]
                 score = fuzz.token_sort_ratio(wp.name, ename)
                 if score >= NAME_FUZZY_MIN_SCORE_NAME_ONLY and score > best_score:
                     best_score = score

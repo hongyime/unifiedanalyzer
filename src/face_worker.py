@@ -86,6 +86,8 @@ def init_schema() -> list[str]:
         url,
         connect_args={"options": f"-csearch_path={FACE_DB_SCHEMA},public"},
         pool_pre_ping=True,
+        pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
+        max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
     )
     _wait_for_db(engine)
     try:
@@ -166,8 +168,16 @@ def ingest_collector_media(limit: int = 50) -> dict:
         analyzer_sqlalchemy_url(),
         connect_args={"options": f"-csearch_path={FACE_DB_SCHEMA},public"},
         pool_pre_ping=True,
+        # P2-1: cap this worker's share of the shared Postgres so a big drive
+        # scan can't exhaust the connection pool the analyzer/scheduler need.
+        pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
+        max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
     )
-    collector_engine = create_engine(_collector_sqlalchemy_url(), pool_pre_ping=True)
+    collector_engine = create_engine(
+        _collector_sqlalchemy_url(), pool_pre_ping=True,
+        pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
+        max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
+    )
     _wait_for_db(analyzer_engine)
     _wait_for_db(collector_engine)
 
@@ -320,6 +330,10 @@ def ingest_drive_media(limit: int = 200) -> dict:
         analyzer_sqlalchemy_url(),
         connect_args={"options": f"-csearch_path={FACE_DB_SCHEMA},public"},
         pool_pre_ping=True,
+        # P2-1: cap this worker's share of the shared Postgres so a big drive
+        # scan can't exhaust the connection pool the analyzer/scheduler need.
+        pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
+        max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
     )
     _wait_for_db(analyzer_engine)
 
@@ -434,8 +448,16 @@ def relink_entity_faces(limit: int | None = None) -> dict:
         analyzer_sqlalchemy_url(),
         connect_args={"options": f"-csearch_path={FACE_DB_SCHEMA},public"},
         pool_pre_ping=True,
+        # P2-1: cap this worker's share of the shared Postgres so a big drive
+        # scan can't exhaust the connection pool the analyzer/scheduler need.
+        pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
+        max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
     )
-    collector_engine = create_engine(_collector_sqlalchemy_url(), pool_pre_ping=True)
+    collector_engine = create_engine(
+        _collector_sqlalchemy_url(), pool_pre_ping=True,
+        pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
+        max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
+    )
     _wait_for_db(analyzer_engine)
     _wait_for_db(collector_engine)
     try:
