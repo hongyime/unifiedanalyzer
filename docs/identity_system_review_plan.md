@@ -169,10 +169,26 @@ Done now (safe, high-value):
   HNSW index would be pure write overhead. No index added; documented.
 - **P2-8 face-corpus rebuild:** see verification section (relink of ~6.4k collector faces).
 
-Deferred (backlog, need a window / larger effort — do NOT run unattended on the live box):
-- **P2-5 partition timeline_events** — risky migration on the live ~6M-row table.
-- **P2-6 FAISS-kNN face clustering** — large rewrite, not urgent at current scale.
-- **P2-7 new signals (EXIF/pHash/link-in-bio)** — feature projects touching collectors.
+Also done (2026-07-03, second pass — user requested all remaining P2 + Telegram):
+- **P2-5 partition timeline_events** — DONE. Migrated 6,286,654 rows into a monthly
+  RANGE-partitioned table (121 partitions incl. DEFAULT) via
+  src/db/migrations/001_partition_timeline_events.sql; build_timeline upserts on the 4-col
+  key. Verified: row count intact, upsert routes to the correct monthly partition. Backup
+  `timeline_events_old` retained — DROP after a day of stable operation. NOTE: run the
+  migration via psql with the scheduler stopped (the pool's 300s command_timeout cancels the
+  ~10min index build if run through the app path — this bit us once and crash-looped the API).
+- **P2-6 FAISS-kNN face clustering** — DONE. cluster_faces now builds a FAISS mutual-kNN graph
+  + connected components (O(n·k)); verified 3 realistic clusters at purity 1.0, faiss fallback
+  to agglomerative retained.
+- **P2-7 new signal** — DONE as `media_device_match` (EXIF camera/lens SERIAL shared across two
+  entities; fan-out-filtered, cross-platform); scorer weight 0.55 + calibration feature added.
+  pHash (media_perceptual_match) and link-in-bio (shared_website) already existed. Applies to
+  media processed under pillow-exif-v2 onward (existing rows aren't retroactively re-EXIF'd).
+- **Telegram status** — DONE. Status/digest now report faces DETECTED vs LINKED, tier
+  breakdown, live run state + heartbeat, failing phases, and a real health icon.
+
+Still deferred (nothing forcing them now):
+- Auto-merge (do NOT), further weak association signals (belong in the relationship graph).
 
 ## Explicitly do NOT do
 - ⚪ Auto-merge above a threshold — with uncalibrated weights + (currently) unstable IDs +
