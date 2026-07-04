@@ -53,8 +53,11 @@ body {
    nav tab, etc.) override the default link color — an UNLAYERED `a { color }`
    rule would otherwise beat every text-color utility in Tailwind v4. */
 @layer base {
-  a { color: var(--color-accent); text-decoration: none; }
-  a:hover { color: var(--color-accent-hover); }
+  /* Links read as white text; only a subtle blue tint on hover. Blue is
+     reserved for actual buttons/CTAs. (In @layer base so text-color utilities —
+     e.g. the active nav pill's text-black — still win.) */
+  a { color: var(--color-text-primary); text-decoration: none; }
+  a:hover { color: var(--color-accent); }
 }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }

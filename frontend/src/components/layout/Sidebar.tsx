@@ -83,7 +83,7 @@ export function Sidebar({ health }: { health: LiveHealth | null }) {
                     clsx(
                       'flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors',
                       isActive
-                        ? 'bg-white/10 font-medium text-text-primary'
+                        ? 'bg-white font-medium text-black'
                         : 'text-text-secondary hover:bg-white/5 hover:text-text-primary',
                     )
                   }

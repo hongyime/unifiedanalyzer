@@ -49,7 +49,7 @@ export default function TriagePage() {
           className="mb-6 flex items-center justify-between rounded-lg border border-border bg-surface p-4 transition-colors hover:bg-hover"
         >
           <div className="flex items-center gap-3">
-            <GitCompare className="h-5 w-5 text-info" />
+            <GitCompare className="h-5 w-5 text-text-muted" />
             <div>
               <div className="font-medium">{cov.merge_backlog} pairs waiting to review</div>
               <div className="text-sm text-text-secondary">
@@ -57,7 +57,7 @@ export default function TriagePage() {
               </div>
             </div>
           </div>
-          <span className="shrink-0 text-sm text-info">Open Review →</span>
+          <span className="shrink-0 text-sm">Open Review →</span>
         </Link>
       )}
 
