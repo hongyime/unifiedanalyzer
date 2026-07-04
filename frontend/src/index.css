@@ -49,8 +49,13 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-a { color: var(--color-accent); text-decoration: none; }
-a:hover { color: var(--color-accent-hover); }
+/* In @layer base so Tailwind utility classes (text-text-primary on the active
+   nav tab, etc.) override the default link color — an UNLAYERED `a { color }`
+   rule would otherwise beat every text-color utility in Tailwind v4. */
+@layer base {
+  a { color: var(--color-accent); text-decoration: none; }
+  a:hover { color: var(--color-accent-hover); }
+}
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--color-background); }
