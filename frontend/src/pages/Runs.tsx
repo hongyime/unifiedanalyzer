@@ -61,7 +61,12 @@ export default function RunsPage() {
   return (
     <div>
       <div className="flex-between mb-2">
-        <h2 className="text-2xl font-semibold">Analysis Runs</h2>
+        <div>
+          <h2 className="text-xl font-semibold">Runs</h2>
+          <p className="mt-1 text-sm text-text-secondary">
+            The background pipeline that refreshes everything. Frequent incremental runs are quick; full runs re-check everyone from scratch.
+          </p>
+        </div>
         <button className="primary" onClick={() => trigger.mutate()} disabled={trigger.isPending}>
           {trigger.isPending ? 'Running…' : 'Trigger Run'}
         </button>

@@ -2,6 +2,10 @@ import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ReviewCandidate } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
+import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState } from '../components/ui/EmptyState'
+import { Confidence } from '../components/ui/Confidence'
+import { signalLabel } from '../lib/labels'
 
 /**
  * Review queue — the triage home for identity resolution. Lists global
@@ -33,16 +37,19 @@ export default function ReviewPage() {
 
   return (
     <div>
-      <h2 className="mb-1 text-xl font-bold">Review</h2>
-      <p className="mb-4 text-sm text-muted">
-        Same-person merge candidates, highest confidence first. Every decision also trains the scorer.
-      </p>
-      {msg && <div className="mb-3 text-sm text-muted">{msg}</div>}
+      <PageHeader
+        title="Review"
+        description="Pairs of accounts that might be the same person, most likely first. Confirm or reject each — every choice also teaches the system to get better."
+      />
+      {msg && <div className="mb-3 text-sm text-text-secondary">{msg}</div>}
 
       {!candidates ? (
         <div className="empty-state">Loading…</div>
       ) : candidates.length === 0 ? (
-        <div className="empty-state">No candidates to review 🎉</div>
+        <EmptyState
+          title="Nothing to review right now"
+          description="Candidate pairs appear here as the pipeline finds accounts that might be the same person."
+        />
       ) : (
         <div className="flex flex-col gap-2">
           {candidates.map((c, i) => (
@@ -63,9 +70,12 @@ export default function ReviewPage() {
                     {'  vs  '}
                     <span>{c.handles_b.length ? c.handles_b.join(', ') : '—'}</span>
                   </div>
-                  <div className="text-sm text-muted">
-                    {Math.round((c.score ?? 0) * 100)}% · {c.cross_platform ? 'cross-platform' : 'same-platform'}
-                    {c.signals.length > 0 && ' · ' + c.signals.map((s) => s.type).join(', ')}
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-text-muted">
+                    <Confidence score={c.score} />
+                    <span>· {c.cross_platform ? 'different platforms' : 'same platform'}</span>
+                    {c.signals.length > 0 && (
+                      <span>· {c.signals.map((s) => signalLabel(s.type)).join(', ')}</span>
+                    )}
                   </div>
                 </div>
               </div>

@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
+import { PageHeader } from '../components/ui/PageHeader'
 
 /**
  * Saved investigations — a pinboard of entities/notes/links per case. Pin
@@ -30,8 +31,10 @@ export default function CasesPage() {
 
   return (
     <div>
-      <h2 className="mb-1 text-xl font-bold">Investigations</h2>
-      <p className="mb-4 text-sm text-muted">Saved cases — pin entities/notes, annotate, revisit.</p>
+      <PageHeader
+        title="Investigations"
+        description="Your saved cases. Pin people, media and notes together to build and revisit an investigation."
+      />
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="lg:col-span-1">

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ScanFace, Users, Images, Film, AlertCircle } from 'lucide-react'
 import { useFaceStats, useFaceIdentities } from '../hooks'
 import { api } from '../api'
+import { PageHeader } from '../components/ui/PageHeader'
 
 /**
  * Faces / Identities page (facetracker merge — Stage 4).
@@ -67,10 +68,10 @@ export default function FacesPage() {
 
   return (
     <div>
-      <h2 className="mb-1 text-xl font-bold">Faces</h2>
-      <p className="mb-5 text-sm text-muted">
-        InsightFace (ArcFace 512-dim) embeddings indexed from collector media + drives.
-      </p>
+      <PageHeader
+        title="Faces"
+        description="Faces detected across all photos and grouped by who they belong to. When the same face appears on different accounts, it links them to the same person."
+      />
 
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatTile label="Faces" value={s?.total_faces ?? 0} icon={ScanFace} />

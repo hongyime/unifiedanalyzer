@@ -4,6 +4,7 @@ import {
 } from 'lucide-react'
 import { useMediaStats, useMediaFilters, useMediaBrowse } from '../hooks'
 import { MediaItem, MediaBrowseParams } from '../api'
+import { PageHeader } from '../components/ui/PageHeader'
 
 const PER_PAGE = 48
 
@@ -146,7 +147,10 @@ export default function MediaPage() {
 
   return (
     <div>
-      <h2 className="mb-6 text-2xl font-semibold">Media Analysis</h2>
+      <PageHeader
+        title="Media"
+        description="Photos, videos and documents we've analyzed — extracted text, locations, faces and image fingerprints. Filter by what each item contains."
+      />
 
       {totals && (
         <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">

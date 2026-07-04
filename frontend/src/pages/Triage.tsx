@@ -2,6 +2,9 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { api, TriageData, ReviewCandidate } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
+import { PageHeader } from '../components/ui/PageHeader'
+import { Confidence } from '../components/ui/Confidence'
+import { signalLabel } from '../lib/labels'
 
 /**
  * Triage home — the investigation workspace landing. Three lanes (merge
@@ -62,22 +65,25 @@ export default function TriagePage() {
 
   return (
     <div>
+      <PageHeader
+        title="Triage"
+        description="Your daily worklist. Decide which account pairs are the same person (left), skim what changed (right). Keyboard: j/k move · e open · m same · x not · s snooze."
+      />
       <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-2 text-sm">
-        <span><b>{cov.entities.toLocaleString()}</b> <span className="text-muted">entities</span></span>
-        <span><b>{cov.with_faces_pct}%</b> <span className="text-muted">with faces</span></span>
-        <span><b>{cov.multi_platform_pct}%</b> <span className="text-muted">multi-platform</span></span>
-        <span><b>{cov.merge_backlog}</b> <span className="text-muted">merge backlog</span></span>
+        <span><b>{cov.entities.toLocaleString()}</b> <span className="text-muted">people tracked</span></span>
+        <span><b>{cov.with_faces_pct}%</b> <span className="text-muted">with a face</span></span>
+        <span><b>{cov.multi_platform_pct}%</b> <span className="text-muted">on 2+ platforms</span></span>
+        <span><b>{cov.merge_backlog}</b> <span className="text-muted">pairs to review</span></span>
         <span><b>{cov.unread_alerts.toLocaleString()}</b> <span className="text-muted">unread alerts</span></span>
-        <span className="ml-auto text-xs text-muted">j/k move · e open · m merge · x dismiss · s snooze</span>
       </div>
 
       {msg && <div className="mb-2 text-sm text-muted">{msg}</div>}
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="lg:col-span-2">
-          <div className="mb-2 text-sm font-semibold">Merge decisions <span className="text-muted">({candidates.length})</span></div>
+          <div className="mb-2 text-sm font-semibold">Same person? <span className="text-muted">({candidates.length})</span></div>
           {candidates.length === 0 ? (
-            <div className="empty-state">Backlog clear 🎉</div>
+            <div className="empty-state">All caught up — no pairs waiting.</div>
           ) : (
             <div className="flex flex-col gap-1.5">
               {candidates.map((c, i) => (
@@ -93,9 +99,9 @@ export default function TriagePage() {
                     <div className="truncate text-sm font-medium">
                       {c.name_a || c.entity_a.slice(0, 8)} <span className="text-muted">&harr;</span> {c.name_b || c.entity_b.slice(0, 8)}
                     </div>
-                    <div className="truncate text-xs text-muted">
-                      {Math.round((c.score ?? 0) * 100)}% · {c.cross_platform ? 'cross-platform' : 'same-platform'}
-                      {c.signals.length > 0 && ' · ' + c.signals.map((s) => s.type).join(', ')}
+                    <div className="flex items-center gap-2 truncate text-xs text-muted">
+                      <Confidence score={c.score} />
+                      {c.signals.length > 0 && <span className="truncate">· {c.signals.map((s) => signalLabel(s.type)).join(', ')}</span>}
                     </div>
                   </div>
                   <div className="flex gap-1">
@@ -111,7 +117,7 @@ export default function TriagePage() {
         <div className="flex flex-col gap-4">
           <div>
             <div className="mb-2 flex items-center justify-between text-sm font-semibold">
-              <span>Change alerts</span>
+              <span>What changed</span>
               <Link to="/alerts" className="text-xs text-muted">all &rarr;</Link>
             </div>
             <div className="flex flex-col gap-1.5">
@@ -132,7 +138,7 @@ export default function TriagePage() {
           </div>
 
           <div>
-            <div className="mb-2 text-sm font-semibold">New high-value</div>
+            <div className="mb-2 text-sm font-semibold">New people</div>
             <div className="flex flex-wrap gap-1.5">
               {data.new_entities.map((n) => (
                 <Link

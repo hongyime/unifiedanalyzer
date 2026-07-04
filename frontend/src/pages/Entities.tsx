@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, Entity } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
+import { PageHeader } from '../components/ui/PageHeader'
+import { tierLabel } from '../lib/labels'
 
 function PlatformBadge({ source }: { source: string }) {
   return <span className={`platform-icon p-${source}`}>{source}</span>
@@ -57,8 +59,12 @@ export default function EntitiesPage() {
 
   return (
     <div>
+      <PageHeader
+        title="People"
+        description="Everyone the system is tracking, each built from one or more platform accounts. Confirmed people have strong evidence; unconfirmed ones are kept but lower-certainty."
+      />
       <div className="flex-between mb-2">
-        <h2>Entities</h2>
+        <div />
         <input
           type="search"
           placeholder="Search name or username..."
@@ -134,7 +140,7 @@ export default function EntitiesPage() {
                         <Link to={`/entities/${e.id}`} style={{ fontWeight: 500 }}>
                           {e.canonical_name || '(unnamed)'}
                         </Link>
-                        <div className="text-sm text-muted">{e.tier}</div>
+                        <div className="text-sm text-muted">{tierLabel(e.tier)}</div>
                       </div>
                     </div>
                   </td>

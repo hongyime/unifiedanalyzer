@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, Community } from '../api'
+import { PageHeader } from '../components/ui/PageHeader'
 
 export default function CommunitiesPage() {
   const [communities, setCommunities] = useState<Community[]>([])
@@ -16,10 +17,11 @@ export default function CommunitiesPage() {
 
   return (
     <div>
-      <div className="flex-between mb-2">
-        <h2>Communities</h2>
-        <span className="text-sm text-muted">{communities.length} communities</span>
-      </div>
+      <PageHeader
+        title="Communities"
+        description="Clusters of people who interact — shared group chats, mutual connections, or coordinated activity. Each is a group that tends to move together."
+        actions={<span className="text-sm text-muted">{communities.length} communities</span>}
+      />
 
       {loading ? (
         <div className="empty-state">Loading...</div>

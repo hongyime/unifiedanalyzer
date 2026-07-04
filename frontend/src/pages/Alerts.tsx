@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, Alert } from '../api'
+import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState } from '../components/ui/EmptyState'
+import { InfoTip } from '../components/ui/InfoTip'
+import { alertLabel, alertMeaning } from '../lib/labels'
 
 function severityBadge(sev: string) {
   const cls = sev === 'warning' ? 'badge-yellow' : sev === 'critical' ? 'badge-red' : 'badge-blue'
@@ -8,7 +12,13 @@ function severityBadge(sev: string) {
 }
 
 function typeBadge(t: string) {
-  return <span className="badge badge-gray">{t.replace(/_/g, ' ')}</span>
+  const meaning = alertMeaning(t)
+  return (
+    <span className="badge badge-gray inline-flex items-center gap-1">
+      {alertLabel(t)}
+      {meaning && <InfoTip text={meaning} />}
+    </span>
+  )
 }
 
 function timeAgo(iso: string) {
@@ -49,21 +59,24 @@ export default function AlertsPage() {
 
   return (
     <div>
-      <div className="flex-between mb-2">
-        <h2>Alerts</h2>
-        <div className="flex gap-1">
-          <label style={{ fontSize: '0.875rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <input type="checkbox" checked={unreadOnly} onChange={e => { setUnreadOnly(e.target.checked); setPage(1) }} />
-            Unread only
-          </label>
-          <button onClick={markAllRead}>Mark all read</button>
-        </div>
-      </div>
+      <PageHeader
+        title="Alerts"
+        description="Things worth a look — someone going quiet, becoming active again, or two accounts behaving as one. Hover the (?) on any type for what it means."
+        actions={
+          <>
+            <label style={{ fontSize: '0.875rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input type="checkbox" checked={unreadOnly} onChange={e => { setUnreadOnly(e.target.checked); setPage(1) }} />
+              Unread only
+            </label>
+            <button onClick={markAllRead}>Mark all read</button>
+          </>
+        }
+      />
 
       {loading ? (
         <div className="empty-state">Loading...</div>
       ) : alerts.length === 0 ? (
-        <div className="empty-state">No alerts</div>
+        <EmptyState title="No alerts" description="Alerts about posting rhythm and coordinated behavior will show up here." />
       ) : (
         <>
           {alerts.map(a => (
