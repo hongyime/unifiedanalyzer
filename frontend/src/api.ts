@@ -38,8 +38,12 @@ export interface Entity {
 export interface ReviewCandidate {
   entity_a: string
   name_a: string | null
+  display_a: string
+  handles_a: string[]
   entity_b: string
   name_b: string | null
+  display_b: string
+  handles_b: string[]
   score: number | null
   cross_platform: boolean
   signals: { type: string; confidence: number }[]

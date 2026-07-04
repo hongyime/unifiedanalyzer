@@ -1,7 +1,7 @@
 import { Routes, Route, NavLink } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import {
-  Bell, Users, Network, Play, Activity, Images, Circle, ScanFace, ListChecks, FolderOpen,
+  Bell, Users, Network, Play, Images, ScanFace, ListChecks, FolderOpen, GitCompare,
 } from 'lucide-react'
 import TriagePage from './pages/Triage'
 import CasesPage from './pages/Cases'
@@ -10,7 +10,6 @@ import ReviewPage from './pages/Review'
 import EntitiesPage from './pages/Entities'
 import EntityDetailPage from './pages/EntityDetail'
 import RunsPage from './pages/Runs'
-import CollectorHealthPage from './pages/CollectorHealth'
 import CommunitiesPage from './pages/Communities'
 import MediaPage from './pages/Media'
 import FacesPage from './pages/Faces'
@@ -19,6 +18,7 @@ import { CommandPalette } from './components/CommandPalette'
 
 const NAV = [
   { to: '/', label: 'Triage', icon: ListChecks, end: true },
+  { to: '/review', label: 'Review', icon: GitCompare },
   { to: '/alerts', label: 'Alerts', icon: Bell },
   { to: '/entities', label: 'Entities', icon: Users },
   { to: '/communities', label: 'Communities', icon: Network },
@@ -26,7 +26,6 @@ const NAV = [
   { to: '/faces', label: 'Faces', icon: ScanFace },
   { to: '/cases', label: 'Cases', icon: FolderOpen },
   { to: '/runs', label: 'Runs', icon: Play },
-  { to: '/collectors', label: 'Collectors', icon: Activity },
 ]
 
 /** Subscribe to /ws/health, auto-reconnecting on drop. */
@@ -91,29 +90,6 @@ function App() {
                 {health.alert_count_unread > 0 && <> · {health.alert_count_unread} unread</>}
               </div>
               <div className="text-muted">{health.media_items_analyzed.toLocaleString()} media analyzed</div>
-              {health.sources.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {health.sources.map((s) => (
-                    <span
-                      key={s.source}
-                      title={`${s.source}: ${s.failed_24h} failed / ${s.items_24h} items (24h)`}
-                      className="flex items-center gap-1 rounded bg-bg px-1.5 py-0.5 text-[0.65rem] text-muted"
-                    >
-                      <Circle
-                        size={7}
-                        className={
-                          s.health === 'green'
-                            ? 'fill-green text-green'
-                            : s.health === 'amber'
-                            ? 'fill-amber text-amber'
-                            : 'fill-red text-red'
-                        }
-                      />
-                      {s.source}
-                    </span>
-                  ))}
-                </div>
-              )}
             </>
           ) : (
             <span className="text-muted">Connecting…</span>
@@ -133,7 +109,6 @@ function App() {
           <Route path="/faces" element={<FacesPage />} />
           <Route path="/cases" element={<CasesPage />} />
           <Route path="/runs" element={<RunsPage />} />
-          <Route path="/collectors" element={<CollectorHealthPage />} />
         </Routes>
       </main>
     </div>

@@ -147,17 +147,47 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
             ids.append(str(r["entity_b_id"]))
         rep = await representative_faces(conn, ids)
 
+        # Platform handles per entity — so a name-less entity shows WHO it is
+        # ("github:samho", "telegram:sam_ho") instead of a meaningless UUID, and
+        # the reviewer has real accounts to compare when deciding same/different.
+        handles: dict[str, list[str]] = {}
+        if ids:
+            link_rows = await conn.fetch("""
+                SELECT entity_id::text AS eid, source,
+                       -- username/name when present, else the platform_id (for
+                       -- WhatsApp that's the phone/JID — the actual identifier for
+                       -- an otherwise-nameless account).
+                       COALESCE(NULLIF(platform_username, ''), NULLIF(platform_name, ''), platform_id) AS handle
+                FROM entity_platform_links
+                WHERE entity_id = ANY($1::uuid[])
+                ORDER BY source
+            """, list(set(ids)))
+            for lr in link_rows:
+                label = f"{lr['source']}:{lr['handle']}" if lr["handle"] else lr["source"]
+                handles.setdefault(lr["eid"], [])
+                if label not in handles[lr["eid"]]:
+                    handles[lr["eid"]].append(label)
+
+    def _display(name, eid):
+        if name:
+            return name
+        hs = handles.get(eid, [])
+        return hs[0] if hs else eid[:8]
+
     candidates = []
     for r in rows:
         meta = _decode_meta(r["sources"])
+        a, b = str(r["entity_a_id"]), str(r["entity_b_id"])
         candidates.append({
-            "entity_a": str(r["entity_a_id"]), "name_a": r["name_a"],
-            "entity_b": str(r["entity_b_id"]), "name_b": r["name_b"],
+            "entity_a": a, "name_a": r["name_a"], "display_a": _display(r["name_a"], a),
+            "entity_b": b, "name_b": r["name_b"], "display_b": _display(r["name_b"], b),
+            "handles_a": handles.get(a, []),
+            "handles_b": handles.get(b, []),
             "score": meta.get("score"),
             "cross_platform": r["cross_platform"],
             "signals": meta.get("contributing_signals", []),
-            "face_a": face_crop_url(rep.get(str(r["entity_a_id"]))),
-            "face_b": face_crop_url(rep.get(str(r["entity_b_id"]))),
+            "face_a": face_crop_url(rep.get(a)),
+            "face_b": face_crop_url(rep.get(b)),
         })
     return {"candidates": candidates, "total": len(candidates)}
 

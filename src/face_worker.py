@@ -414,6 +414,12 @@ def ingest_drive_media(limit: int = 200) -> dict:
                         sess.commit()
                         stats["images_indexed"] += 1
                         done.add(record.path)
+                        # Drive originals keep EXIF that social media strips —
+                        # capture GPS + camera serial so the analyzer can emit
+                        # media_gps_colocation / media_device_match for faces on
+                        # this image that are bridged to an entity.
+                        if _store_drive_exif(analyzer_engine, record.path, path_hash):
+                            stats["with_exif"] = stats.get("with_exif", 0) + 1
                     except Exception:
                         sess.rollback()
                         logger.exception("drive ingest failed for %s", record.path)
@@ -424,6 +430,47 @@ def ingest_drive_media(limit: int = 200) -> dict:
         analyzer_engine.dispose()
 
     return stats
+
+
+def _store_drive_exif(analyzer_engine, file_path: str, path_hash: str) -> bool:
+    """Extract EXIF GPS + camera-serial device fingerprint from a drive image and
+    upsert a media_analysis row (source='drive', media_item_id=path_hash) so the
+    analyzer can attribute it to an entity via the face bridge and emit signals.
+    Only writes when there's actually GPS or a device serial (most stripped social
+    re-saves have neither — no point bloating the table). Returns True if written.
+
+    Reuses the analyzer's EXIF parser (_extract_exif_gps) so parsing stays single-
+    source. Writes via the face_worker's SQLAlchemy engine into public.media_analysis.
+    """
+    from pathlib import Path as _Path
+    from sqlalchemy import text
+    import json as _json
+    try:
+        from src.pipeline.media_analysis import _extract_exif_gps
+        lat, lon, taken_at, device = _extract_exif_gps(_Path(file_path))
+    except Exception:
+        logger.debug("drive EXIF read failed for %s", file_path, exc_info=True)
+        return False
+    if lat is None and lon is None and not device:
+        return False
+    rj = _json.dumps({"device": device}) if device else None
+    try:
+        with analyzer_engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO public.media_analysis
+                    (media_item_id, source, content_type, analysis_type,
+                     gps_lat, gps_lon, taken_at, result_json, model_version, processed_at)
+                VALUES (:mid, 'drive', 'image', 'exif_gps',
+                        :lat, :lon, :taken, CAST(:rj AS jsonb), 'pillow-exif-v2', NOW())
+                ON CONFLICT (media_item_id, analysis_type) DO UPDATE SET
+                    gps_lat = EXCLUDED.gps_lat, gps_lon = EXCLUDED.gps_lon,
+                    taken_at = EXCLUDED.taken_at, result_json = EXCLUDED.result_json,
+                    model_version = EXCLUDED.model_version, processed_at = NOW()
+            """), {"mid": path_hash, "lat": lat, "lon": lon, "taken": taken_at, "rj": rj})
+        return True
+    except Exception:
+        logger.debug("drive EXIF store failed for %s", file_path, exc_info=True)
+        return False
 
 
 def relink_entity_faces(limit: int | None = None) -> dict:

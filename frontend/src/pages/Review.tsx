@@ -52,9 +52,16 @@ export default function ReviewPage() {
                 <FaceAvatar url={c.face_b} name={c.name_b} size={44} />
                 <div style={{ marginLeft: '0.5rem' }}>
                   <div style={{ fontWeight: 500 }}>
-                    <Link to={`/entities/${c.entity_a}`}>{c.name_a || c.entity_a.slice(0, 8)}</Link>
+                    <Link to={`/entities/${c.entity_a}`} title="Open entity to compare">{c.display_a}</Link>
                     {' '}&harr;{' '}
-                    <Link to={`/entities/${c.entity_b}`}>{c.name_b || c.entity_b.slice(0, 8)}</Link>
+                    <Link to={`/entities/${c.entity_b}`} title="Open entity to compare">{c.display_b}</Link>
+                  </div>
+                  {/* Platform accounts on each side — so you can actually tell who
+                      these are (and compare) when there's no canonical name. */}
+                  <div className="text-xs text-muted" style={{ marginTop: 2 }}>
+                    <span>{c.handles_a.length ? c.handles_a.join(', ') : '—'}</span>
+                    {'  vs  '}
+                    <span>{c.handles_b.length ? c.handles_b.join(', ') : '—'}</span>
                   </div>
                   <div className="text-sm text-muted">
                     {Math.round((c.score ?? 0) * 100)}% · {c.cross_platform ? 'cross-platform' : 'same-platform'}

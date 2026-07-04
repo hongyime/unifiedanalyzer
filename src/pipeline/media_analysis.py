@@ -163,12 +163,84 @@ async def analyze_media_exif(limit: int | None = None) -> dict:
     await upsert_media_analysis(rows)
     stats["processed"] = len(rows)
 
-    # Idle-cycle skip: no new EXIF rows -> clusters unchanged (CPU saver).
+    # Idle-cycle skip: no new EXIF rows -> collector clusters unchanged (CPU saver).
     if stats["processed"]:
         stats["media_gps_colocation_signals"] = await _build_gps_colocation_signals()
         stats["media_device_match_signals"] = await _build_device_match_signals()
+    # Drive-original EXIF (written by face_worker) is attributed to entities via
+    # the face bridge, which grows independently of new collector EXIF, so rebuild
+    # these every pass.
+    stats["drive_exif_signals"] = await _build_drive_exif_signals()
     logger.info("6A EXIF GPS: %s", stats)
     return stats
+
+
+async def _build_drive_exif_signals() -> int:
+    """P2-7/drive: emit media_device_match + media_gps_colocation from DRIVE-origin
+    images (source='drive'), attributed to entities through the face bridge
+    (facetracker.images.file_hash = media_item_id -> faces -> public.entity_faces).
+    Drive originals keep the EXIF (camera serial, GPS) that social platforms strip,
+    so this is where those two signals actually earn their keep. Fan-out filtered
+    (exactly 2 distinct entities) like the collector builders. Signals are tagged
+    source_platform='drive' so this builder can rebuild them idempotently."""
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ma.media_item_id, ma.gps_lat, ma.gps_lon,
+                   ma.result_json -> 'device' AS device, ef.entity_id::text AS eid
+            FROM media_analysis ma
+            JOIN facetracker.images i ON i.file_hash = ma.media_item_id
+            JOIN facetracker.faces f ON f.image_id = i.id
+            JOIN public.entity_faces ef ON ef.face_id = f.id
+            WHERE ma.source = 'drive' AND ma.analysis_type = 'exif_gps'
+              AND ef.entity_id IS NOT NULL
+        """)
+
+    device_buckets: dict[str, set] = defaultdict(set)   # serial fp -> {(eid, mid)}
+    gps_buckets: dict[tuple, set] = defaultdict(set)     # (lat,lon) -> {(eid, mid)}
+    for r in rows:
+        eid = r["eid"]
+        dev = r["device"]
+        if dev:
+            dev = dev if isinstance(dev, dict) else json.loads(dev)
+            serial = dev.get("body_serial") or dev.get("lens_serial")
+            if serial:
+                fp = "|".join(str(dev.get(k) or "") for k in ("make", "model", "body_serial", "lens_serial"))
+                device_buckets[fp].add((eid, r["media_item_id"]))
+        if r["gps_lat"] is not None and r["gps_lon"] is not None:
+            cluster = (round(r["gps_lat"], _GPS_CLUSTER_PRECISION), round(r["gps_lon"], _GPS_CLUSTER_PRECISION))
+            gps_buckets[cluster].add((eid, r["media_item_id"]))
+
+    new_signals: list[tuple] = []
+
+    def _emit(buckets, sig_type, col, value_fn):
+        for key, entries in buckets.items():
+            ents = {e for e, _ in entries}
+            if len(ents) != 2:
+                continue  # fan-out filter: a shared camera/place across >2 = suspect
+            a, b = sorted(ents)
+            a_mid = next(m for e, m in entries if e == a)
+            new_signals.append((
+                a, sig_type, "drive", "media_items", col, a_mid,
+                "drive", b, value_fn(key), 0.6,
+            ))
+
+    _emit(device_buckets, "media_device_match", "exif_device", lambda fp: fp)
+    _emit(gps_buckets, "media_gps_colocation", "exif_gps", lambda c: f"{c[0]},{c[1]}")
+
+    async with analyzer.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM identity_signals WHERE signal_type IN "
+            "('media_device_match','media_gps_colocation') AND source_platform = 'drive'"
+        )
+        if new_signals:
+            await conn.executemany("""
+                INSERT INTO identity_signals
+                    (entity_id, signal_type, source_platform, source_table, source_column,
+                     source_record_id, target_platform, target_record_id, value, confidence)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """, new_signals)
+    return len(new_signals)
 
 
 async def backfill_exif_device(limit: int = 500) -> dict:
