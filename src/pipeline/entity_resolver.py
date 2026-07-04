@@ -266,33 +266,39 @@ async def load_profile_photo_hashes() -> dict[str, list[tuple[str, str]]]:
     return result
 
 
-def compute_confidence(signals: list[SignalMatch]) -> tuple[float, int]:
-    """Compute confidence score and independent signal count.
+# Linking-rework (identity link quality): classify the resolver's own signals by
+# strength. STRONG signals are hard identifiers; VERIFIED ones are near-certain
+# same-person on their own (a shared verified phone / email / commit email /
+# identical profile photo). real_name_fuzzy is intentionally NOT strong — a shared
+# name is weak and was the source of the "b"-telegram over-linking.
+STRONG_SIGNAL_TYPES = {
+    "username_exact", "whatsapp_phone", "commit_email",
+    "email_match", "phone_match", "profile_photo_sha256", "media_face_match",
+}
+VERIFIED_SIGNAL_TYPES = {
+    "whatsapp_phone", "commit_email", "email_match", "phone_match", "profile_photo_sha256",
+}
 
-    P0-2 (identity_system_review_plan.md): independence is counted as the number
-    of distinct *signal_type* kinds, NOT distinct (signal_type, source_platform)
-    pairs. The old pair-based count was gameable by a single coincidence: one
-    shared username across N platforms expands (Phase 1) into N pairwise
-    `username_exact` rows with different source_platform values, which the old
-    logic counted as N>=2 "independent" signals — so a lone handle collision
-    (the classic "John Smith" false-merge) satisfied MIN_SIGNALS on its own. The
-    same held for a single shared real name fanned out pairwise. Counting distinct
-    kinds means "2 independent" now genuinely requires two different TYPES of
-    evidence (e.g. a username match AND a name/phone/email/photo match), which is
-    the safe direction for a merge guard (errs toward not-confirmed).
 
-    NOTE: is_confirmed remains a label on the link, not a gate on entity
-    formation — tightening it into a hard gate is a separate, larger decision.
+def compute_confidence(signals: list[SignalMatch]) -> tuple[float, int, bool]:
+    """Return (normalized_confidence, independent_strong_count, is_confirmed).
+
+    A link is auto-CONFIRMED only when the evidence is genuinely strong:
+      - two or more independent STRONG signal *types* (e.g. username + commit email), OR
+      - at least one VERIFIED signal (a shared phone / email / commit email / identical
+        profile photo — near-certain same person on its own).
+    A lone username match, or anything resting on real_name_fuzzy, stays a
+    *candidate* (surfaced for human review, not auto-confirmed) — which is what
+    stops generic names like "b" from silently confirming a merge.
     """
-    score = 0.0
-    for s in signals:
-        score += s.confidence
-
-    independent = {s.signal_type for s in signals}
+    score = sum(s.confidence for s in signals)
+    strong_types = {s.signal_type for s in signals if s.signal_type in STRONG_SIGNAL_TYPES}
+    has_verified = any(t in VERIFIED_SIGNAL_TYPES for t in strong_types)
 
     max_possible = 195.0
     normalized = min(score / max_possible, 1.0) if max_possible > 0 else 0.0
-    return normalized, len(independent)
+    is_confirmed = len(strong_types) >= 2 or has_verified
+    return normalized, len(strong_types), is_confirmed
 
 
 async def resolve_entities() -> dict:
@@ -446,6 +452,10 @@ async def resolve_entities() -> dict:
                 continue
             if not p1.name or not p2.name:
                 continue
+            # A shared name only counts toward a merge if it's a distinctive full
+            # name — never a generic "b"/"mike" (see name_is_distinctive).
+            if not (name_is_distinctive(p1.name) and name_is_distinctive(p2.name)):
+                continue
             score = fuzz.token_sort_ratio(p1.name, p2.name)
             if score >= NAME_FUZZY_MIN_SCORE:
                 # Name alone is insufficient — check for a second signal type
@@ -569,9 +579,12 @@ async def resolve_entities() -> dict:
         resolved: list[tuple] = []
         seen_entity_ids: set = set()
         for candidate in entities:
-            confidence, independent_count = compute_confidence(candidate.signals)
-            is_confirmed = confidence >= CONFIDENCE_THRESHOLD and independent_count >= MIN_SIGNALS
+            confidence, independent_count, is_confirmed = compute_confidence(candidate.signals)
 
+            # Canonical name, best-first: a proper Strava name, then a distinctive
+            # full name, then a username handle (a real "bryanseah234" beats a
+            # 1-char nickname like "b"), then any name, then a source:handle
+            # fallback so an account with nothing still isn't "(unnamed)".
             canonical = None
             for p in candidate.profiles:
                 if p.source == "strava" and p.name:
@@ -579,7 +592,7 @@ async def resolve_entities() -> dict:
                     break
             if not canonical:
                 for p in candidate.profiles:
-                    if p.name:
+                    if p.name and name_is_distinctive(p.name):
                         canonical = p.name
                         break
             if not canonical:
@@ -587,6 +600,14 @@ async def resolve_entities() -> dict:
                     if p.username:
                         canonical = p.username
                         break
+            if not canonical:
+                for p in candidate.profiles:
+                    if p.name:
+                        canonical = p.name
+                        break
+            if not canonical and candidate.profiles:
+                p = candidate.profiles[0]
+                canonical = f"{p.source}:{p.username or p.platform_id}"
 
             entity_id = None
             for p in candidate.profiles:
@@ -669,6 +690,31 @@ async def resolve_entities() -> dict:
                     updated_at = NOW()
             """, eids, sources, pids, usernames, names, confs, confirmed)
             stats["links"] = len(eids)
+
+        # Stale-link cleanup (linking-rework): remove AUTO links for accounts that
+        # WERE loaded this run but are no longer clustered into any person — e.g.
+        # the frozen "b" telegram accounts linked by old, looser name matching.
+        # Guards:
+        #   - only accounts present in THIS run's loaded profiles are eligible, so
+        #     a source that failed to load (absent from loaded_keys) can never have
+        #     its links wiped;
+        #   - only link_method='auto' rows — manual splits/merges are user
+        #     decisions and are never auto-deleted.
+        loaded_keys = {(p.source, p.platform_id) for p in all_profiles}
+        loaded_keys |= {(p.source, p.platform_id) for p in no_username_profiles}
+        persisted_keys = set(zip(sources, pids))
+        stale = [k for k in loaded_keys if k not in persisted_keys]
+        if stale:
+            del_sources = [s for s, _ in stale]
+            del_pids = [pid for _, pid in stale]
+            deleted = await conn.execute("""
+                DELETE FROM entity_platform_links epl
+                USING UNNEST($1::text[], $2::text[]) AS t(source, platform_id)
+                WHERE epl.source = t.source AND epl.platform_id = t.platform_id
+                  AND epl.link_method = 'auto'
+            """, del_sources, del_pids)
+            if deleted and deleted != "DELETE 0":
+                logger.info("Stale-link cleanup: %s (accounts no longer clustered)", deleted)
 
         # Single DELETE for all signals, then batch INSERT
         all_eids = [eid for _, eid, *_ in resolved]
