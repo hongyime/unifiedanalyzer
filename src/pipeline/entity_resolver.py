@@ -18,6 +18,10 @@ NAME_FUZZY_MIN_SCORE = 85
 NAME_FUZZY_MIN_SCORE_NAME_ONLY = 90
 MIN_NAME_TOKENS = 2
 MIN_NAME_LENGTH = 5
+# A normalized username shared by more than this many accounts is treated as a
+# COMMON handle (likely different people), so it clusters as weak evidence
+# (username_similar) rather than a strong auto-confirming username_exact.
+COMMON_USERNAME_ACCOUNTS = 10
 CONFIDENCE_THRESHOLD = 0.85
 MIN_SIGNALS = 2
 
@@ -283,21 +287,23 @@ VERIFIED_SIGNAL_TYPES = {
 def compute_confidence(signals: list[SignalMatch]) -> tuple[float, int, bool]:
     """Return (normalized_confidence, independent_strong_count, is_confirmed).
 
-    A link is auto-CONFIRMED only when the evidence is genuinely strong:
-      - two or more independent STRONG signal *types* (e.g. username + commit email), OR
-      - at least one VERIFIED signal (a shared phone / email / commit email / identical
-        profile photo — near-certain same person on its own).
-    A lone username match, or anything resting on real_name_fuzzy, stays a
-    *candidate* (surfaced for human review, not auto-confirmed) — which is what
-    stops generic names like "b" from silently confirming a merge.
+    A link is auto-CONFIRMED when it rests on at least one genuinely STRONG
+    signal — an EXACT match on a rare username, or a VERIFIED identifier (shared
+    phone / email / commit email / identical profile photo). These are now gated
+    to actually be strong: username_exact is only emitted for identical, non-common
+    handles; a match that survives only after digit/punctuation stripping, a common
+    handle, or a fuzzy name is WEAK (username_similar / real_name_fuzzy) and is NOT
+    counted here — so those rest as *candidates* for human review rather than
+    silently auto-confirming (e.g. "b", or "mike" vs "mike123"). Requiring TWO
+    strong signals was too strict in practice (a rare exact handle across platforms
+    is already trustworthy and is most entities' only evidence).
     """
     score = sum(s.confidence for s in signals)
     strong_types = {s.signal_type for s in signals if s.signal_type in STRONG_SIGNAL_TYPES}
-    has_verified = any(t in VERIFIED_SIGNAL_TYPES for t in strong_types)
 
     max_possible = 195.0
     normalized = min(score / max_possible, 1.0) if max_possible > 0 else 0.0
-    is_confirmed = len(strong_types) >= 2 or has_verified
+    is_confirmed = len(strong_types) >= 1
     return normalized, len(strong_types), is_confirmed
 
 
@@ -352,18 +358,32 @@ async def resolve_entities() -> dict:
         for p in relevant:
             platforms_seen.add(p.source)
 
+        # A normalized username shared by an implausible number of accounts is a
+        # COMMON handle (different people), not one person on many platforms.
+        is_common_handle = len(group) > COMMON_USERNAME_ACCOUNTS
+
         if len(platforms_seen) >= 2:
             for i, p1 in enumerate(relevant):
                 for p2 in relevant[i + 1:]:
                     if p1.source != p2.source:
+                        # STRONG only when the raw handles are identical AND the
+                        # handle isn't common. A match that survives only after
+                        # digit/punctuation stripping (e.g. "bryanseah" ~
+                        # "bryanseah234"), or a common handle, is WEAK evidence —
+                        # username_similar needs corroboration to auto-confirm.
+                        exact = bool(
+                            p1.username and p2.username
+                            and p1.username.lower() == p2.username.lower()
+                        )
+                        strong = exact and not is_common_handle
                         candidate.signals.append(SignalMatch(
-                            signal_type="username_exact",
+                            signal_type="username_exact" if strong else "username_similar",
                             source_platform=p1.source,
                             target_platform=p2.source,
                             source_record_id=p1.platform_id,
                             target_record_id=p2.platform_id,
                             value=norm_user,
-                            confidence=20.0,
+                            confidence=20.0 if strong else 8.0,
                         ))
 
         entities.append(candidate)
@@ -580,6 +600,12 @@ async def resolve_entities() -> dict:
         seen_entity_ids: set = set()
         for candidate in entities:
             confidence, independent_count, is_confirmed = compute_confidence(candidate.signals)
+            # A single-account entity has no merge to doubt — the account is
+            # trivially its own person, so it's confirmed. "Candidate" is reserved
+            # for MULTI-account merges resting only on weak evidence
+            # (username_similar / real_name_fuzzy), which is what a human reviews.
+            if len(candidate.profiles) <= 1:
+                is_confirmed = True
 
             # Canonical name, best-first: a proper Strava name, then a distinctive
             # full name, then a username handle (a real "bryanseah234" beats a
