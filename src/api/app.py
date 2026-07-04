@@ -102,7 +102,29 @@ async def shutdown():
     await close_pools()
 
 
-# Serve frontend build if it exists
+# Serve the frontend build (single-page app). Static assets are served directly;
+# any OTHER GET path falls back to index.html so client-side routes (/help,
+# /entities/…, /review) work on refresh / deep-link instead of 404ing (the old
+# StaticFiles(html=True) mount only served index.html for "/"). API routers and
+# the /api/face + /assets mounts are all registered ABOVE, so they take
+# precedence over this fallback.
 frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
 if frontend_dist.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+
+    _assets_dir = frontend_dist / "assets"
+    if _assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
+    _index_html = frontend_dist / "index.html"
+
+    @app.get("/{full_path:path}")
+    async def _spa_fallback(full_path: str):
+        # Never mask API/websocket paths with the HTML shell.
+        if full_path.startswith(("api/", "ws/")):
+            raise HTTPException(status_code=404, detail="Not found")
+        # A real file (favicon.svg, etc.) → serve it; otherwise the SPA shell.
+        candidate = frontend_dist / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(str(candidate))
+        return FileResponse(str(_index_html))
