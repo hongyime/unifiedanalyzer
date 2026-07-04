@@ -7,6 +7,21 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { Confidence } from '../components/ui/Confidence'
 import { signalLabel } from '../lib/labels'
 
+/** Platform accounts to show UNDER the identity line, without repeating it.
+ *  - Drops a handle identical to the shown name/id (the name-less case).
+ *  - Collapses "whatsapp:Jane Doe" → "whatsapp" when the id just repeats the name. */
+function extraHandles(name: string | null, handles: string[], display: string): string[] {
+  const out: string[] = []
+  for (const h of handles) {
+    if (h === display) continue
+    const idx = h.indexOf(':')
+    const src = idx === -1 ? h : h.slice(0, idx)
+    const id = idx === -1 ? '' : h.slice(idx + 1)
+    out.push(name && id === name ? src : h)
+  }
+  return [...new Set(out)]
+}
+
 /**
  * Review queue — the triage home for identity resolution. Lists global
  * same-person merge candidates (highest confidence first) with both faces side
@@ -57,19 +72,24 @@ export default function ReviewPage() {
               <div className="flex gap-1" style={{ alignItems: 'center' }}>
                 <FaceAvatar url={c.face_a} name={c.name_a} size={44} />
                 <FaceAvatar url={c.face_b} name={c.name_b} size={44} />
-                <div style={{ marginLeft: '0.5rem' }}>
-                  <div style={{ fontWeight: 500 }}>
-                    <Link to={`/entities/${c.entity_a}`} title="Open entity to compare">{c.display_a}</Link>
+                <div className="min-w-0" style={{ marginLeft: '0.5rem' }}>
+                  <div className="font-medium">
+                    <Link to={`/entities/${c.entity_a}`} title="Open to compare">{c.display_a}</Link>
                     {' '}&harr;{' '}
-                    <Link to={`/entities/${c.entity_b}`} title="Open entity to compare">{c.display_b}</Link>
+                    <Link to={`/entities/${c.entity_b}`} title="Open to compare">{c.display_b}</Link>
                   </div>
-                  {/* Platform accounts on each side — so you can actually tell who
-                      these are (and compare) when there's no canonical name. */}
-                  <div className="text-xs text-muted" style={{ marginTop: 2 }}>
-                    <span>{c.handles_a.length ? c.handles_a.join(', ') : '—'}</span>
-                    {'  vs  '}
-                    <span>{c.handles_b.length ? c.handles_b.join(', ') : '—'}</span>
-                  </div>
+                  {/* Extra platform accounts, only when they add info beyond the
+                      name/id shown above (no pointless repeat of "whatsapp:<name>"). */}
+                  {(() => {
+                    const exA = extraHandles(c.name_a, c.handles_a, c.display_a)
+                    const exB = extraHandles(c.name_b, c.handles_b, c.display_b)
+                    if (!exA.length && !exB.length) return null
+                    return (
+                      <div className="mt-0.5 text-xs text-text-muted">
+                        {[exA.join(', '), exB.join(', ')].filter(Boolean).join('  ·  ')}
+                      </div>
+                    )
+                  })()}
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-text-muted">
                     <Confidence score={c.score} />
                     <span>· {c.cross_platform ? 'different platforms' : 'same platform'}</span>
@@ -79,8 +99,8 @@ export default function ReviewPage() {
                   </div>
                 </div>
               </div>
-              <div className="flex gap-1">
-                <button onClick={() => confirm(c)}>Same &rarr; merge</button>
+              <div className="flex shrink-0 gap-1">
+                <button className="primary" onClick={() => confirm(c)}>Same person</button>
                 <button onClick={() => dismiss(c)} style={{ borderColor: 'var(--color-orange)', color: 'var(--color-orange)' }}>
                   Not same
                 </button>

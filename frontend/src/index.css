@@ -80,8 +80,8 @@ tr:hover td { background: var(--color-hover); }
 button { padding: 0.45rem 0.9rem; border-radius: 6px; border: 1px solid var(--color-border); background: transparent; color: var(--color-text-primary); cursor: pointer; font-size: 0.875rem; font-weight: 500; transition: background-color 0.15s, color 0.15s; }
 button:hover { background: rgba(255,255,255,0.08); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-button.primary { background: #ffffff; border-color: #ffffff; color: #000000; }
-button.primary:hover { background: rgba(255,255,255,0.9); }
+button.primary { background: var(--color-info); border-color: var(--color-info); color: #ffffff; }
+button.primary:hover { background: var(--color-accent-hover); border-color: var(--color-accent-hover); }
 input[type="text"], input[type="search"] { padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-text-primary); font-size: 0.875rem; }
 select { padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-text-primary); font-size: 0.875rem; }
 .flex { display: flex; }
