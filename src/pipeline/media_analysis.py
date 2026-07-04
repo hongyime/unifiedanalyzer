@@ -171,6 +171,74 @@ async def analyze_media_exif(limit: int | None = None) -> dict:
     return stats
 
 
+async def backfill_exif_device(limit: int = 500) -> dict:
+    """P2-7 retroactive: re-read EXIF from disk for already-processed (v1) images
+    that have no device fingerprint yet, add it to result_json, and rebuild the
+    media_device_match signal. Bounded per call for resumable trickling.
+
+    NOTE: on a corpus of social-media images (EXIF largely stripped) the yield is
+    ~0 — worth running mainly once drive-original media (which keeps EXIF) flows
+    through this pipeline. Reads pixels/metadata from disk, so needs the media
+    drive mounted (_drive_available)."""
+    stats = {"scanned": 0, "updated": 0, "with_device": 0}
+    if not _drive_available():
+        return {**stats, "skipped": "drive_unavailable"}
+
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT media_item_id, source, content_type
+            FROM media_analysis
+            WHERE analysis_type = 'exif_gps'
+              AND (result_json -> 'device') IS NULL
+              AND model_version <> 'pillow-exif-v2'
+            LIMIT $1
+        """, limit)
+    if not rows:
+        return {**stats, "done": True}
+
+    # Resolve file paths for these media items from the collector DB.
+    ids = [r["media_item_id"] for r in rows]
+    paths = await _fetch_media_paths(ids)
+
+    out_rows = []
+    for r in rows:
+        stats["scanned"] += 1
+        fp = paths.get(r["media_item_id"])
+        disk = resolve_media_path(fp) if fp else None
+        if disk is None:
+            continue
+        lat, lon, taken_at, device = _extract_exif_gps(disk)
+        if device:
+            stats["with_device"] += 1
+        out_rows.append({
+            "media_item_id": r["media_item_id"], "source": r["source"],
+            "content_type": r["content_type"], "analysis_type": "exif_gps",
+            "gps_lat": lat, "gps_lon": lon, "taken_at": taken_at,
+            "result_json": {"device": device} if device else None,
+            "model_version": "pillow-exif-v2",
+        })
+    if out_rows:
+        await upsert_media_analysis(out_rows)
+        stats["updated"] = len(out_rows)
+        stats["media_device_match_signals"] = await _build_device_match_signals()
+    return stats
+
+
+async def _fetch_media_paths(media_item_ids: list[str]) -> dict[str, str]:
+    """{media_item_id: file_path} from the collector DB for the given ids."""
+    from src.db.connection import get_collector_pool
+    if not media_item_ids:
+        return {}
+    collector = get_collector_pool()
+    async with collector.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id::text AS id, file_path FROM media_items WHERE id = ANY($1::uuid[])",
+            media_item_ids,
+        )
+    return {r["id"]: r["file_path"] for r in rows if r["file_path"]}
+
+
 async def _build_device_match_signals() -> int:
     """P2-7: emit `media_device_match` when two DIFFERENT entities have media from
     the same physical camera (identical body/lens serial). Fan-out filtered

@@ -7,6 +7,14 @@ logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 5000
 
+# Bogus-timestamp floor. Source records occasionally carry epoch-0 (1970) or
+# clock-error dates (e.g. GitHub commits with a misconfigured author clock dated
+# 1985). Git itself dates to 2005, and this dataset has no legitimate pre-2005
+# activity, so events before this are dropped rather than persisted — otherwise
+# they land as permanent 1970/198x noise in the timeline (and its partition
+# default). Deterministic, so it never removes a legit event.
+TIMELINE_MIN_DATE = datetime(2005, 1, 1, tzinfo=timezone.utc)
+
 PLATFORM_QUERIES = [
     {
         "source": "github",
@@ -154,9 +162,50 @@ async def _get_entity_lookup() -> dict[tuple[str, str], str]:
     return lookup
 
 
+async def ensure_timeline_partitions(months_ahead: int = 6) -> None:
+    """P2-5 maintenance: guarantee a monthly partition exists for the current
+    month and the next `months_ahead`, so newly-built events never silently fall
+    into the DEFAULT partition. No-op when timeline_events isn't partitioned
+    (fresh/pre-migration installs). Idempotent and cheap (catalog lookups)."""
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        is_part = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM pg_partitioned_table pt
+                JOIN pg_class c ON c.oid = pt.partrelid
+                WHERE c.relname = 'timeline_events'
+            )
+        """)
+        if not is_part:
+            return
+        base = datetime.now(timezone.utc)
+        for i in range(months_ahead + 1):
+            y = base.year + (base.month - 1 + i) // 12
+            mo = (base.month - 1 + i) % 12 + 1
+            ny, nmo = (y + 1, 1) if mo == 12 else (y, mo + 1)
+            name = f"timeline_events_{y:04d}_{mo:02d}"
+            if await conn.fetchval("SELECT to_regclass($1)", f"public.{name}") is not None:
+                continue
+            try:
+                await conn.execute(
+                    f"CREATE TABLE {name} PARTITION OF timeline_events "
+                    f"FOR VALUES FROM ('{y:04d}-{mo:02d}-01') TO ('{ny:04d}-{nmo:02d}-01')"
+                )
+                logger.info("Created timeline partition %s", name)
+            except Exception:
+                # e.g. a stray out-of-range row already sits in DEFAULT for this
+                # month — non-fatal; the row stays in default, new ones still work.
+                logger.debug("Could not create partition %s (non-fatal)", name, exc_info=True)
+
+
 async def build_timeline(since: datetime | None = None) -> dict:
     collector = get_collector_pool()
     analyzer = get_analyzer_pool()
+    # Keep upcoming monthly partitions provisioned before inserting.
+    try:
+        await ensure_timeline_partitions()
+    except Exception:
+        logger.debug("ensure_timeline_partitions failed (non-fatal)", exc_info=True)
     entity_lookup = await _get_entity_lookup()
 
     stats = {"total": 0, "inserted": 0, "skipped_tables": []}
@@ -191,6 +240,10 @@ async def build_timeline(since: datetime | None = None) -> dict:
                         occurred_at = row["occurred_at"]
                         if occurred_at and not occurred_at.tzinfo:
                             occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+                        # Skip null/bogus timestamps so they don't regenerate as
+                        # 1970/198x timeline noise (see TIMELINE_MIN_DATE).
+                        if not occurred_at or occurred_at < TIMELINE_MIN_DATE:
+                            continue
 
                         batch.append((
                             entity_id,
