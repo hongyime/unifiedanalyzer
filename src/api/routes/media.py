@@ -232,7 +232,7 @@ async def _resolve_thumbnail_path(analysis_id: str):
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT media_item_id, parent_media_item_id, result_json "
+            "SELECT media_item_id, parent_media_item_id, content_type, result_json "
             "FROM media_analysis WHERE id = $1::uuid",
             analysis_id,
         )
@@ -245,6 +245,24 @@ async def _resolve_thumbnail_path(analysis_id: str):
             return resolve_media_path(derived)
 
         media_item_id = row["media_item_id"]
+
+        # Case 1b: a pdf_embedded_image MARKER row (content_type='pdf') has no
+        # image of its own — its media_item_id is the parent PDF, which is often
+        # absent once collector source media is pruned. Prefer one of the PDF's
+        # already-extracted embedded images (child pdf_image rows) that still
+        # exists on disk; only fall back to rendering the PDF itself (Case 3) if
+        # none survive.
+        if row["content_type"] == "pdf":
+            children = await conn.fetch(
+                "SELECT result_json->>'derived_path' AS dp FROM media_analysis "
+                "WHERE parent_media_item_id = $1 AND analysis_type = 'pdf_image' "
+                "AND result_json ? 'derived_path' LIMIT 25",
+                media_item_id,
+            )
+            for ch in children:
+                p = resolve_media_path(ch["dp"])
+                if p is not None:
+                    return p
 
         # Case 2: synthetic id without its own derived_path — borrow the
         # sibling row's (the pdf_image/video_frame that produced the artifact).
@@ -266,11 +284,38 @@ async def _resolve_thumbnail_path(analysis_id: str):
     return resolve_media_path(file_path)
 
 
+def _render_pdf_first_page(path: Path) -> bytes | None:
+    """Rasterize a PDF's first page to a JPEG thumbnail via PyMuPDF. Pillow can't
+    open PDFs, so pdf_embedded_image marker rows (and any pdf content_type row)
+    resolve to the parent PDF file and land here — previously they 404'd with no
+    preview at all."""
+    try:
+        import fitz
+        from PIL import Image
+        with fitz.open(str(path)) as doc:
+            if doc.page_count == 0:
+                return None
+            page = doc.load_page(0)
+            longest = max(page.rect.width, page.rect.height) or 1.0
+            scale = min(_THUMB_MAX / longest, 4.0)  # cap upscale of tiny pages
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        buf = io.BytesIO()
+        im.thumbnail((_THUMB_MAX, _THUMB_MAX))
+        im.save(buf, format="JPEG", quality=82)
+        return buf.getvalue()
+    except Exception as e:  # noqa: BLE001 — unreadable/encrypted/corrupt PDF
+        logger.debug("pdf first-page render failed for %s: %s", path, e)
+        return None
+
+
 def _render_thumbnail(path: Path) -> bytes | None:
     """Open `path`, downscale, return JPEG bytes. Synchronous (Pillow blocks);
     callers run it in a worker thread. Returns None for unreadable/non-image
     files. Pillow imported lazily so processes that never serve a thumbnail
     don't pay the import cost."""
+    if path.suffix.lower() == ".pdf":
+        return _render_pdf_first_page(path)
     try:
         from PIL import Image, ImageOps
     except ImportError:

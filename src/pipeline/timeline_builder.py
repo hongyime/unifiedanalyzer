@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.db.connection import get_analyzer_pool, get_collector_pool
 
@@ -14,6 +14,10 @@ BATCH_SIZE = 5000
 # they land as permanent 1970/198x noise in the timeline (and its partition
 # default). Deterministic, so it never removes a legit event.
 TIMELINE_MIN_DATE = datetime(2005, 1, 1, tzinfo=timezone.utc)
+# Future ceiling: an event can't legitimately be more than a small clock-skew
+# margin into the future. Records dated years ahead (seen up to 2042) are clock
+# errors — drop them too rather than seed far-future partition noise.
+TIMELINE_MAX_FUTURE = timedelta(days=366)
 
 PLATFORM_QUERIES = [
     {
@@ -241,8 +245,10 @@ async def build_timeline(since: datetime | None = None) -> dict:
                         if occurred_at and not occurred_at.tzinfo:
                             occurred_at = occurred_at.replace(tzinfo=timezone.utc)
                         # Skip null/bogus timestamps so they don't regenerate as
-                        # 1970/198x timeline noise (see TIMELINE_MIN_DATE).
+                        # 1970/198x (or far-future) timeline noise.
                         if not occurred_at or occurred_at < TIMELINE_MIN_DATE:
+                            continue
+                        if occurred_at > datetime.now(timezone.utc) + TIMELINE_MAX_FUTURE:
                             continue
 
                         batch.append((

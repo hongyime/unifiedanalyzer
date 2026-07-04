@@ -83,8 +83,14 @@ async def apply_schema() -> None:
     schema_path = Path(__file__).parent / "schema.sql"
     sql = schema_path.read_text(encoding="utf-8")
     pool = get_analyzer_pool()
+    # Schema DDL can include a large index build (e.g. a unique index on a
+    # multi-million-row table) that far exceeds the pool's default command_timeout
+    # (300s). Cancelling mid-build rolls it back and — on a restart-loop — never
+    # completes, which previously crash-looped the API. Give schema application a
+    # generous per-call timeout so heavy CREATE INDEX statements can finish.
+    schema_timeout = int(os.getenv("SCHEMA_APPLY_TIMEOUT_SECONDS", "1800"))
     async with pool.acquire() as conn:
-        await conn.execute(sql)
+        await conn.execute(sql, timeout=schema_timeout)
 
 
 async def close_pools() -> None:
