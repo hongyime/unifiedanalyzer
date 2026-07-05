@@ -88,10 +88,8 @@ every P0 item below is therefore *more* urgent, not less. The reviewer's stated 
   and the Strava-name path at `:357-372` do not).
 
 ### P1-2 ✅ Face-cluster purity guard + verify face_count, then open drive-face attribution
-**Status: guard-fails-open CONFIRMED; purity/quality checks ABSENT (design gap).**
-- `COALESCE(i.face_count, 1) <= 3` (`src/pipeline/face_clustering.py:183`) defaults NULL→1
-  (portrait) → propagates. If `face_count` is ever NULL at ingest, group-photo bystanders get
-  attributed to the poster.
+**Status: P1-2(i) SHIPPED (`_UNKNOWN_FACE_COUNT = 999` at `face_clustering.py:78` — fail-CLOSED); P1-2(ii) purity/quality checks still ABSENT (design gap).**
+- ~~`COALESCE(i.face_count, 1) <= 3` (`face_clustering.py:183`) defaults NULL→1~~ **FIXED 2026-07 (verified 2026-07-05):** default is now 999 (`_UNKNOWN_FACE_COUNT` at `face_clustering.py:78`), so a NULL `face_count` fails CLOSED — the guard rejects propagation rather than assuming portrait. Confirmed dormant already (0 NULL rows in `facetracker.images`) but defensively correct.
 - No per-cluster purity / min-quality / second-nearest-entity rejection before propagation
   (`propagate_entity_faces` `:135-213`). Average-linkage cosine 0.50 (`:46,:104`) is reasonable
   but ArcFace impostors (siblings, lookalikes, low-quality crops) exceed 0.5.
@@ -189,6 +187,49 @@ Also done (2026-07-03, second pass — user requested all remaining P2 + Telegra
 
 Still deferred (nothing forcing them now):
 - Auto-merge (do NOT), further weak association signals (belong in the relationship graph).
+
+## Axis 2 execution status (2026-07-05)
+Auto-label + calibration activation infrastructure shipped end-to-end. Empirical
+finding on live DB: **all 254 candidate pairs fire on exactly one signal type**
+(gating SQL: 0 pairs have `n_types >= 2`), so the confluence-based auto-labeler
+produces 0 rows today. Ships in place — activates automatically as data grows.
+The immediate calibration payoff comes from the 15 existing human labels
+(4 `dashboard_merge` positives + 11 `dashboard_dismiss` negatives).
+
+Shipped:
+- **`IDENTITY_MODEL_ENABLED` safety flag** (`identity_calibration.py :get_model`,
+  default `'0'`) — the scorer no longer silently auto-loads a trained joblib on
+  disk. Flip to `'1'` only after `validate` shows LR beats noisy-OR.
+- **`IDENTITY_MIN_LABELS` / `IDENTITY_RETRAIN_EVERY`** env-configurable retrain
+  thresholds (default 20/10). Setting `IDENTITY_MIN_LABELS=15` unblocks retrain
+  on the existing 15 human labels without a code change.
+- **`src/pipeline/auto_labeler.py`** — new module. `seed_ground_truth_labels()`
+  wired into `_secondary_phases()` between `face_match_signals` and
+  `calibration_retrain` (see `incremental_runner.py`). Predicate:
+  `(n_hard >= 1 AND n_types >= 2) OR n_types >= 3` over cross-entity scoring
+  signals, hard-anchor = phone/email/cross_platform_link/shared_website/media_*.
+  `ON CONFLICT DO NOTHING` — human labels always win. Env-gated by
+  `AUTO_LABEL_ENABLED` (default off). CLI supports `--dry-run` for preview.
+- **LOSO expansion in `_rows_to_xy`** — for each `source LIKE 'auto_%'` positive,
+  each non-zero feature is zeroed in turn, generating expanded training rows.
+  Defends the LR against feature-leak shortcuts (`signal-X-fires -> positive`).
+  Human labels and auto-negatives passed through unmodified. Expansion happens
+  at train time only; DB rows unchanged.
+- **`validate` CLI subcommand** (`python -m src.pipeline.identity_calibration
+  validate [--strict] [--min-delta 0.05]`) — leave-one-out CV of LR vs
+  hand-set-noisy-OR AUC on `identity_labels`. Reports `lr_auc_loo`,
+  `noisy_or_auc`, `delta`, and the full-fit LR weights per signal. `--strict`
+  exits non-zero if `delta < min_delta` (default 0.05) — the gating check
+  before flipping `IDENTITY_MODEL_ENABLED=1`.
+- **Scorer dismissal guard filtered to human labels**
+  (`identity_scorer.py:105`) — a future auto_negative_v* row would otherwise
+  suppress the scored pair. Now only human dismissals dismiss.
+
+Cutover path (when ready): set `IDENTITY_MIN_LABELS=15` → next incremental
+retrains → run `validate --strict` → if AUC delta ≥ 0.05, set
+`IDENTITY_MODEL_ENABLED=1` and recreate the analyzer/scheduler containers.
+Rollback: `IDENTITY_MODEL_ENABLED=0` reverts to noisy-OR without deleting the
+model file.
 
 ## Explicitly do NOT do
 - ⚪ Auto-merge above a threshold — with uncalibrated weights + (currently) unstable IDs +
