@@ -39,6 +39,7 @@ from src.pipeline.media_analysis_tier1 import (
 from src.pipeline.identity_scorer import compute_identity_scores
 from src.pipeline.face_clustering import run_face_clustering
 from src.pipeline.identity_calibration import maybe_retrain
+from src.pipeline.auto_labeler import seed_ground_truth_labels
 from src.pipeline.geocode import geocode_step
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
@@ -218,6 +219,7 @@ def _secondary_phases() -> list[tuple[str, object]]:
         ("media_faces", analyze_media_faces),
         ("face_clustering", run_face_clustering),
         ("face_match_signals", rebuild_face_match_signals),
+        ("auto_label_seed", seed_ground_truth_labels),
         ("calibration_retrain", maybe_retrain),
         ("identity_scoring", compute_identity_scores),
         ("geocode", geocode_step),

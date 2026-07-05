@@ -100,9 +100,15 @@ async def compute_identity_scores() -> dict:
         # Pairs the user dismissed in the dashboard ("not the same person").
         # Stored normalized (entity_a < entity_b) just like _pair_key, so a
         # dismissed candidate never re-surfaces on the next rebuild.
-        dismissed_rows = await conn.fetch(
-            "SELECT entity_a::text AS a, entity_b::text AS b FROM identity_labels WHERE label = 0"
-        )
+        # Filter to HUMAN labels only — a future auto_labeler (see
+        # src/pipeline/auto_labeler.py) may write label=0 rows with
+        # source='auto_negative_*'; those are training data, NOT dismissals,
+        # and must not suppress the scorer from surfacing the pair.
+        dismissed_rows = await conn.fetch("""
+            SELECT entity_a::text AS a, entity_b::text AS b
+            FROM identity_labels
+            WHERE label = 0 AND (source IS NULL OR source NOT LIKE 'auto\\_%' ESCAPE '\\')
+        """)
         dismissed = {(r["a"], r["b"]) for r in dismissed_rows}
 
     # --- Aggregate contributions per normalized pair ---
