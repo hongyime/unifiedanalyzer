@@ -58,11 +58,20 @@ def pair_feature_vector(contributions: list[tuple[str, float]]) -> list[float]:
 
 
 def get_model():
-    """Return the trained model or None (cached). None -> caller uses noisy-OR."""
+    """Return the trained model or None (cached). None -> caller uses noisy-OR.
+
+    Safety: gated by IDENTITY_MODEL_ENABLED (default '0'/off). Set to '1' only
+    after `python -m src.pipeline.identity_calibration validate` shows the LR
+    model beats noisy-OR on your labeled set. This prevents an accidentally
+    trained model from silently replacing the hand-set weights before it has
+    been proven better."""
     global _model_cache, _model_loaded
     if _model_loaded:
         return _model_cache
     _model_loaded = True
+    if os.getenv("IDENTITY_MODEL_ENABLED", "0") != "1":
+        _model_cache = None
+        return None
     if not os.path.isfile(_MODEL_PATH):
         _model_cache = None
         return None
@@ -226,8 +235,33 @@ async def record_label(conn, a: str, b: str, label: int, source: str) -> None:
 
 
 def _rows_to_xy(rows) -> tuple[list[list[float]], list[int]]:
-    X = [[float(_jsonload(r["features"]).get(t, 0.0)) for t in FEATURE_ORDER] for r in rows]
-    y = [int(r["label"]) for r in rows]
+    """Feature vectors + labels from identity_labels rows.
+
+    Auto-labeled positives (source LIKE 'auto_%' AND label=1) are LOSO-expanded:
+    for each non-zero feature in the base row, emit an extra training row with
+    that one feature zeroed. Reasoning: an auto-positive was seeded by SIGNAL
+    CONFLUENCE (>=2 signal types agreeing), so zeroing any single contributing
+    signal still leaves supporting evidence. This teaches the LR that no single
+    signal is required, defending against feature-leak shortcuts like
+    'signal-X-fires -> positive'. Human labels and auto-negatives are trusted
+    as-is (no LOSO)."""
+    X, y = [], []
+    for r in rows:
+        feats = _jsonload(r["features"])
+        base = [float(feats.get(t, 0.0)) for t in FEATURE_ORDER]
+        label = int(r["label"])
+        source = (r["source"] if "source" in r.keys() else "") or ""
+
+        X.append(base)
+        y.append(label)
+
+        if label == 1 and source.startswith("auto_"):
+            for i, v in enumerate(base):
+                if v > 0:
+                    variant = list(base)
+                    variant[i] = 0.0
+                    X.append(variant)
+                    y.append(label)
     return X, y
 
 
@@ -238,7 +272,7 @@ async def train_from_db(model_out: str | None = None) -> dict:
     await init_pools(apply_schema_ddl=False)
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT features, label FROM identity_labels")
+        rows = await conn.fetch("SELECT features, label, source FROM identity_labels")
     await close_pools()
     X, y = _rows_to_xy(rows)
     return _fit_and_save(X, y, model_out)
@@ -247,28 +281,137 @@ async def train_from_db(model_out: str | None = None) -> dict:
 _last_label_count = -1
 
 
-async def maybe_retrain(min_labels: int = 20, retrain_every: int = 10) -> dict:
+async def maybe_retrain(min_labels: int | None = None, retrain_every: int | None = None) -> dict:
     """Scheduler hook: retrain the calibration model from dashboard labels once
     enough have accumulated (and both classes are present), then force the
     scorer to reload it. Cheap COUNT gate keeps idle cycles free. Runs INSIDE
-    the scheduler's event loop, so it reuses the existing pool (no init/close)."""
+    the scheduler's event loop, so it reuses the existing pool (no init/close).
+
+    Thresholds are env-configurable (default 20 / 10). Lowering IDENTITY_MIN_LABELS
+    activates training earlier — e.g. set to 15 to train on today's live human
+    labels without waiting for more merges. The trained model is only used by the
+    scorer when IDENTITY_MODEL_ENABLED=1 (see get_model), so lowering the
+    threshold is safe on its own."""
     global _last_label_count, _model_loaded, _model_cache
     from src.db.connection import get_analyzer_pool
+    if min_labels is None:
+        min_labels = int(os.getenv("IDENTITY_MIN_LABELS", "20"))
+    if retrain_every is None:
+        retrain_every = int(os.getenv("IDENTITY_RETRAIN_EVERY", "10"))
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         n = await conn.fetchval("SELECT count(*) FROM identity_labels")
         classes = await conn.fetchval("SELECT count(DISTINCT label) FROM identity_labels")
         if n < min_labels or classes < 2:
-            return {"skipped": "insufficient_labels", "labels": n}
+            return {"skipped": "insufficient_labels", "labels": n, "min_labels": min_labels}
         if _last_label_count >= 0 and n - _last_label_count < retrain_every:
             return {"skipped": "not_enough_new", "labels": n}
-        rows = await conn.fetch("SELECT features, label FROM identity_labels")
+        rows = await conn.fetch("SELECT features, label, source FROM identity_labels")
     X, y = _rows_to_xy(rows)
     res = _fit_and_save(X, y, _MODEL_PATH)
     _last_label_count = n
     _model_loaded = False  # next get_model() reloads the freshly trained model
     _model_cache = None
     return res
+
+
+# --------------------------------------------------------------------------- #
+# Validation: is the trained LR actually better than the hand-set noisy-OR?
+# Runs on the SAME labeled pairs (leave-one-out CV) so the comparison is fair.
+# --------------------------------------------------------------------------- #
+def _noisy_or_probs(X: list[list[float]]) -> list[float]:
+    """Per-row noisy-OR probability using the scorer's hand-set _TYPE_WEIGHT.
+    Local import avoids the circular dep (identity_scorer imports us)."""
+    from src.pipeline.identity_scorer import _TYPE_WEIGHT
+    weights = [_TYPE_WEIGHT.get(t, 0.0) for t in FEATURE_ORDER]
+    out = []
+    for xrow in X:
+        prob_none = 1.0
+        for i, v in enumerate(xrow):
+            if v > 0:
+                prob_none *= (1 - weights[i] * v)
+        out.append(1 - prob_none)
+    return out
+
+
+async def validate_calibration() -> dict:
+    """Compare LR (leave-one-out CV) vs noisy-OR AUC on identity_labels.
+
+    Bootstrap CV is unreliable with <=20 rows (a resample can lose an entire
+    class); LOO is the correct choice. For each labeled row: fit LR on the
+    other N-1 rows, predict on the held-out row, collect predictions, then
+    compute AUC over the full held-out set. Noisy-OR uses the hand-set weights
+    on the same rows (no fitting needed) as the baseline. Positive delta means
+    the LR beats noisy-OR on this labeled set."""
+    from src.db.connection import init_pools, close_pools, get_analyzer_pool
+    await init_pools(apply_schema_ddl=False)
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT features, label, source FROM identity_labels")
+    await close_pools()
+
+    if len(rows) < 2:
+        return {"error": "not_enough_labels", "n_labels": len(rows)}
+
+    X_all, y_all = _rows_to_xy(rows)  # LOSO expansion included
+    n_pos = sum(1 for v in y_all if v == 1)
+    n_neg = len(y_all) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return {"error": "one_class_only", "n_labels": len(rows),
+                "n_positive": n_pos, "n_negative": n_neg}
+
+    # NB: LOSO rows share a base pair. For fair LOO CV we treat the DB-level
+    # rows (not the LOSO-expanded rows) as the holdout unit — expanding a row
+    # into the train set alongside its own LOSO variants would leak. Compute
+    # the un-expanded X/y for holdout selection, and re-expand the training
+    # subset each fold. Cheap given the label count.
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+
+    # Un-expanded (one row per DB pair):
+    Xb, yb = [], []
+    for r in rows:
+        feats = _jsonload(r["features"])
+        Xb.append([float(feats.get(t, 0.0)) for t in FEATURE_ORDER])
+        yb.append(int(r["label"]))
+
+    lr_preds = np.zeros(len(rows))
+    for i in range(len(rows)):
+        train_rows = [r for j, r in enumerate(rows) if j != i]
+        X_train, y_train = _rows_to_xy(train_rows)
+        if len(set(y_train)) < 2:
+            # Can't fit LR without both classes in train fold. Fall back to
+            # noisy-OR proba for this held-out row — records the fold but
+            # doesn't unfairly favour LR.
+            lr_preds[i] = _noisy_or_probs([Xb[i]])[0]
+            continue
+        clf = LogisticRegression(max_iter=1000, class_weight="balanced")
+        clf.fit(np.asarray(X_train, dtype=float), np.asarray(y_train))
+        lr_preds[i] = float(clf.predict_proba(np.asarray([Xb[i]], dtype=float))[0, 1])
+
+    noisy_or_preds = _noisy_or_probs(Xb)
+    y_np = np.asarray(yb)
+    lr_auc = float(roc_auc_score(y_np, lr_preds))
+    no_auc = float(roc_auc_score(y_np, noisy_or_preds))
+
+    # Also report weights from a full-data fit (for inspection).
+    full_clf = LogisticRegression(max_iter=1000, class_weight="balanced")
+    full_clf.fit(np.asarray(X_all, dtype=float), np.asarray(y_all))
+    weights_full = {t: round(float(w), 3)
+                    for t, w in zip(FEATURE_ORDER, full_clf.coef_[0])}
+
+    return {
+        "n_labels": len(rows),
+        "n_positive": sum(1 for v in yb if v == 1),
+        "n_negative": sum(1 for v in yb if v == 0),
+        "loso_expanded_positive": n_pos,
+        "loso_expanded_negative": n_neg,
+        "lr_auc_loo": round(lr_auc, 4),
+        "noisy_or_auc": round(no_auc, 4),
+        "delta": round(lr_auc - no_auc, 4),
+        "lr_weights_full_fit": weights_full,
+    }
 
 
 def _main():
@@ -287,9 +430,22 @@ def _main():
         # Train from dashboard-captured labels (identity_labels table).
         out = sys.argv[2] if len(sys.argv) > 2 else _MODEL_PATH
         print(asyncio.run(train_from_db(out)))
+    elif cmd == "validate":
+        # Compare LR (leave-one-out CV) vs noisy-OR baseline AUC on labeled pairs.
+        # Non-zero exit if LR doesn't beat noisy-OR by --min-delta (default 0.05).
+        strict = "--strict" in sys.argv[2:]
+        min_delta = 0.05
+        for i, tok in enumerate(sys.argv[2:]):
+            if tok == "--min-delta" and i + 1 < len(sys.argv[2:]):
+                min_delta = float(sys.argv[3 + i])
+        result = asyncio.run(validate_calibration())
+        print(json.dumps(result, indent=2))
+        if strict and (result.get("delta") or 0.0) < min_delta:
+            sys.exit(1)
     else:
         print("usage: python -m src.pipeline.identity_calibration "
-              "export [csv] | train [csv] [model] | train-db [model]")
+              "export [csv] | train [csv] [model] | train-db [model] | "
+              "validate [--strict] [--min-delta 0.05]")
 
 
 if __name__ == "__main__":
