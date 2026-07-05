@@ -19,9 +19,11 @@ NAME_FUZZY_MIN_SCORE_NAME_ONLY = 90
 MIN_NAME_TOKENS = 2
 MIN_NAME_LENGTH = 5
 # A normalized username shared by more than this many accounts is treated as a
-# COMMON handle (likely different people), so it clusters as weak evidence
-# (username_similar) rather than a strong auto-confirming username_exact.
+# COMMON handle (likely different people) — those accounts are NOT clustered.
 COMMON_USERNAME_ACCOUNTS = 10
+# If a (digit-stripped) handle maps to more than this many distinct entities, it's
+# too common to be useful cross-entity evidence — skip the username_similar links.
+SIMILAR_USERNAME_MAX_ENTITIES = 5
 CONFIDENCE_THRESHOLD = 0.85
 MIN_SIGNALS = 2
 
@@ -68,6 +70,27 @@ def normalize_username(username: str | None) -> str | None:
     for ch in USERNAME_STRIP_CHARS:
         u = u.replace(ch, "")
     u = re.sub(r"\d+$", "", u)
+    if not u or len(u) < MIN_NORMALIZED_LENGTH:
+        return None
+    return u
+
+
+def normalize_username_strict(username: str | None) -> str | None:
+    """Like normalize_username but KEEPS trailing digits — only case + punctuation
+    (._-) are normalized. So "john_smith" == "johnsmith" (punctuation variant, same
+    person) but "bryanseah234" != "bryanseah" (digit-suffix variant, treated as
+    potentially DIFFERENT people). Phase 1 clusters on this strict key so only
+    genuinely-same handles auto-merge; digit-variants are surfaced as cross-entity
+    candidates instead (see username_similar)."""
+    if not username:
+        return None
+    if DEFAULT_USERNAME_RE.match(username):
+        return None
+    if " " in username.strip():
+        return None
+    u = username.lower().strip()
+    for ch in USERNAME_STRIP_CHARS:
+        u = u.replace(ch, "")
     if not u or len(u) < MIN_NORMALIZED_LENGTH:
         return None
     return u
@@ -342,53 +365,50 @@ async def resolve_entities() -> dict:
     entities: list[EntityCandidate] = []
     assigned: set[tuple[str, str]] = set()
 
-    # Phase 1: Username exact match clustering
+    # Phase 1: cluster by STRICT username (case/punctuation-normalized, digits
+    # KEPT) so only genuinely-same handles auto-merge. Within each loose (digit-
+    # stripped) group we sub-group by the strict handle: "bryanseah234" clusters
+    # with "bryanseah234", but "bryanseah" stays a SEPARATE person — later surfaced
+    # as a cross-entity username_similar candidate rather than silently merged.
     for norm_user, group in profiles_by_username.items():
-        relevant = [p for p in group if (p.source, p.platform_id) not in assigned]
-        if len(relevant) < 2:
-            continue
-
-        has_target = any((p.source, p.platform_id) in target_sources for p in relevant)
         has_target_name = norm_user in target_names
-        if not has_target and not has_target_name:
+        # A loose handle shared by too many accounts is COMMON (different people) —
+        # don't cluster it at all; those accounts stand alone.
+        if len(group) > COMMON_USERNAME_ACCOUNTS:
             continue
 
-        candidate = EntityCandidate(profiles=relevant)
-        platforms_seen = set()
-        for p in relevant:
-            platforms_seen.add(p.source)
+        by_strict: dict[str, list[PlatformProfile]] = {}
+        for p in group:
+            strict = normalize_username_strict(p.username) or f"__raw__{(p.username or '').lower()}"
+            by_strict.setdefault(strict, []).append(p)
 
-        # A normalized username shared by an implausible number of accounts is a
-        # COMMON handle (different people), not one person on many platforms.
-        is_common_handle = len(group) > COMMON_USERNAME_ACCOUNTS
+        for strict_key, sub in by_strict.items():
+            relevant = [p for p in sub if (p.source, p.platform_id) not in assigned]
+            if len(relevant) < 2:
+                continue
+            has_target = any((p.source, p.platform_id) in target_sources for p in relevant)
+            if not has_target and not has_target_name:
+                continue
 
-        if len(platforms_seen) >= 2:
-            for i, p1 in enumerate(relevant):
-                for p2 in relevant[i + 1:]:
-                    if p1.source != p2.source:
-                        # STRONG only when the raw handles are identical AND the
-                        # handle isn't common. A match that survives only after
-                        # digit/punctuation stripping (e.g. "bryanseah" ~
-                        # "bryanseah234"), or a common handle, is WEAK evidence —
-                        # username_similar needs corroboration to auto-confirm.
-                        exact = bool(
-                            p1.username and p2.username
-                            and p1.username.lower() == p2.username.lower()
-                        )
-                        strong = exact and not is_common_handle
-                        candidate.signals.append(SignalMatch(
-                            signal_type="username_exact" if strong else "username_similar",
-                            source_platform=p1.source,
-                            target_platform=p2.source,
-                            source_record_id=p1.platform_id,
-                            target_record_id=p2.platform_id,
-                            value=norm_user,
-                            confidence=20.0 if strong else 8.0,
-                        ))
-
-        entities.append(candidate)
-        for p in relevant:
-            assigned.add((p.source, p.platform_id))
+            candidate = EntityCandidate(profiles=relevant)
+            platforms_seen = {p.source for p in relevant}
+            if len(platforms_seen) >= 2:
+                # Same strict handle across platforms is a strong exact match.
+                for i, p1 in enumerate(relevant):
+                    for p2 in relevant[i + 1:]:
+                        if p1.source != p2.source:
+                            candidate.signals.append(SignalMatch(
+                                signal_type="username_exact",
+                                source_platform=p1.source,
+                                target_platform=p2.source,
+                                source_record_id=p1.platform_id,
+                                target_record_id=p2.platform_id,
+                                value=strict_key,
+                                confidence=20.0,
+                            ))
+            entities.append(candidate)
+            for p in relevant:
+                assigned.add((p.source, p.platform_id))
 
     # Phase 2: Add unmatched target profiles as single-profile entities
     for p in target_profiles:
@@ -763,6 +783,36 @@ async def resolve_entities() -> dict:
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """, signal_rows)
             stats["signals"] = len(signal_rows)
+
+        # Cross-entity "similar username" candidates: entities that share a
+        # digit-stripped handle but were NOT merged (different strict handles —
+        # e.g. bryanseah vs bryanseah234). Emit a weak CROSS-entity signal
+        # (target_record_id = the other entity's UUID) so the scorer surfaces them
+        # in Review to confirm/reject, instead of the resolver silently merging
+        # possibly-different people. Skipped for handles shared by too many
+        # entities (too common to be evidence).
+        loose_norm_entities: dict[str, set] = {}
+        for candidate, eid, *_ in resolved:
+            for n in {normalize_username(p.username) for p in candidate.profiles}:
+                if n:
+                    # str() — recovered ids are asyncpg UUIDs, new ones are strings.
+                    loose_norm_entities.setdefault(n, set()).add(str(eid))
+        sim_rows = []
+        for n, eid_set in loose_norm_entities.items():
+            if not (2 <= len(eid_set) <= SIMILAR_USERNAME_MAX_ENTITIES):
+                continue
+            eid_list = sorted(eid_set)
+            for i, a in enumerate(eid_list):
+                for b in eid_list[i + 1:]:
+                    sim_rows.append((a, "username_similar", "multi", n, "multi", b, n, 0.7))
+        if sim_rows:
+            await conn.executemany("""
+                INSERT INTO identity_signals
+                    (entity_id, signal_type, source_platform, source_record_id,
+                     target_platform, target_record_id, value, confidence)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """, sim_rows)
+            stats["username_similar_pairs"] = len(sim_rows)
 
         # Clean up orphaned entities
         orphaned = await conn.execute("""

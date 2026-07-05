@@ -34,6 +34,7 @@ FEATURE_ORDER = [
     "content_similarity", "temporal_copost", "shared_website",
     "shared_route_origin", "group_cooccurrence", "media_gps_colocation",
     "media_perceptual_match", "media_face_match", "media_device_match",
+    "username_similar",
 ]
 
 _MODEL_PATH = os.getenv(

@@ -59,6 +59,9 @@ _TYPE_WEIGHT = {
     "media_face_match": 0.50,
     # P2-7: same physical camera (EXIF body/lens serial) across two entities.
     "media_device_match": 0.55,
+    # Cross-entity similar-handle candidate: two separate people share a digit-
+    # stripped username (bryanseah vs bryanseah234). Moderate — surfaced in Review.
+    "username_similar": 0.45,
 }
 
 _MIN_SCORE = 0.10
