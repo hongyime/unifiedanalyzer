@@ -23,6 +23,11 @@ wheels/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
+
+# Un-ignore frontend/src/lib (the `lib/` above is for Python packaging artefacts;
+# the frontend uses src/lib/ as a convention for label maps, small utils, etc.)
+!frontend/src/lib/
+!frontend/src/lib/**
 *.egg
 MANIFEST
 
