@@ -6,7 +6,8 @@ import { FaceAvatar } from '../components/FaceAvatar'
 import { PageHeader } from '../components/ui/PageHeader'
 import { MetricCard } from '../components/ui/MetricCard'
 import { EmptyState } from '../components/ui/EmptyState'
-import { alertLabel } from '../lib/labels'
+import { LoadingSpinner } from '../components/ui/LoadingSpinner'
+import { LABELS } from '../lib/labels'
 
 /**
  * Triage — the at-a-glance home / overview. Shows coverage, what needs
@@ -20,7 +21,7 @@ export default function TriagePage() {
     api.getTriage().then(setData).catch(() => setData(null))
   }, [])
 
-  if (!data) return <div className="empty-state">Loading…</div>
+  if (!data) return <LoadingSpinner label="Loading triage…" />
   const cov = data.coverage
 
   return (
@@ -79,7 +80,7 @@ export default function TriagePage() {
                 >
                   {a.entity_id && <FaceAvatar url={a.face} name={a.entity_name} size={28} />}
                   <div className="min-w-0">
-                    <div className="truncate text-xs font-medium">{a.title || alertLabel(a.alert_type)}</div>
+                    <div className="truncate text-xs font-medium">{a.title || LABELS.alertType[a.alert_type] || a.alert_type}</div>
                     <div className="truncate text-xs text-text-muted">
                       {a.entity_name || ''}{a.detail ? ' · ' + a.detail : ''}
                     </div>

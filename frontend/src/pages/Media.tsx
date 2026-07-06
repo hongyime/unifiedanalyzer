@@ -5,6 +5,9 @@ import {
 import { useMediaStats, useMediaFilters, useMediaBrowse } from '../hooks'
 import { MediaItem, MediaBrowseParams } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState } from '../components/ui/EmptyState'
+import { LoadingSpinner } from '../components/ui/LoadingSpinner'
+import { LABELS } from '../lib/labels'
 
 const PER_PAGE = 48
 
@@ -214,9 +217,13 @@ export default function MediaPage() {
       </div>
 
       {browse.isLoading ? (
-        <div className="empty-state">Loading…</div>
+        <LoadingSpinner label="Loading media…" />
       ) : items.length === 0 ? (
-        <div className="empty-state">No media matches these filters.</div>
+        <EmptyState
+          icon={<ImageOff className="h-10 w-10" />}
+          title="No media matches these filters"
+          description={`Try clearing filters, or check the ${LABELS.signalType['media_perceptual_match'] ? 'photo' : 'media'} pipeline in Runs.`}
+        />
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
           {items.map((item) => (

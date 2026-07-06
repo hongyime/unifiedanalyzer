@@ -1,8 +1,15 @@
 import { useEffect, useState } from 'react'
-import { ScanFace, Users, Images, Film, AlertCircle } from 'lucide-react'
+import { ScanFace, Users, Images, Film } from 'lucide-react'
 import { useFaceStats, useFaceIdentities } from '../hooks'
 import { api } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState } from '../components/ui/EmptyState'
+import { ErrorState } from '../components/ui/ErrorState'
+import { LABELS } from '../lib/labels'
+
+// The "face bridge" is the mechanism this page powers: same face across
+// accounts → linked person. Surface the plain-language name in the intro.
+const FACE_BRIDGE_LABEL = LABELS.signalType['face_pair_knn']
 
 /**
  * Faces / Identities page (facetracker merge — Stage 4).
@@ -55,11 +62,11 @@ export default function FacesPage() {
   if (stats.isError) {
     return (
       <div>
-        <h2 className="mb-4 text-xl font-bold">Faces</h2>
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-card p-4 text-sm text-red">
-          <AlertCircle size={16} />
-          Face API unreachable (/api/face). Restart the analyzer API to pick up the mount.
-        </div>
+        <PageHeader title="Faces" />
+        <ErrorState
+          message="Face API unreachable (/api/face). Restart the analyzer API to pick up the mount."
+          onRetry={() => stats.refetch()}
+        />
       </div>
     )
   }
@@ -70,7 +77,7 @@ export default function FacesPage() {
     <div>
       <PageHeader
         title="Faces"
-        description="Faces detected across all photos and grouped by who they belong to. When the same face appears on different accounts, it links them to the same person."
+        description={`Faces detected across all photos and grouped by who they belong to. When the same face appears on different accounts, it links them to the same person${FACE_BRIDGE_LABEL ? ' — the "' + FACE_BRIDGE_LABEL + '" bridge' : ''}.`}
       />
 
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -81,11 +88,11 @@ export default function FacesPage() {
       </div>
 
       {!hasFaces ? (
-        <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted">
-          <div className="mb-1 font-medium text-fg">No faces indexed yet</div>
-          The face index is empty. It populates as collector source media and the
-          mounted drives are scanned.
-        </div>
+        <EmptyState
+          icon={<ScanFace className="h-10 w-10" />}
+          title="No faces indexed yet"
+          description="The face index is empty. It populates as collector source media and the mounted drives are scanned."
+        />
       ) : (
         <>
           {simFor != null && (

@@ -3,15 +3,26 @@ import {
   createColumnHelper, flexRender, getCoreRowModel, getSortedRowModel,
   useReactTable, SortingState,
 } from '@tanstack/react-table'
-import { ChevronUp, ChevronDown } from 'lucide-react'
+import { ChevronUp, ChevronDown, Play } from 'lucide-react'
 import { useRuns, useTriggerRun } from '../hooks'
 import { RunInfo } from '../api'
+import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState } from '../components/ui/EmptyState'
+import { LoadingSpinner } from '../components/ui/LoadingSpinner'
+import { Button } from '../components/ui/Button'
+import { StatusBadge } from '../components/ui/StatusBadge'
+import { LABELS } from '../lib/labels'
 
 const PER_PAGE = 20
 
-function statusBadge(s: string) {
-  const cls = s === 'completed' ? 'badge-green' : s === 'running' ? 'badge-yellow' : 'badge-red'
-  return <span className={`badge ${cls}`}>{s}</span>
+/** Map a raw pipeline status to the shared StatusBadge palette. */
+function statusPill(s: string) {
+  const map: Record<string, Parameters<typeof StatusBadge>[0]['status']> = {
+    completed: 'success',
+    running: 'processing',
+    failed: 'error',
+  }
+  return <StatusBadge status={map[s] ?? 'idle'} label={s} />
 }
 
 function fmtDate(iso: string | null) {
@@ -26,8 +37,13 @@ function duration(start: string | null, end: string | null) {
 
 const col = createColumnHelper<RunInfo>()
 const columns = [
-  col.accessor('run_type', { header: 'Type' }),
-  col.accessor('status', { header: 'Status', cell: (c) => statusBadge(c.getValue()) }),
+  // Show the friendly run-type label if we have one (LABELS.tier acts as a
+  // fallback dict — future run types can be plain-language mapped here).
+  col.accessor('run_type', {
+    header: 'Type',
+    cell: (c) => LABELS.tier[c.getValue()] ?? c.getValue(),
+  }),
+  col.accessor('status', { header: 'Status', cell: (c) => statusPill(c.getValue()) }),
   col.accessor('started_at', { header: 'Started', cell: (c) => fmtDate(c.getValue()) }),
   col.display({
     id: 'duration',
@@ -60,22 +76,29 @@ export default function RunsPage() {
 
   return (
     <div>
-      <div className="flex-between mb-2">
-        <div>
-          <h2 className="text-xl font-semibold">Runs</h2>
-          <p className="mt-1 text-sm text-text-secondary">
-            The background pipeline that refreshes everything. Frequent incremental runs are quick; full runs re-check everyone from scratch.
-          </p>
-        </div>
-        <button className="primary" onClick={() => trigger.mutate()} disabled={trigger.isPending}>
-          {trigger.isPending ? 'Running…' : 'Trigger Run'}
-        </button>
-      </div>
+      <PageHeader
+        title="Runs"
+        description="The background pipeline that refreshes everything. Frequent incremental runs are quick; full runs re-check everyone from scratch."
+        actions={
+          <Button
+            onClick={() => trigger.mutate()}
+            disabled={trigger.isPending}
+            loading={trigger.isPending}
+            icon={<Play className="h-3.5 w-3.5" />}
+          >
+            {trigger.isPending ? 'Running…' : 'Trigger run'}
+          </Button>
+        }
+      />
 
       {isLoading ? (
-        <div className="empty-state">Loading…</div>
+        <LoadingSpinner />
       ) : rows.length === 0 ? (
-        <div className="empty-state">No runs yet. Click "Trigger Run" to start.</div>
+        <EmptyState
+          icon={<Play className="h-10 w-10" />}
+          title="No runs yet"
+          description="Click Trigger run to start the pipeline. It refreshes people, evidence, alerts and media analysis."
+        />
       ) : (
         <>
           <table>
@@ -111,11 +134,20 @@ export default function RunsPage() {
               ))}
             </tbody>
           </table>
-          <div className="flex-between" style={{ marginTop: '1rem' }}>
-            <span className="text-sm text-muted">{total} runs</span>
+          <div className="mt-4 flex items-center justify-between">
+            <span className="text-sm text-text-muted tabular-nums">{total} runs</span>
             <div className="flex gap-1">
-              <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>Prev</button>
-              <button disabled={page * PER_PAGE >= total} onClick={() => setPage((p) => p + 1)}>Next</button>
+              <Button variant="ghost" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+                Prev
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={page * PER_PAGE >= total}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                Next
+              </Button>
             </div>
           </div>
         </>

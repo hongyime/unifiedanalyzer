@@ -3,8 +3,9 @@ import { Link } from 'react-router-dom'
 import { api, Alert } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
+import { LoadingSpinner } from '../components/ui/LoadingSpinner'
 import { InfoTip } from '../components/ui/InfoTip'
-import { alertLabel, alertMeaning } from '../lib/labels'
+import { LABELS, alertMeaning } from '../lib/labels'
 
 function severityBadge(sev: string) {
   const cls = sev === 'warning' ? 'badge-yellow' : sev === 'critical' ? 'badge-red' : 'badge-blue'
@@ -15,7 +16,7 @@ function typeBadge(t: string) {
   const meaning = alertMeaning(t)
   return (
     <span className="badge badge-gray inline-flex items-center gap-1">
-      {alertLabel(t)}
+      {LABELS.alertType[t] ?? t.replace(/_/g, ' ')}
       {meaning && <InfoTip text={meaning} />}
     </span>
   )
@@ -74,7 +75,7 @@ export default function AlertsPage() {
       />
 
       {loading ? (
-        <div className="empty-state">Loading...</div>
+        <LoadingSpinner label="Loading alerts…" />
       ) : alerts.length === 0 ? (
         <EmptyState title="No alerts" description="Alerts about posting rhythm and coordinated behavior will show up here." />
       ) : (

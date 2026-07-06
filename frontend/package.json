@@ -21,6 +21,7 @@
   "dependencies": {
     "@tanstack/react-query": "^5.62.0",
     "@tanstack/react-table": "^8.21.0",
+    "clsx": "^2.1.1",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.468.0",
     "react": "^19.2.7",

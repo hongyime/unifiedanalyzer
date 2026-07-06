@@ -13,7 +13,7 @@ import FacesPage from './pages/Faces'
 import HelpPage from './pages/Help'
 import { openHealthSocket, LiveHealth } from './api'
 import { CommandPalette } from './components/CommandPalette'
-import { Sidebar } from './components/layout/Sidebar'
+import { AppShell } from './components/AppShell'
 
 /** Subscribe to /ws/health, auto-reconnecting on drop. */
 function useLiveHealth(): LiveHealth | null {
@@ -42,27 +42,22 @@ function App() {
   const health = useLiveHealth()
 
   return (
-    <div className="min-h-screen bg-background">
+    <AppShell health={health}>
       <CommandPalette />
-      <Sidebar health={health} />
-      <main className="ml-52 p-6">
-        <div className="mx-auto max-w-7xl">
-          <Routes>
-            <Route path="/" element={<TriagePage />} />
-            <Route path="/review" element={<ReviewPage />} />
-            <Route path="/alerts" element={<AlertsPage />} />
-            <Route path="/entities" element={<EntitiesPage />} />
-            <Route path="/entities/:id" element={<EntityDetailPage />} />
-            <Route path="/communities" element={<CommunitiesPage />} />
-            <Route path="/media" element={<MediaPage />} />
-            <Route path="/faces" element={<FacesPage />} />
-            <Route path="/cases" element={<CasesPage />} />
-            <Route path="/runs" element={<RunsPage />} />
-            <Route path="/help" element={<HelpPage />} />
-          </Routes>
-        </div>
-      </main>
-    </div>
+      <Routes>
+        <Route path="/" element={<TriagePage />} />
+        <Route path="/review" element={<ReviewPage />} />
+        <Route path="/alerts" element={<AlertsPage />} />
+        <Route path="/entities" element={<EntitiesPage />} />
+        <Route path="/entities/:id" element={<EntityDetailPage />} />
+        <Route path="/communities" element={<CommunitiesPage />} />
+        <Route path="/media" element={<MediaPage />} />
+        <Route path="/faces" element={<FacesPage />} />
+        <Route path="/cases" element={<CasesPage />} />
+        <Route path="/runs" element={<RunsPage />} />
+        <Route path="/help" element={<HelpPage />} />
+      </Routes>
+    </AppShell>
   )
 }
 

@@ -1,3 +1,7 @@
+/* Web fonts — Inter (UI) + JetBrains Mono (numbers / IDs / hashes).
+   Loaded from Google Fonts to avoid adding a font-loader dep. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 @import "tailwindcss";
 
 /* ── Design tokens (aligned to the unifiedcollector dashboard) ──
@@ -59,6 +63,10 @@ body {
   a { color: var(--color-text-primary); text-decoration: none; }
   a:hover { color: var(--color-accent); }
 }
+
+/* Numeric readouts / IDs / hashes render in the monospace face with
+   figure-aligned digits, so metric values don't wobble as they update. */
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--color-background); }

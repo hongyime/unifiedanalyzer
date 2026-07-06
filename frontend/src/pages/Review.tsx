@@ -4,8 +4,9 @@ import { api, ReviewCandidate } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
+import { LoadingSpinner } from '../components/ui/LoadingSpinner'
 import { Confidence } from '../components/ui/Confidence'
-import { signalLabel } from '../lib/labels'
+import { LABELS } from '../lib/labels'
 
 /** Platform accounts to show UNDER the identity line, without repeating it.
  *  - Drops a handle identical to the shown name/id (the name-less case).
@@ -59,7 +60,7 @@ export default function ReviewPage() {
       {msg && <div className="mb-3 text-sm text-text-secondary">{msg}</div>}
 
       {!candidates ? (
-        <div className="empty-state">Loading…</div>
+        <LoadingSpinner label="Loading review candidates…" />
       ) : candidates.length === 0 ? (
         <EmptyState
           title="Nothing to review right now"
@@ -94,7 +95,7 @@ export default function ReviewPage() {
                     <Confidence score={c.score} />
                     <span>· {c.cross_platform ? 'different platforms' : 'same platform'}</span>
                     {c.signals.length > 0 && (
-                      <span>· {c.signals.map((s) => signalLabel(s.type)).join(', ')}</span>
+                      <span>· {c.signals.map((s) => LABELS.signalType[s.type] ?? s.type.replace(/_/g, ' ')).join(', ')}</span>
                     )}
                   </div>
                 </div>

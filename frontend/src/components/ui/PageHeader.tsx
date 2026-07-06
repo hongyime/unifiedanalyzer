@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { PageIntro } from './PageIntro'
 
 interface PageHeaderProps {
   title: string
@@ -7,13 +8,13 @@ interface PageHeaderProps {
   actions?: ReactNode
 }
 
-/** Standard page top: title + a plain-English intro so every page explains itself. */
+/** Standard page top: title + `<PageIntro>` + optional right-aligned actions. */
 export function PageHeader({ title, description, actions }: PageHeaderProps) {
   return (
     <div className="mb-6 flex items-start justify-between gap-4">
       <div>
         <h1 className="text-xl font-semibold">{title}</h1>
-        {description && <p className="mt-1 max-w-2xl text-sm text-text-secondary">{description}</p>}
+        {description && <PageIntro text={description} className="mt-1" />}
       </div>
       {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
     </div>

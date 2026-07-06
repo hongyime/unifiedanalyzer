@@ -20,7 +20,7 @@ const sizes = {
   md: 'text-sm px-3 py-2 gap-2',
 }
 
-export function UButton({
+export function Button({
   variant = 'primary',
   size = 'md',
   loading = false,
