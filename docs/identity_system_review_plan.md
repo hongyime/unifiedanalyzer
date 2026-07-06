@@ -102,7 +102,16 @@ every P0 item below is therefore *more* urgent, not less. The reviewer's stated 
 - **Fix direction:** verify `face_count` is populated at ingest; add min-quality + intra-cluster
   tightness + reject-if-second-entity-close before propagate; then prioritize drive-face attribution.
 
-### P1-3 🟡 SILENCE_GAP alerts — condition on source-collection health + per-entity baseline
+### P1-3 ✅ SILENCE_GAP alerts — SHIPPED and empirically effective
+**Status: FIXED (2026-07-03 in `434b34d`; verified live 2026-07-06).**
+- `_detect_silence_gaps` at `src/pipeline/alert_engine.py:76-183` implements both fixes:
+  (1) `SILENCE_GAP_SUPPRESS_ON_SOURCE_STALL` (default `True`, `alert_engine.py:87`) — if the entity's most-recent-event source has produced no events for anyone in `SILENCE_GAP_SOURCE_STALE_DAYS` (default 2), skip the alert (`:154-158`);
+  (2) per-entity baseline via `avg_post_interval * SILENCE_GAP_DYNAMIC_MULTIPLIER` when `history_days >= SILENCE_GAP_MIN_HISTORY_DAYS` and `event_count >= 2` (`:137-142`), clamped to `[SILENCE_GAP_MIN_DAYS, SILENCE_GAP_MAX_DAYS]`.
+- **Live evidence (2026-07-06)**: SILENCE_GAP totals `1878` cumulative, `508` last 7d, **`1` last 1d, `0` last 6h**. Rate collapsed by ~99% from the pre-fix baseline (~72/day → ~1/day). The 508 last-7d bucket is dominated by pre-fix accumulation still visible in the count.
+- Explicit env values now in `.env` for clarity (defaults were correct):
+  `SILENCE_GAP_SUPPRESS_ON_SOURCE_STALL=1`, `SILENCE_GAP_SOURCE_STALE_DAYS=2`.
+
+### P1-3 legacy \ud83d\udfe1 (superseded by section above, kept for history)
 **Status: RUNTIME for the 93% figure; DESIGN for the fix.**
 - The "1766/1899 SILENCE_GAP" number needs `SELECT alert_type, count(*) FROM alerts GROUP BY 1`.
 - Logic to inspect: `src/pipeline/alert_engine.py` (not read this pass) — confirm SILENCE_GAP
