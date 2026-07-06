@@ -39,3 +39,9 @@ imageio-ffmpeg>=0.4.9
 structlog>=24.0.0
 loguru>=0.7.0
 python-multipart>=0.0.9
+
+# ── Axis-1 MVP: semantic timeline search (docs: README §Axis-1)
+# Rust-backed HuggingFace tokenizer, ~5MB — needed to preprocess text for the
+# multilingual-e5-small ONNX embedder. onnxruntime is already listed above;
+# pgvector-Python is already listed above.
+tokenizers>=0.20

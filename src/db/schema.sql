@@ -306,3 +306,23 @@ CREATE TABLE IF NOT EXISTS drive_scan_state (
     files_indexed     BIGINT DEFAULT 0,
     updated_at        TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Axis-1 MVP: sentence embeddings for semantic timeline search. Lives in a
+-- SIDE TABLE (not on timeline_events itself) because pgvector HNSW cannot be
+-- built on partitioned parent tables (timeline_events is monthly-partitioned
+-- via migrations/001_partition_timeline_events.sql). Cascade-cleanup via a
+-- FK cannot enforce across the partition; the embed phase re-syncs on each run.
+CREATE TABLE IF NOT EXISTS timeline_embeddings (
+    event_id     UUID PRIMARY KEY,
+    occurred_at  TIMESTAMPTZ NOT NULL,
+    entity_id    UUID,
+    source       VARCHAR(30),
+    embedding    vector(384) NOT NULL,
+    model        VARCHAR(64) NOT NULL,
+    text_sha1    VARCHAR(40) NOT NULL,  -- so re-embed detects text change
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_timeline_emb_hnsw
+    ON timeline_embeddings USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_timeline_emb_entity ON timeline_embeddings(entity_id);
+CREATE INDEX IF NOT EXISTS idx_timeline_emb_occurred ON timeline_embeddings(occurred_at DESC);
