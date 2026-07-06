@@ -35,6 +35,9 @@ FEATURE_ORDER = [
     "shared_route_origin", "group_cooccurrence", "media_gps_colocation",
     "media_perceptual_match", "media_face_match", "media_device_match",
     "username_similar",
+    # Axis-3 Change-3: cross-entity ArcFace kNN signal (portrait-only,
+    # >=FACE_PAIR_KNN_MIN_MATCHES matches). Appended — do not reorder.
+    "face_pair_knn",
 ]
 
 _MODEL_PATH = os.getenv(

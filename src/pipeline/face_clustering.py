@@ -73,6 +73,27 @@ _PROPAGATE_MIN_QUALITY = float(os.getenv("FACE_PROPAGATE_MIN_QUALITY", "0.0"))
 # poster. (Was COALESCE(...,1) — fail-open — which the review flagged.)
 _UNKNOWN_FACE_COUNT = 999
 
+# Axis-3 Change-1 (purity guard hardening):
+#
+# _PURITY_2ND_NEAREST_THRESHOLD: reject cluster-based propagation when ANY
+# bridged face of a COMPETING entity is at least this cosine-similar to any
+# cluster member (anchor). Defends against propagating an anchor entity's label
+# through a cluster that's actually a mix of two lookalikes (siblings, close
+# relatives). Same threshold as _PROPAGATE_MIN_SIM by default — if a competitor
+# clears the propagation floor, we don't trust the cluster.
+_PURITY_2ND_NEAREST_THRESHOLD = float(os.getenv("FACE_PURITY_2ND_NEAREST_THRESHOLD", "0.55"))
+# _PURITY_MIN_TIGHTNESS: reject if the tightest anchor-to-anchor pairwise cosine
+# in the cluster falls below this. Loose clusters (single-linkage chains through
+# borderline bridges) propagate bystanders — measured as the MINIMUM cosine
+# between the anchor faces themselves, so a cluster that only barely coheres is
+# not trusted enough to bridge new faces.
+_PURITY_MIN_TIGHTNESS = float(os.getenv("FACE_PURITY_MIN_TIGHTNESS", "0.35"))
+
+# Axis-3 Change-2 (drive-face kNN cross-ref):
+_DRIVE_XREF_THRESHOLD = float(os.getenv("FACE_DRIVE_XREF_THRESHOLD", "0.55"))
+_DRIVE_XREF_TOP_MARGIN = float(os.getenv("FACE_DRIVE_XREF_TOP_MARGIN", "0.05"))
+_DRIVE_XREF_BATCH = int(os.getenv("FACE_DRIVE_XREF_BATCH", "5000"))
+
 # Internal gate: skip the whole pass when the face corpus hasn't grown.
 _last_face_count = -1
 
@@ -235,6 +256,48 @@ def _passes_purity(cand_emb_text: str, anchors: "np.ndarray | None") -> bool:
     return float(np.max(anchors @ v)) >= _PROPAGATE_MIN_SIM
 
 
+def _competing_entity_too_close(
+    anchors: "np.ndarray | None",
+    competitor_embs: list[str],
+) -> bool:
+    """Axis-3 Change-1: second-nearest-entity guard. Returns True iff ANY face of
+    a competing (non-anchor) entity is at least _PURITY_2ND_NEAREST_THRESHOLD
+    cosine-similar to any of the dominant entity's anchor faces. If it is, the
+    cluster is ambiguous in embedding space and we must NOT propagate the anchor
+    entity's label — the same neighborhood already contains a different person's
+    bridged face.
+
+    Fail-open on missing input: no anchors or no competitors => not too close.
+    (An empty-anchors case is already caught upstream by _passes_purity's fail-
+    closed policy, so returning False here is harmless.)"""
+    if anchors is None or len(anchors) == 0 or not competitor_embs:
+        return False
+    M = _normalized_matrix(competitor_embs)
+    if M is None or len(M) == 0:
+        return False
+    # anchors: (a, d), M: (c, d). Max pairwise cosine == max(anchors @ M.T).
+    sims = anchors @ M.T
+    return float(np.max(sims)) >= _PURITY_2ND_NEAREST_THRESHOLD
+
+
+def _cluster_too_loose(anchors: "np.ndarray | None") -> bool:
+    """Axis-3 Change-1: intra-cluster tightness guard. Returns True iff the
+    tightest anchor-to-anchor pairwise cosine falls below _PURITY_MIN_TIGHTNESS
+    — i.e. the anchor faces themselves already disagree, so the cluster is a
+    loose chain rather than one person. Single-anchor clusters have no pairwise
+    distance to measure, so return False (fail open — the existing
+    _passes_purity gate still governs candidate admission)."""
+    if anchors is None or len(anchors) < 2:
+        return False
+    # Self-similarity on the diagonal would always be 1.0; mask it before min.
+    sims = anchors @ anchors.T
+    n = sims.shape[0]
+    mask = ~np.eye(n, dtype=bool)
+    if not mask.any():
+        return False
+    return float(np.min(sims[mask])) < _PURITY_MIN_TIGHTNESS
+
+
 async def propagate_entity_faces() -> dict:
     """For each cluster with a single unambiguous dominant entity, bridge the
     cluster's currently-unbridged faces to that entity (group-photo guarded).
@@ -244,7 +307,8 @@ async def propagate_entity_faces() -> dict:
     """
     analyzer = get_analyzer_pool()
     stats = {"clusters_with_entity": 0, "propagated": 0, "drive_cross_ref": 0,
-             "ambiguous_skipped": 0, "impurity_skipped": 0}
+             "ambiguous_skipped": 0, "impurity_skipped": 0,
+             "competitor_skipped": 0, "loose_cluster_skipped": 0}
 
     async with analyzer.acquire() as conn:
         # Per cluster: which entities are already bridged, and to how many faces.
@@ -286,6 +350,32 @@ async def propagate_entity_faces() -> dict:
                   AND f.embedding_vec IS NOT NULL
             """, cluster_id, entity_id)
             anchors = _normalized_matrix([r["emb"] for r in anchor_rows])
+
+            # Axis-3 Change-1: intra-cluster tightness. If the anchor faces
+            # themselves disagree (min pairwise cosine below the tightness
+            # threshold), the cluster is a loose single-linkage chain rather
+            # than one person. Skip propagation for this cluster entirely.
+            if _cluster_too_loose(anchors):
+                stats["loose_cluster_skipped"] += 1
+                continue
+
+            # Axis-3 Change-1: second-nearest-entity guard. Pull the embeddings
+            # of every OTHER bridged entity's face that shares this cluster's
+            # neighborhood (via cluster co-membership, the strongest available
+            # notion of "nearby in embedding space" without a full kNN scan).
+            # If any competitor face lands within cosine >= the guard threshold
+            # of an anchor face, the neighborhood is ambiguous and this cluster
+            # cannot be safely propagated.
+            competitor_rows = await conn.fetch("""
+                SELECT f.embedding_vec::text AS emb
+                FROM facetracker.faces f
+                JOIN public.entity_faces ef ON ef.face_id = f.id
+                WHERE f.cluster_id = $1 AND ef.entity_id <> $2::uuid
+                  AND f.embedding_vec IS NOT NULL
+            """, cluster_id, entity_id)
+            if _competing_entity_too_close(anchors, [r["emb"] for r in competitor_rows]):
+                stats["competitor_skipped"] += 1
+                continue
 
             # Candidate sibling faces in this cluster that are NOT yet bridged,
             # restricted to low-face-count images (group-photo guard, fail-closed
@@ -338,6 +428,116 @@ async def propagate_entity_faces() -> dict:
                 dominant_updates,
             )
 
+    return stats
+
+
+async def propagate_drive_faces_via_knn() -> dict:
+    """Axis-3 Change-2: bridge orphan drive faces to entities via direct FAISS
+    kNN against bridged collector-face anchors, WITHOUT requiring cluster
+    co-membership.
+
+    The cluster-based drive_cross_ref path (in propagate_entity_faces) is
+    starved: a drive face only gets attributed when it co-clusters with a
+    bridged collector face, which rarely happens across independent scans of
+    the drive corpus. This path fires kNN directly against the anchor set, so
+    an orphan drive face wins attribution whenever a clear single-entity
+    match exists in embedding space.
+
+    Guarded by:
+      - top-1 cosine >= _DRIVE_XREF_THRESHOLD (default 0.55)
+      - top-1 entity matches top-2 entity, OR top-2 cosine < top-1 - margin
+        (default 0.05) — a "clear winner" gate that rejects ambiguous kNN
+        neighborhoods (e.g. two entities with faces equally close).
+
+    Confidence is attenuated (top-1 cosine * 0.7) because this is an INDIRECT
+    attribution (no platform-owner link on the source image, no co-cluster
+    corroboration). Idempotent via ON CONFLICT DO NOTHING on entity_faces.
+
+    Uses FAISS if available; if the import fails we log and return a skipped
+    stats row so the phase never hard-fails on a missing optional dep."""
+    stats = {"drive_faces_scanned": 0, "linked": 0, "clear_winner_skipped": 0,
+             "below_threshold_skipped": 0, "no_anchors": 0}
+    try:
+        import faiss  # noqa: F401
+    except ImportError:
+        logger.warning("faiss unavailable; skipping drive_face_xref")
+        return {"skipped": "faiss_unavailable"}
+
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        # Bridged anchors: every face already linked to an entity, in embedding
+        # space. This is the "known people" corpus we kNN against.
+        anchor_rows = await conn.fetch("""
+            SELECT ef.entity_id::text AS entity_id, f.id AS face_id,
+                   f.embedding_vec::text AS emb
+            FROM public.entity_faces ef
+            JOIN facetracker.faces f ON f.id = ef.face_id
+            WHERE f.embedding_vec IS NOT NULL
+        """)
+        if not anchor_rows:
+            stats["no_anchors"] = 1
+            return stats
+
+        # Orphan drive faces: no entity_faces row yet. Bounded per pass so a
+        # huge orphan pool doesn't monopolise a cycle; the next pass picks up
+        # where this one left off (idempotent inserts).
+        drive_rows = await conn.fetch("""
+            SELECT f.id AS face_id, f.embedding_vec::text AS emb
+            FROM facetracker.faces f
+            LEFT JOIN public.entity_faces ef ON ef.face_id = f.id
+            WHERE ef.face_id IS NULL AND f.embedding_vec IS NOT NULL
+            LIMIT $1
+        """, _DRIVE_XREF_BATCH)
+
+    stats["drive_faces_scanned"] = len(drive_rows)
+    if not drive_rows:
+        return stats
+
+    # Build the in-memory FAISS index over anchor embeddings. L2-normalize both
+    # sides so IndexFlatIP inner-product == cosine similarity.
+    anchor_entity_ids = [r["entity_id"] for r in anchor_rows]
+    A = _normalized_matrix([r["emb"] for r in anchor_rows])
+    D = _normalized_matrix([r["emb"] for r in drive_rows])
+    if A is None or D is None:
+        return stats
+
+    import faiss  # confirmed importable above
+    index = faiss.IndexFlatIP(A.shape[1])
+    index.add(np.ascontiguousarray(A, dtype=np.float32))
+    k = min(5, len(A))
+    sims, idxs = index.search(np.ascontiguousarray(D, dtype=np.float32), k)
+
+    new_links: list[tuple] = []
+    for i, row in enumerate(drive_rows):
+        top1_sim = float(sims[i, 0])
+        if top1_sim < _DRIVE_XREF_THRESHOLD:
+            stats["below_threshold_skipped"] += 1
+            continue
+        top1_entity = anchor_entity_ids[int(idxs[i, 0])]
+        # Clear-winner test: prefer top-1 iff its entity matches top-2's entity
+        # OR top-2 cosine is at least _DRIVE_XREF_TOP_MARGIN below top-1. This
+        # rejects genuine kNN ambiguity (two different entities equally close).
+        if k >= 2:
+            top2_sim = float(sims[i, 1])
+            top2_entity = anchor_entity_ids[int(idxs[i, 1])]
+            if top1_entity != top2_entity and top2_sim >= top1_sim - _DRIVE_XREF_TOP_MARGIN:
+                stats["clear_winner_skipped"] += 1
+                continue
+        confidence = top1_sim * 0.7  # attenuate: indirect attribution
+        new_links.append((top1_entity, int(row["face_id"]), None,
+                          float(confidence), "drive_cross_ref_knn"))
+
+    if new_links:
+        async with analyzer.acquire() as conn:
+            await conn.executemany("""
+                INSERT INTO public.entity_faces
+                    (entity_id, face_id, media_item_id, confidence, method)
+                VALUES ($1::uuid, $2, $3, $4, $5)
+                ON CONFLICT (entity_id, face_id) DO NOTHING
+            """, new_links)
+        stats["linked"] = len(new_links)
+
+    logger.info("Drive-face kNN xref: %s", stats)
     return stats
 
 

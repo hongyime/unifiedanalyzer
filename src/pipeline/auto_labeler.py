@@ -49,6 +49,9 @@ _HARD_SIGNALS: frozenset[str] = frozenset({
     "cross_platform_link", "shared_website",
     "media_face_match", "media_perceptual_match",
     "media_gps_colocation", "media_device_match",
+    # Axis-3 Change-3: face_pair_knn is deterministic-ish once the threshold +
+    # min-matches gates pass (portrait faces + >=N cosine matches at >=0.55).
+    "face_pair_knn",
 })
 
 # All cross-entity scoring signal types (mirrors identity_scorer._TYPE_WEIGHT
@@ -60,6 +63,8 @@ _SCORING_SIGNALS: frozenset[str] = frozenset({
     "shared_route_origin", "group_cooccurrence", "media_gps_colocation",
     "media_perceptual_match", "media_face_match", "media_device_match",
     "username_similar",
+    # Axis-3 Change-3: cross-entity ArcFace kNN signal.
+    "face_pair_knn",
 })
 
 _AUTO_POSITIVE_SOURCE = "auto_positive_v1"

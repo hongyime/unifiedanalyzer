@@ -62,6 +62,12 @@ _TYPE_WEIGHT = {
     # Cross-entity similar-handle candidate: two separate people share a digit-
     # stripped username (bryanseah vs bryanseah234). Moderate — surfaced in Review.
     "username_similar": 0.45,
+    # Axis-3 Change-3: direct ArcFace kNN between two entities' PORTRAIT faces,
+    # gated by >= FACE_PAIR_KNN_MIN_MATCHES matches at >= FACE_PAIR_KNN_THRESHOLD
+    # cosine. Higher weight than media_face_match (0.50) because portrait gate +
+    # min-matches guard make a false positive from siblings/lookalikes far less
+    # likely per single row.
+    "face_pair_knn": 0.60,
 }
 
 _MIN_SCORE = 0.10
