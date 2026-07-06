@@ -38,6 +38,10 @@ FEATURE_ORDER = [
     # Axis-3 Change-3: cross-entity ArcFace kNN signal (portrait-only,
     # >=FACE_PAIR_KNN_MIN_MATCHES matches). Appended — do not reorder.
     "face_pair_knn",
+    # Axis-1 MVP: entity-centroid cosine over timeline_embeddings. 16th entry —
+    # append-only; do not reorder (would invalidate every persisted feature
+    # snapshot in identity_labels).
+    "topical_similarity",
 ]
 
 _MODEL_PATH = os.getenv(

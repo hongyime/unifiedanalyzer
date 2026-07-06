@@ -68,6 +68,13 @@ _TYPE_WEIGHT = {
     # min-matches guard make a false positive from siblings/lookalikes far less
     # likely per single row.
     "face_pair_knn": 0.60,
+    # Axis-1 MVP: cosine similarity of entity-level timeline_embeddings centroids
+    # (multilingual-e5-small over timeline_events.title). Deliberately weak —
+    # topical overlap is common among peers in the same industry/subculture, so
+    # this is weaker evidence than stylistic content_similarity (0.30) or any
+    # deterministic anchor. Emitted by src/pipeline/topical_similarity.py; not a
+    # hard-anchor in auto_labeler._HARD_SIGNALS. Append-only (16th entry).
+    "topical_similarity": 0.15,
 }
 
 _MIN_SCORE = 0.10

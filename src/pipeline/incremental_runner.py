@@ -41,6 +41,8 @@ from src.pipeline.face_clustering import run_face_clustering, propagate_drive_fa
 from src.pipeline.face_pair_signals import emit_face_pair_signals
 from src.pipeline.identity_calibration import maybe_retrain
 from src.pipeline.auto_labeler import seed_ground_truth_labels
+from src.pipeline.timeline_embedder import embed_new_timeline_events
+from src.pipeline.topical_similarity import emit_topical_similarity_signals
 from src.pipeline.geocode import geocode_step
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
@@ -232,6 +234,14 @@ def _secondary_phases() -> list[tuple[str, object]]:
         ("face_pair_knn", emit_face_pair_signals),
         ("face_match_signals", rebuild_face_match_signals),
         ("auto_label_seed", seed_ground_truth_labels),
+        # Axis-1 MVP: sentence-embed new timeline_events.title into
+        # timeline_embeddings, then compute cross-entity topical_similarity from
+        # centroid cosine. content_embedding runs AFTER auto_label_seed and
+        # BEFORE identity_scoring so the topical_similarity signal is visible
+        # to the scorer. topical_similarity runs immediately after so it sees
+        # this cycle's freshly embedded rows.
+        ("content_embedding", embed_new_timeline_events),
+        ("topical_similarity", emit_topical_similarity_signals),
         ("calibration_retrain", maybe_retrain),
         ("identity_scoring", compute_identity_scores),
         ("geocode", geocode_step),

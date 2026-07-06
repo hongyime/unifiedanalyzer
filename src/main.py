@@ -29,6 +29,15 @@ def main():
     )
     hard_reset.add_argument("--yes", action="store_true", help="Skip the confirmation guard")
     sub.add_parser("schema", help="Apply database schema (idempotent)")
+    # Axis-1 MVP: drain the timeline_embeddings backlog (6.28M rows on
+    # first run). Runs the embedder in a loop until 0 new rows come back,
+    # so it can be run alongside the scheduler without wedging it.
+    ebf = sub.add_parser("embed-backfill",
+                         help="Backfill timeline_embeddings (Axis-1 semantic search)")
+    ebf.add_argument("--batch-size", type=int, default=500,
+                     help="Per-iteration batch size (default 500)")
+    ebf.add_argument("--max-batches", type=int, default=None,
+                     help="Optional cap on total batches (default: run until drained)")
 
     args = parser.parse_args()
 
@@ -111,6 +120,42 @@ def main():
             await init_pools()
             logger.info("Schema applied successfully")
             await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "embed-backfill":
+        # Axis-1 MVP: drive timeline_embeddings from 0 -> 6.28M. Loop until
+        # a batch returns processed=0. Progress is printed per batch so the
+        # operator can watch a long backfill without inspecting the DB.
+        from src.db.connection import init_pools, close_pools
+        from src.pipeline.timeline_embedder import embed_new_timeline_events
+
+        async def _run():
+            await init_pools()
+            try:
+                total = 0
+                iters = 0
+                while True:
+                    if args.max_batches is not None and iters >= args.max_batches:
+                        logger.info("embed-backfill: reached --max-batches=%d, stopping", args.max_batches)
+                        break
+                    stats = await embed_new_timeline_events(
+                        batch_size=args.batch_size,
+                        max_events=args.batch_size,
+                    )
+                    processed = int(stats.get("processed", 0) or 0)
+                    if stats.get("skipped"):
+                        logger.warning("embed-backfill: phase skipped: %s", stats)
+                        break
+                    if processed == 0:
+                        logger.info("embed-backfill: drained. total=%d in %d iterations", total, iters)
+                        break
+                    total += processed
+                    iters += 1
+                    logger.info("embed-backfill: iter=%d processed=%d cumulative=%d",
+                                iters, processed, total)
+            finally:
+                await close_pools()
 
         asyncio.run(_run())
 

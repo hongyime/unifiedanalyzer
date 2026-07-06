@@ -65,6 +65,10 @@ _SCORING_SIGNALS: frozenset[str] = frozenset({
     "username_similar",
     # Axis-3 Change-3: cross-entity ArcFace kNN signal.
     "face_pair_knn",
+    # Axis-1 MVP: entity-centroid cosine over timeline_embeddings. Weak;
+    # deliberately NOT added to _HARD_SIGNALS — topical overlap is not
+    # deterministic (peers/co-workers commonly share topics).
+    "topical_similarity",
 })
 
 _AUTO_POSITIVE_SOURCE = "auto_positive_v1"
