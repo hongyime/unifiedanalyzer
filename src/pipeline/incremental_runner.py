@@ -37,7 +37,8 @@ from src.pipeline.media_analysis_tier1 import (
     rebuild_face_match_signals,
 )
 from src.pipeline.identity_scorer import compute_identity_scores
-from src.pipeline.face_clustering import run_face_clustering
+from src.pipeline.face_clustering import run_face_clustering, propagate_drive_faces_via_knn
+from src.pipeline.face_pair_signals import emit_face_pair_signals
 from src.pipeline.identity_calibration import maybe_retrain
 from src.pipeline.auto_labeler import seed_ground_truth_labels
 from src.pipeline.geocode import geocode_step
@@ -218,6 +219,17 @@ def _secondary_phases() -> list[tuple[str, object]]:
         ("media_ocr", analyze_media_ocr),
         ("media_faces", analyze_media_faces),
         ("face_clustering", run_face_clustering),
+        # Axis-3 Change-2: bridge orphan drive faces via direct FAISS kNN vs the
+        # bridged-anchor corpus, so a drive face gets attributed even when it
+        # didn't co-cluster with a collector face (the co-membership path was
+        # starved). Runs AFTER face_clustering — clustering may have added new
+        # anchors — and BEFORE face_match_signals so its inserts are visible.
+        ("drive_face_xref", propagate_drive_faces_via_knn),
+        # Axis-3 Change-3: cross-entity face_pair_knn signal (portrait-gated,
+        # >=N matches). Emits identity_signals rows the scorer + auto_labeler
+        # now recognise. Runs after drive_face_xref so it sees anchors added
+        # by the kNN path.
+        ("face_pair_knn", emit_face_pair_signals),
         ("face_match_signals", rebuild_face_match_signals),
         ("auto_label_seed", seed_ground_truth_labels),
         ("calibration_retrain", maybe_retrain),

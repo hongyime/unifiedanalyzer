@@ -293,3 +293,16 @@ CREATE TABLE IF NOT EXISTS identity_labels (
     created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     PRIMARY KEY (entity_a, entity_b)
 );
+
+-- Axis-3 Change-4: resumable cursor for face_worker.ingest_drive_media(). One
+-- row per configured DRIVE_SOURCES entry; the worker walks in deterministic
+-- (mtime ASC, path ASC) order and checkpoints (last_mtime_walked,
+-- last_path_walked) every FACE_WORKER_CHECKPOINT_EVERY successful files, so a
+-- restart resumes where it left off instead of re-walking the whole tree.
+CREATE TABLE IF NOT EXISTS drive_scan_state (
+    drive_path        TEXT PRIMARY KEY,
+    last_mtime_walked TIMESTAMPTZ,
+    last_path_walked  TEXT,
+    files_indexed     BIGINT DEFAULT 0,
+    updated_at        TIMESTAMPTZ DEFAULT NOW()
+);
