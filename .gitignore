@@ -259,5 +259,7 @@ frontend/node_modules/
 !.deepsource.toml
 skills/
 skills-lock.json
-docs/
+# NOTE: docs/ used to be gitignored here (added by the sourcerepo sync
+# workflow, 1e4814f). Removed because analyzer docs are project-specific
+# tracked content, not sync-mirrored templates. See docs/README.md.
 templates/

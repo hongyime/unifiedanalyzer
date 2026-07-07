@@ -144,10 +144,12 @@ def main():
         from src.db.connection import init_pools, close_pools, get_analyzer_pool
         from src.pipeline.timeline_embedder import embed_new_timeline_events
 
-        # Optional rotating file logger for long-running backfills. Append
-        # mode + timestamped format so `nohup ... > file 2>&1` truncating
-        # can no longer erase the failure signature — this handler
-        # writes independently.
+        # Optional rotating file logger for long-running backfills. When set,
+        # this becomes the SOLE handler on the root logger (basicConfig's
+        # default StreamHandler is removed) so each log line writes exactly
+        # once. Under the docker/embed-backfill-loop.sh wrapper, python's
+        # stdout is redirected to a sidecar .stdout file, and this file
+        # handler owns the primary structured log.
         if args.log_file:
             try:
                 from logging.handlers import RotatingFileHandler
@@ -155,8 +157,15 @@ def main():
                                          backupCount=3, encoding="utf-8")
                 fh.setFormatter(logging.Formatter(
                     "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-                logging.getLogger().addHandler(fh)
-                logger.info("embed-backfill: file logger attached at %s", args.log_file)
+                root = logging.getLogger()
+                # Drop basicConfig's StreamHandler so we don't emit each record
+                # twice (once to stdout that the wrapper appends, once here).
+                for h in list(root.handlers):
+                    if isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler):
+                        root.removeHandler(h)
+                root.addHandler(fh)
+                logger.info("embed-backfill: file logger attached at %s (sole handler)",
+                            args.log_file)
             except Exception:
                 logger.exception("embed-backfill: could not attach file logger; continuing on stdout")
 
