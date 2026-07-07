@@ -27,6 +27,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ src/
 COPY --from=frontend /app/frontend/dist/ frontend/dist/
+COPY docker/embed-backfill-loop.sh /app/embed-backfill-loop.sh
+RUN chmod +x /app/embed-backfill-loop.sh
 
 # Port comes from API_PORT (.env -> 8002); the entrypoint honors it and also
 # starts the scheduler via the app lifespan. EXPOSE is documentation only.

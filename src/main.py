@@ -38,6 +38,14 @@ def main():
                      help="Per-iteration batch size (default 500)")
     ebf.add_argument("--max-batches", type=int, default=None,
                      help="Optional cap on total batches (default: run until drained)")
+    ebf.add_argument("--log-file", type=str, default=None,
+                     help="Also append structured logs to this path (rotating, ~50MB)")
+    ebf.add_argument("--sleep-between", type=float, default=0.0,
+                     help="Seconds to sleep between successful batches (default 0)")
+    ebf.add_argument("--fail-backoff", type=float, default=30.0,
+                     help="Seconds to sleep after a failed iteration (default 30)")
+    ebf.add_argument("--max-consecutive-failures", type=int, default=5,
+                     help="Exit after this many failures in a row (default 5)")
 
     args = parser.parse_args()
 
@@ -125,35 +133,131 @@ def main():
 
     elif args.command == "embed-backfill":
         # Axis-1 MVP: drive timeline_embeddings from 0 -> 6.28M. Loop until
-        # a batch returns processed=0. Progress is printed per batch so the
-        # operator can watch a long backfill without inspecting the DB.
-        from src.db.connection import init_pools, close_pools
+        # a batch returns processed=0. Per-batch progress + memory + pool
+        # telemetry is logged so a stall leaves a clear signature. Per-iter
+        # try/except means a bad batch backs off + retries rather than
+        # killing the whole loop (which used to happen silently and drop
+        # progress on the floor).
+        import time
+        import signal
+        import traceback
+        from src.db.connection import init_pools, close_pools, get_analyzer_pool
         from src.pipeline.timeline_embedder import embed_new_timeline_events
+
+        # Optional rotating file logger for long-running backfills. Append
+        # mode + timestamped format so `nohup ... > file 2>&1` truncating
+        # can no longer erase the failure signature — this handler
+        # writes independently.
+        if args.log_file:
+            try:
+                from logging.handlers import RotatingFileHandler
+                fh = RotatingFileHandler(args.log_file, maxBytes=50 * 1024 * 1024,
+                                         backupCount=3, encoding="utf-8")
+                fh.setFormatter(logging.Formatter(
+                    "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+                logging.getLogger().addHandler(fh)
+                logger.info("embed-backfill: file logger attached at %s", args.log_file)
+            except Exception:
+                logger.exception("embed-backfill: could not attach file logger; continuing on stdout")
+
+        # SIGTERM/SIGINT: set a flag; the loop exits at the next iteration
+        # boundary. Prevents mid-batch state loss (an interrupted commit
+        # would rollback the batch cleanly).
+        stop_flag = {"stop": False}
+        def _handle_sig(signum, frame):
+            logger.warning("embed-backfill: received signal %d, will exit after current batch", signum)
+            stop_flag["stop"] = True
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, _handle_sig)
+            except (OSError, ValueError):
+                pass  # non-main thread or platform-unsupported
+
+        def _mem_mb() -> float:
+            try:
+                import resource
+                # ru_maxrss on Linux is KB, on macOS is bytes. Container -> Linux.
+                return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+            except Exception:
+                return -1.0
+
+        async def _pool_state() -> str:
+            try:
+                pool = get_analyzer_pool()
+                return f"size={pool.get_size()} idle={pool.get_idle_size()} max={pool.get_max_size()}"
+            except Exception:
+                return "unknown"
 
         async def _run():
             await init_pools()
             try:
                 total = 0
                 iters = 0
-                while True:
+                fail_streak = 0
+                start = time.monotonic()
+                logger.info(
+                    "embed-backfill: starting batch_size=%d max_batches=%s sleep=%.1fs "
+                    "fail_backoff=%.1fs max_consec_fail=%d",
+                    args.batch_size, args.max_batches, args.sleep_between,
+                    args.fail_backoff, args.max_consecutive_failures)
+                while not stop_flag["stop"]:
                     if args.max_batches is not None and iters >= args.max_batches:
                         logger.info("embed-backfill: reached --max-batches=%d, stopping", args.max_batches)
                         break
-                    stats = await embed_new_timeline_events(
-                        batch_size=args.batch_size,
-                        max_events=args.batch_size,
-                    )
-                    processed = int(stats.get("processed", 0) or 0)
-                    if stats.get("skipped"):
-                        logger.warning("embed-backfill: phase skipped: %s", stats)
+                    t0 = time.monotonic()
+                    try:
+                        stats = await embed_new_timeline_events(
+                            batch_size=args.batch_size,
+                            max_events=args.batch_size,
+                        )
+                        elapsed = time.monotonic() - t0
+                        pool_state = await _pool_state()
+                        if stats.get("skipped"):
+                            logger.warning(
+                                "embed-backfill: phase skipped: %s (mem=%.0fMB pool=%s)",
+                                stats, _mem_mb(), pool_state)
+                            fail_streak += 1
+                        else:
+                            processed = int(stats.get("processed", 0) or 0)
+                            if processed == 0:
+                                logger.info(
+                                    "embed-backfill: DRAINED. total=%d iters=%d "
+                                    "wall=%.1fs mem=%.0fMB pool=%s",
+                                    total, iters, time.monotonic() - start,
+                                    _mem_mb(), pool_state)
+                                break
+                            total += processed
+                            iters += 1
+                            fail_streak = 0
+                            rate = processed / max(elapsed, 0.001)
+                            logger.info(
+                                "embed-backfill: iter=%d processed=%d cumulative=%d "
+                                "batch_wall=%.1fs rate=%.1fev/s mem=%.0fMB pool=%s",
+                                iters, processed, total, elapsed, rate,
+                                _mem_mb(), pool_state)
+                            if args.sleep_between > 0:
+                                await asyncio.sleep(args.sleep_between)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        fail_streak += 1
+                        elapsed = time.monotonic() - t0
+                        logger.error(
+                            "embed-backfill: iter FAILED after %.1fs (streak=%d) %s: %s\n%s",
+                            elapsed, fail_streak, type(e).__name__, e,
+                            traceback.format_exc())
+                    if fail_streak >= args.max_consecutive_failures:
+                        logger.error(
+                            "embed-backfill: %d consecutive failures, giving up. "
+                            "total=%d iters=%d wall=%.1fs",
+                            fail_streak, total, iters, time.monotonic() - start)
                         break
-                    if processed == 0:
-                        logger.info("embed-backfill: drained. total=%d in %d iterations", total, iters)
-                        break
-                    total += processed
-                    iters += 1
-                    logger.info("embed-backfill: iter=%d processed=%d cumulative=%d",
-                                iters, processed, total)
+                    if fail_streak > 0:
+                        logger.info("embed-backfill: backing off %.1fs before retry", args.fail_backoff)
+                        await asyncio.sleep(args.fail_backoff)
+                logger.info(
+                    "embed-backfill: exit. total_processed=%d iters=%d wall=%.1fs stop_flag=%s",
+                    total, iters, time.monotonic() - start, stop_flag["stop"])
             finally:
                 await close_pools()
 
