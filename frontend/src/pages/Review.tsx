@@ -6,6 +6,7 @@ import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { LoadingSpinner } from '../components/ui/LoadingSpinner'
 import { Confidence } from '../components/ui/Confidence'
+import { Card } from '../components/ui/Card'
 import { LABELS } from '../lib/labels'
 
 /** Platform accounts to show UNDER the identity line, without repeating it.
@@ -69,11 +70,11 @@ export default function ReviewPage() {
       ) : (
         <div className="flex flex-col gap-2">
           {candidates.map((c, i) => (
-            <div key={`${c.entity_a}-${c.entity_b}-${i}`} className="card flex-between" style={{ alignItems: 'center', gap: '1rem' }}>
-              <div className="flex gap-1" style={{ alignItems: 'center' }}>
+            <Card key={`${c.entity_a}-${c.entity_b}-${i}`} className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-1">
                 <FaceAvatar url={c.face_a} name={c.name_a} size={44} />
                 <FaceAvatar url={c.face_b} name={c.name_b} size={44} />
-                <div className="min-w-0" style={{ marginLeft: '0.5rem' }}>
+                <div className="ml-2 min-w-0">
                   <div className="font-medium">
                     <Link to={`/entities/${c.entity_a}`} title="Open to compare">{c.display_a}</Link>
                     {' '}&harr;{' '}
@@ -106,7 +107,7 @@ export default function ReviewPage() {
                   Not same
                 </button>
               </div>
-            </div>
+            </Card>
           ))}
         </div>
       )}

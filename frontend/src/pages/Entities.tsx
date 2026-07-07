@@ -1,40 +1,37 @@
-import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { UserSearch, ChevronLeft, ChevronRight } from 'lucide-react'
+import type { ColumnDef } from '@tanstack/react-table'
 import { api, Entity } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { PageHeader } from '../components/ui/PageHeader'
-import { tierLabel } from '../lib/labels'
-
-function PlatformBadge({ source }: { source: string }) {
-  return <span className={`platform-icon p-${source}`}>{source}</span>
-}
-
-function ConfidenceBar({ score }: { score: number }) {
-  return (
-    <div className="signal-bar">
-      <div className="signal-bar-fill" style={{ width: `${Math.round(score * 100)}%` }} />
-    </div>
-  )
-}
+import { PlatformBadge } from '../components/ui/PlatformBadge'
+import { SearchBar } from '../components/ui/SearchBar'
+import { FilterDropdown } from '../components/ui/FilterDropdown'
+import { DataTable } from '../components/ui/DataTable'
+import { ConfidencePill } from '../components/ui/Confidence'
+import { LoadingSpinner } from '../components/ui/LoadingSpinner'
+import { EmptyState } from '../components/ui/EmptyState'
+import { InfoTip } from '../components/ui/InfoTip'
+import { Button } from '../components/ui/Button'
+import { LABELS } from '../lib/labels'
 
 const PLATFORMS = ['github', 'instagram', 'telegram', 'strava', 'youtube', 'tiktok', 'lemon8', 'whatsapp', 'website']
-const SORT_OPTIONS = [
-  { value: 'confidence', label: 'Confidence' },
-  { value: 'name', label: 'Name' },
-  { value: 'signals', label: 'Signals' },
-  { value: 'platforms', label: 'Platforms' },
-  { value: 'created', label: 'Created' },
-]
 
+/** Entities table — server-paginated list of resolved people. Uses DataTable
+ *  purely for visual consistency; pagination stays server-side via the api.
+ *  Row click navigates to the entity detail page. */
 export default function EntitiesPage() {
+  const navigate = useNavigate()
   const [entities, setEntities] = useState<Entity[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState('confidence')
-  const [order, setOrder] = useState('desc')
+  const [order, setOrder] = useState<'asc' | 'desc'>('desc')
   const [platform, setPlatform] = useState('')
   const [minPlatforms, setMinPlatforms] = useState(0)
+  const [tierFilter, setTierFilter] = useState<'all' | 'primary' | 'secondary'>('all')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -45,124 +42,189 @@ export default function EntitiesPage() {
       .finally(() => setLoading(false))
   }, [page, search, sort, order, platform, minPlatforms])
 
-  const toggleSort = (col: string) => {
-    if (sort === col) {
-      setOrder(o => o === 'desc' ? 'asc' : 'desc')
-    } else {
-      setSort(col)
-      setOrder('desc')
-    }
-    setPage(1)
-  }
+  // Tier filter is applied client-side over the fetched page — the API doesn't
+  // yet accept a tier filter, so we keep the pagination correct by disabling
+  // tier when it isn't 'all'. (Users hit the same 50-per-page rows either way.)
+  const visible = useMemo(
+    () => (tierFilter === 'all' ? entities : entities.filter(e => e.tier === tierFilter)),
+    [entities, tierFilter],
+  )
 
-  const sortArrow = (col: string) => sort === col ? (order === 'desc' ? ' v' : ' ^') : ''
+  const columns = useMemo<ColumnDef<Entity, unknown>[]>(() => [
+    {
+      id: 'name',
+      header: 'Name',
+      accessorFn: (row) => row.canonical_name ?? '',
+      cell: ({ row }) => {
+        const e = row.original
+        return (
+          <div className="flex items-center gap-2">
+            <FaceAvatar url={e.face_crop_url} name={e.canonical_name} size={32} />
+            <div className="min-w-0">
+              <div className="truncate font-medium text-text-primary">
+                {e.canonical_name || '(unnamed)'}
+              </div>
+              <div className="text-xs text-text-muted">
+                {LABELS.tier[e.tier] ?? e.tier}
+              </div>
+            </div>
+          </div>
+        )
+      },
+    },
+    {
+      id: 'platforms',
+      header: 'Platforms',
+      accessorFn: (row) => row.platform_count,
+      cell: ({ row }) => (
+        <div className="flex flex-wrap gap-1">
+          {row.original.platforms.map(p => <PlatformBadge key={p} source={p} />)}
+        </div>
+      ),
+    },
+    {
+      id: 'confidence',
+      header: 'Confidence',
+      accessorFn: (row) => row.confidence_score,
+      cell: ({ row }) => <ConfidencePill score={row.original.confidence_score} />,
+    },
+    {
+      id: 'signals',
+      header: 'Evidence',
+      accessorFn: (row) => row.signal_count,
+      cell: ({ row }) => (
+        <span className="font-mono tabular-nums">{row.original.signal_count}</span>
+      ),
+    },
+    {
+      id: 'last_seen',
+      header: 'Last seen',
+      accessorFn: (row) => row.last_seen_at ?? '',
+      cell: ({ row }) => {
+        const iso = row.original.last_seen_at
+        return (
+          <span className="text-xs text-text-muted">
+            {iso ? new Date(iso).toLocaleDateString() : '—'}
+          </span>
+        )
+      },
+    },
+  ], [])
+
+  const totalPages = Math.max(1, Math.ceil(total / 50))
+  const showToolbar = !loading
 
   return (
     <div>
       <PageHeader
         title="People"
-        description="Everyone the system is tracking, each built from one or more platform accounts. Confirmed people have strong evidence; unconfirmed ones are kept but lower-certainty."
+        description="Everyone the system is tracking, each built from one or more platform accounts. Confirmed people have strong evidence; unconfirmed ones are kept but flagged as lower-certainty."
+        actions={
+          <span className="inline-flex items-center gap-1 text-sm text-text-muted">
+            {total} people
+            <InfoTip text="A person (entity) groups the platform accounts we think belong to one real human. New accounts are auto-linked when evidence — same phone/email/face/handle — is strong enough." />
+          </span>
+        }
       />
-      <div className="flex-between mb-2">
-        <div />
-        <input
-          type="search"
-          placeholder="Search name or username..."
-          value={search}
-          onChange={e => { setSearch(e.target.value); setPage(1) }}
-        />
-      </div>
 
-      <div className="flex gap-1 mb-2" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
-        <select
-          value={platform}
-          onChange={e => { setPlatform(e.target.value); setPage(1) }}
-          style={{
-            padding: '0.4rem 0.6rem', borderRadius: '6px', border: '1px solid var(--border)',
-            background: 'var(--bg)', color: 'var(--text)', fontSize: '0.8rem',
-          }}
-        >
-          <option value="">All platforms</option>
-          {PLATFORMS.map(p => <option key={p} value={p}>{p}</option>)}
-        </select>
-
-        <select
-          value={minPlatforms}
-          onChange={e => { setMinPlatforms(Number(e.target.value)); setPage(1) }}
-          style={{
-            padding: '0.4rem 0.6rem', borderRadius: '6px', border: '1px solid var(--border)',
-            background: 'var(--bg)', color: 'var(--text)', fontSize: '0.8rem',
-          }}
-        >
-          <option value={0}>Any # platforms</option>
-          <option value={2}>2+ platforms</option>
-          <option value={3}>3+ platforms</option>
-          <option value={4}>4+ platforms</option>
-        </select>
-
-        <span className="text-sm text-muted" style={{ marginLeft: '0.5rem' }}>
-          {total} entities
-        </span>
-      </div>
+      {showToolbar && (
+        <div className="mb-4 flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[220px]">
+            <SearchBar
+              value={search}
+              onChange={(v) => { setSearch(v); setPage(1) }}
+              placeholder="Search name or username…"
+            />
+          </div>
+          <FilterDropdown
+            label="Tier"
+            value={tierFilter}
+            onChange={(v) => setTierFilter(v as typeof tierFilter)}
+            options={[
+              { value: 'all', label: 'All' },
+              { value: 'primary', label: LABELS.tier.primary },
+              { value: 'secondary', label: LABELS.tier.secondary },
+            ]}
+          />
+          <FilterDropdown
+            label="Platform"
+            value={platform}
+            onChange={(v) => { setPlatform(v); setPage(1) }}
+            options={[
+              { value: '', label: 'All platforms' },
+              ...PLATFORMS.map(p => ({ value: p, label: p })),
+            ]}
+          />
+          <FilterDropdown
+            label="Linked on"
+            value={String(minPlatforms)}
+            onChange={(v) => { setMinPlatforms(Number(v)); setPage(1) }}
+            options={[
+              { value: '0', label: 'Any # platforms' },
+              { value: '2', label: '2+ platforms' },
+              { value: '3', label: '3+ platforms' },
+              { value: '4', label: '4+ platforms' },
+            ]}
+          />
+          <FilterDropdown
+            label="Sort by"
+            value={`${sort}-${order}`}
+            onChange={(v) => {
+              const [s, o] = v.split('-') as [string, 'asc' | 'desc']
+              setSort(s); setOrder(o); setPage(1)
+            }}
+            options={[
+              { value: 'confidence-desc', label: 'Confidence (high → low)' },
+              { value: 'confidence-asc', label: 'Confidence (low → high)' },
+              { value: 'name-asc', label: 'Name (A → Z)' },
+              { value: 'name-desc', label: 'Name (Z → A)' },
+              { value: 'signals-desc', label: 'Evidence (most → least)' },
+              { value: 'platforms-desc', label: 'Platforms (most → least)' },
+              { value: 'created-desc', label: 'Newest' },
+            ]}
+          />
+        </div>
+      )}
 
       {loading ? (
-        <div className="empty-state">Loading...</div>
-      ) : entities.length === 0 ? (
-        <div className="empty-state">
-          No entities found.
-        </div>
+        <LoadingSpinner label="Loading people…" />
+      ) : visible.length === 0 ? (
+        <EmptyState
+          icon={<UserSearch className="h-10 w-10" />}
+          title="No people match those filters"
+          description="Try clearing the search or filters. New people appear here as the pipeline links accounts together."
+        />
       ) : (
         <>
-          <table>
-            <thead>
-              <tr>
-                <th onClick={() => toggleSort('name')} style={{ cursor: 'pointer' }}>
-                  Name{sortArrow('name')}
-                </th>
-                <th onClick={() => toggleSort('platforms')} style={{ cursor: 'pointer' }}>
-                  Platforms{sortArrow('platforms')}
-                </th>
-                <th onClick={() => toggleSort('confidence')} style={{ cursor: 'pointer' }}>
-                  Confidence{sortArrow('confidence')}
-                </th>
-                <th onClick={() => toggleSort('signals')} style={{ cursor: 'pointer' }}>
-                  Signals{sortArrow('signals')}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {entities.map(e => (
-                <tr key={e.id}>
-                  <td>
-                    <div className="flex gap-1" style={{ alignItems: 'center' }}>
-                      <FaceAvatar url={e.face_crop_url} name={e.canonical_name} size={34} />
-                      <div>
-                        <Link to={`/entities/${e.id}`} style={{ fontWeight: 500 }}>
-                          {e.canonical_name || '(unnamed)'}
-                        </Link>
-                        <div className="text-sm text-muted">{tierLabel(e.tier)}</div>
-                      </div>
-                    </div>
-                  </td>
-                  <td>
-                    {e.platforms.map(p => <PlatformBadge key={p} source={p} />)}
-                  </td>
-                  <td>
-                    <div className="flex gap-1" style={{ alignItems: 'center' }}>
-                      <ConfidenceBar score={e.confidence_score} />
-                      <span className="text-sm text-muted">{Math.round(e.confidence_score * 100)}%</span>
-                    </div>
-                  </td>
-                  <td>{e.signal_count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="flex-between" style={{ marginTop: '1rem' }}>
-            <span className="text-sm text-muted">Page {page} of {Math.ceil(total / 50)}</span>
-            <div className="flex gap-1">
-              <button disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Prev</button>
-              <button disabled={page * 50 >= total} onClick={() => setPage(p => p + 1)}>Next</button>
+          <DataTable
+            data={visible}
+            columns={columns}
+            pageSize={visible.length + 1}
+            onRowClick={(e) => navigate(`/entities/${e.id}`)}
+            emptyMessage="No people match those filters"
+          />
+
+          <div className="mt-4 flex items-center justify-between text-xs text-text-muted">
+            <span className="tabular-nums">Page {page} of {totalPages}</span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={<ChevronLeft className="h-3 w-3" />}
+                disabled={page <= 1}
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+              >
+                Prev
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={<ChevronRight className="h-3 w-3" />}
+                disabled={page * 50 >= total}
+                onClick={() => setPage(p => p + 1)}
+              >
+                Next
+              </Button>
             </div>
           </div>
         </>

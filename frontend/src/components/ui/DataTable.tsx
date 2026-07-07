@@ -21,6 +21,12 @@ interface DataTableProps<T> {
   className?: string
   /** When true, cells render with the mono face (nice for IDs / hashes). */
   monoCells?: boolean
+  /** Client-side page size. Default 20. Set to a large value (e.g. `data.length + 1`)
+   *  to effectively disable client pagination — useful when the caller does
+   *  server-side pagination and wraps DataTable with its own Prev/Next. */
+  pageSize?: number
+  /** Fired when a row is clicked. When set, rows show a pointer cursor. */
+  onRowClick?: (row: T) => void
 }
 
 /**
@@ -33,6 +39,8 @@ export function DataTable<T>({
   emptyMessage = 'No data',
   className,
   monoCells = false,
+  pageSize = 20,
+  onRowClick,
 }: DataTableProps<T>) {
   const [sorting, setSorting] = useState<SortingState>([])
 
@@ -40,6 +48,7 @@ export function DataTable<T>({
     data,
     columns,
     state: { sorting },
+    initialState: { pagination: { pageSize } },
     onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
@@ -72,7 +81,14 @@ export function DataTable<T>({
           </thead>
           <tbody className="divide-y divide-border">
             {table.getRowModel().rows.map((row) => (
-              <tr key={row.id} className="hover:bg-white/5">
+              <tr
+                key={row.id}
+                onClick={onRowClick ? () => onRowClick(row.original) : undefined}
+                className={clsx(
+                  'hover:bg-white/5',
+                  onRowClick && 'cursor-pointer',
+                )}
+              >
                 {row.getVisibleCells().map((cell) => (
                   <td
                     key={cell.id}

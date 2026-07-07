@@ -80,15 +80,14 @@ body {
 .health-dot.error, .health-dot.red { background: var(--color-error); }
 
 /* ── Legacy component classes (kept until every page uses the UI kit) ──
-   Restyled to the collector look: pure-black surfaces, white-on-black primary
-   actions, mono numbers. Pages not yet migrated keep rendering, just prettier. */
-.card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; }
-.badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 500; }
-.badge-green { background: #16351f; color: var(--color-success); }
-.badge-yellow { background: #3a2c08; color: var(--color-warning); }
-.badge-red { background: #3a1414; color: var(--color-error); }
-.badge-blue { background: #14243a; color: var(--color-info); }
-.badge-gray { background: #1c1c1c; color: var(--color-text-secondary); }
+   The Phase-3 primitives (`.card`, `.badge*`, `.signal-bar*`, `.empty-state`)
+   are now provided by React components in `components/ui/` — Card,
+   StatusBadge, ConfidencePill, EmptyState. The bare-tag rules below stay
+   because pages that haven't been migrated yet (Faces, Media, Cases, Runs,
+   Alerts action buttons, Review action buttons) still use raw `<button>`,
+   `<table>`, `<input>`, `<select>` — removing them would strip styling from
+   half the app in a single sweep. Later phases move those to UI-kit components
+   too and delete the bare-tag rules. */
 table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
 th { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--color-border); color: var(--color-text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.7rem; }
 td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--color-border); }
@@ -108,7 +107,6 @@ select { padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid var(--co
 .mb-2 { margin-bottom: 1rem; }
 .text-muted { color: var(--color-text-muted); }
 .text-sm { font-size: 0.875rem; }
-.empty-state { text-align: center; padding: 3rem; color: var(--color-text-muted); }
 .platform-icon { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; margin-right: 0.25rem; }
 .p-github { background: #1a1e25; color: #e6edf3; }
 .p-instagram { background: #3d1a3e; color: #e879f9; }
@@ -119,5 +117,3 @@ select { padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid var(--co
 .p-lemon8 { background: #2d3d12; color: #a3e635; }
 .p-whatsapp { background: #163d21; color: #4ade80; }
 .p-website { background: #1c1c1c; color: #a1a1aa; }
-.signal-bar { height: 6px; border-radius: 3px; background: var(--color-border); overflow: hidden; width: 100px; }
-.signal-bar-fill { height: 100%; border-radius: 3px; background: var(--color-info); transition: width 0.3s; }

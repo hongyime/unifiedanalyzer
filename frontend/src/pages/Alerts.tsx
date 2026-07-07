@@ -5,17 +5,22 @@ import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { LoadingSpinner } from '../components/ui/LoadingSpinner'
 import { InfoTip } from '../components/ui/InfoTip'
+import { Card } from '../components/ui/Card'
 import { LABELS, alertMeaning } from '../lib/labels'
 
 function severityBadge(sev: string) {
-  const cls = sev === 'warning' ? 'badge-yellow' : sev === 'critical' ? 'badge-red' : 'badge-blue'
-  return <span className={`badge ${cls}`}>{sev}</span>
+  const cls = sev === 'warning'
+    ? 'bg-warning/20 text-warning'
+    : sev === 'critical'
+      ? 'bg-error/20 text-error'
+      : 'bg-info/15 text-info'
+  return <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>{sev}</span>
 }
 
 function typeBadge(t: string) {
   const meaning = alertMeaning(t)
   return (
-    <span className="badge badge-gray inline-flex items-center gap-1">
+    <span className="inline-flex items-center gap-1 rounded-full bg-hover px-2 py-0.5 text-xs font-medium text-text-secondary">
       {LABELS.alertType[t] ?? t.replace(/_/g, ' ')}
       {meaning && <InfoTip text={meaning} />}
     </span>
@@ -81,12 +86,12 @@ export default function AlertsPage() {
       ) : (
         <>
           {alerts.map(a => (
-            <div key={a.id} className="card" style={{ opacity: a.is_read ? 0.6 : 1 }}>
-              <div className="flex-between mb-1">
-                <div className="flex gap-1" style={{ alignItems: 'center' }}>
+            <Card key={a.id} className={`mb-2 ${a.is_read ? 'opacity-60' : ''}`}>
+              <div className="mb-1 flex items-center justify-between">
+                <div className="flex items-center gap-2">
                   {severityBadge(a.severity)}
                   {typeBadge(a.alert_type)}
-                  <span className="text-muted text-sm">{timeAgo(a.detected_at)}</span>
+                  <span className="text-xs text-text-muted">{timeAgo(a.detected_at)}</span>
                 </div>
                 {!a.is_read && (
                   <button onClick={() => markRead(a.id)} style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}>
@@ -96,11 +101,11 @@ export default function AlertsPage() {
               </div>
               <div style={{ fontWeight: 500 }}>{a.title}</div>
               {a.entity_id && (
-                <div className="text-sm text-muted" style={{ marginTop: '0.25rem' }}>
+                <div className="mt-1 text-sm text-text-muted">
                   <Link to={`/entities/${a.entity_id}`}>{a.entity_name || a.entity_id}</Link>
                 </div>
               )}
-            </div>
+            </Card>
           ))}
           <div className="flex-between" style={{ marginTop: '1rem' }}>
             <span className="text-sm text-muted">{total} total</span>

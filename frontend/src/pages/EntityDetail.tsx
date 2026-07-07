@@ -1,77 +1,86 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { api, EntityDetail, TimelineEvent, BehaviorProfile, Relationship, IntelligenceReport } from '../api'
+import { ArrowLeft, Trash2, Bell, MapPin, Users2, ChevronLeft, ChevronRight } from 'lucide-react'
+import type { ColumnDef } from '@tanstack/react-table'
+import {
+  api,
+  EntityDetail,
+  TimelineEvent,
+  BehaviorProfile,
+  Relationship,
+  IntelligenceReport,
+  PlatformLink,
+  Signal,
+} from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { TimelineLanes } from '../components/TimelineLanes'
 import { NetworkGraph } from '../components/NetworkGraph'
 import { IdentitySummary } from '../components/IdentitySummary'
 import { GeoMap } from '../components/GeoMap'
+import { PageHeader } from '../components/ui/PageHeader'
+import { PlatformBadge } from '../components/ui/PlatformBadge'
+import { Card } from '../components/ui/Card'
+import { Button } from '../components/ui/Button'
+import { ConfidencePill } from '../components/ui/Confidence'
+import { LoadingSpinner } from '../components/ui/LoadingSpinner'
+import { EmptyState } from '../components/ui/EmptyState'
+import { StatusBadge } from '../components/ui/StatusBadge'
+import { DataTable } from '../components/ui/DataTable'
+import { InfoTip } from '../components/ui/InfoTip'
+import { LABELS } from '../lib/labels'
 
-function PlatformBadge({ source }: { source: string }) {
-  return <span className={`platform-icon p-${source}`}>{source}</span>
-}
-
-function ConfidenceBar({ score }: { score: number }) {
-  return (
-    <div className="signal-bar" style={{ width: '140px' }}>
-      <div className="signal-bar-fill" style={{ width: `${Math.round(score * 100)}%` }} />
-    </div>
-  )
-}
+const DOW_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString()
 }
 
-const DOW_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-
+/** Reused hour+day activity bars. Uses the info accent for both charts so the
+ *  read is "the taller the bar, the more posts". */
 function HeatmapGrid({ hourDist, dowDist }: { hourDist: Record<string, number>; dowDist: Record<string, number> }) {
   const maxH = Math.max(1, ...Object.values(hourDist))
   const maxD = Math.max(1, ...Object.values(dowDist))
-
   return (
     <div>
-      <div style={{ marginBottom: '1.5rem' }}>
-        <div className="text-sm text-muted mb-1">Activity by Hour (UTC)</div>
-        <div style={{ display: 'flex', gap: '2px', alignItems: 'flex-end', height: '80px' }}>
+      <div className="mb-4">
+        <div className="mb-1 text-xs text-text-muted">Activity by hour (UTC)</div>
+        <div className="flex h-20 items-end gap-[2px]">
           {Array.from({ length: 24 }, (_, h) => {
             const val = hourDist[String(h)] || 0
             const pct = val / maxH
             return (
-              <div key={h} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <div key={h} className="flex flex-1 flex-col items-center">
                 <div
+                  className="w-full rounded-sm"
                   style={{
-                    width: '100%',
                     height: `${Math.max(2, pct * 70)}px`,
-                    background: `rgba(99, 102, 241, ${0.2 + pct * 0.8})`,
-                    borderRadius: '2px',
+                    background: `rgba(59, 130, 246, ${0.2 + pct * 0.8})`,
                   }}
                   title={`${h}:00 — ${val} events`}
                 />
-                {h % 3 === 0 && <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', marginTop: '2px' }}>{h}</span>}
+                {h % 3 === 0 && <span className="mt-0.5 text-[0.6rem] text-text-muted">{h}</span>}
               </div>
             )
           })}
         </div>
       </div>
       <div>
-        <div className="text-sm text-muted mb-1">Activity by Day</div>
-        <div style={{ display: 'flex', gap: '4px', alignItems: 'flex-end', height: '60px' }}>
+        <div className="mb-1 text-xs text-text-muted">Activity by day</div>
+        <div className="flex h-14 items-end gap-1">
           {Array.from({ length: 7 }, (_, d) => {
             const val = dowDist[String(d)] || 0
             const pct = val / maxD
             return (
-              <div key={d} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <div key={d} className="flex flex-1 flex-col items-center">
                 <div
+                  className="w-full rounded-sm"
                   style={{
-                    width: '100%',
                     height: `${Math.max(2, pct * 50)}px`,
-                    background: `rgba(99, 102, 241, ${0.2 + pct * 0.8})`,
-                    borderRadius: '2px',
+                    background: `rgba(59, 130, 246, ${0.2 + pct * 0.8})`,
                   }}
                   title={`${DOW_LABELS[d]} — ${val} events`}
                 />
-                <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '2px' }}>{DOW_LABELS[d]}</span>
+                <span className="mt-0.5 text-[0.65rem] text-text-muted">{DOW_LABELS[d]}</span>
               </div>
             )
           })}
@@ -80,6 +89,29 @@ function HeatmapGrid({ hourDist, dowDist }: { hourDist: Record<string, number>; 
     </div>
   )
 }
+
+/** Small helper for stat rows inside Cards. */
+function StatRow({ label, value, help }: { label: string; value: React.ReactNode; help?: string }) {
+  return (
+    <div className="mb-1 flex items-center justify-between">
+      <span className="inline-flex items-center gap-1 text-sm text-text-muted">
+        {label}
+        {help && <InfoTip text={help} />}
+      </span>
+      <span className="text-sm font-semibold text-text-primary">{value}</span>
+    </div>
+  )
+}
+
+type TabKey =
+  | 'identity'
+  | 'changes'
+  | 'timeline'
+  | 'map'
+  | 'behavior'
+  | 'relationships'
+  | 'intelligence'
+  | 'settings'
 
 export default function EntityDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -88,7 +120,7 @@ export default function EntityDetailPage() {
   const [events, setEvents] = useState<TimelineEvent[]>([])
   const [eventsTotal, setEventsTotal] = useState(0)
   const [eventsPage, setEventsPage] = useState(1)
-  const [tab, setTab] = useState<'identity' | 'changes' | 'timeline' | 'map' | 'behavior' | 'relationships' | 'intelligence' | 'settings'>('identity')
+  const [tab, setTab] = useState<TabKey>('identity')
   const [loading, setLoading] = useState(true)
   const [behavior, setBehavior] = useState<BehaviorProfile | null>(null)
   const [intelligence, setIntelligence] = useState<IntelligenceReport | null>(null)
@@ -222,522 +254,638 @@ export default function EntityDetailPage() {
     }
   }
 
-  if (loading) return <div className="empty-state">Loading...</div>
-  if (!entity) return <div className="empty-state">Entity not found</div>
+  // ── Column definitions ──────────────────────────────────────────────────
+  const platformLinkCols = useMemo<ColumnDef<PlatformLink, unknown>[]>(() => [
+    {
+      id: 'select',
+      header: '',
+      cell: ({ row }) => (
+        <input
+          type="checkbox"
+          checked={selectedLinks.has(row.original.id)}
+          onChange={(e) => {
+            const next = new Set(selectedLinks)
+            if (e.target.checked) next.add(row.original.id)
+            else next.delete(row.original.id)
+            setSelectedLinks(next)
+          }}
+          onClick={(e) => e.stopPropagation()}
+        />
+      ),
+    },
+    { id: 'platform', header: 'Platform', cell: ({ row }) => <PlatformBadge source={row.original.source} /> },
+    {
+      id: 'username',
+      header: 'Username',
+      accessorFn: (r) => r.platform_username ?? r.platform_id,
+      cell: ({ row }) => <span className="font-mono text-xs">{row.original.platform_username || row.original.platform_id}</span>,
+    },
+    { id: 'name', header: 'Name', accessorFn: (r) => r.platform_name ?? '', cell: ({ row }) => row.original.platform_name || '—' },
+    {
+      id: 'confirmed',
+      header: 'State',
+      cell: ({ row }) => (
+        row.original.is_confirmed
+          ? <StatusBadge status="success" label="confirmed" />
+          : <StatusBadge status="warning" label="candidate" />
+      ),
+    },
+    { id: 'method', header: 'Method', cell: ({ row }) => <span className="text-xs text-text-muted">{row.original.link_method}</span> },
+  ], [selectedLinks])
+
+  const signalCols = useMemo<ColumnDef<Signal, unknown>[]>(() => [
+    {
+      id: 'type',
+      header: 'Evidence',
+      accessorFn: (r) => LABELS.signalType[r.signal_type] ?? r.signal_type,
+      cell: ({ row }) => (
+        <span
+          className="rounded-full bg-info/15 px-2 py-0.5 text-xs font-medium text-info"
+          title={row.original.signal_type}
+        >
+          {LABELS.signalType[row.original.signal_type] ?? row.original.signal_type.replace(/_/g, ' ')}
+        </span>
+      ),
+    },
+    { id: 'from', header: 'From', cell: ({ row }) => <PlatformBadge source={row.original.source_platform} /> },
+    { id: 'to', header: 'To', cell: ({ row }) => <PlatformBadge source={row.original.target_platform} /> },
+    {
+      id: 'value',
+      header: 'Value',
+      accessorFn: (r) => r.value,
+      cell: ({ row }) => (
+        <span className="block max-w-[300px] truncate font-mono text-xs" title={row.original.value}>
+          {row.original.value}
+        </span>
+      ),
+    },
+    {
+      id: 'confidence',
+      header: 'Confidence',
+      accessorFn: (r) => r.confidence,
+      cell: ({ row }) => <ConfidencePill score={row.original.confidence} />,
+    },
+  ], [])
+
+  const relationshipCols = useMemo<ColumnDef<Relationship, unknown>[]>(() => [
+    {
+      id: 'entity',
+      header: 'Connected person',
+      cell: ({ row }) => (
+        <Link to={`/entities/${row.original.other_entity_id}`}>
+          {row.original.other_name || row.original.other_entity_id.slice(0, 8)}
+        </Link>
+      ),
+    },
+    {
+      id: 'type',
+      header: 'Type',
+      cell: ({ row }) => (
+        <span className="rounded-full bg-info/15 px-2 py-0.5 text-xs font-medium text-info">
+          {row.original.relationship_type.replace(/_/g, ' ')}
+        </span>
+      ),
+    },
+    {
+      id: 'weight',
+      header: 'Weight',
+      accessorFn: (r) => r.weight,
+      cell: ({ row }) => <span className="font-mono tabular-nums text-sm">{row.original.weight}</span>,
+    },
+    {
+      id: 'details',
+      header: 'Details',
+      cell: ({ row }) => {
+        const s = row.original.sources
+        const groups = s && typeof s === 'object' && 'groups' in s ? (s as { groups: string[] }).groups : []
+        return <span className="text-xs text-text-muted">{groups.join(', ')}</span>
+      },
+    },
+  ], [])
+
+  if (loading) return <LoadingSpinner label="Loading person…" />
+  if (!entity) return <EmptyState title="Person not found" description="This entity may have been merged or removed." />
+
+  const watchOptions: { key: 'priority' | 'watching' | 'archive'; label: string; help: string }[] = [
+    { key: 'priority', label: 'Priority', help: 'Flag this person for high-attention monitoring.' },
+    { key: 'watching', label: 'Watching', help: 'Keep an eye on this person — standard monitoring.' },
+    { key: 'archive', label: 'Archive', help: 'Hide from default lists but keep the data.' },
+  ]
+
+  const tabs: { key: TabKey; label: string; badge?: string }[] = [
+    { key: 'identity', label: 'Identity' },
+    { key: 'changes', label: 'Changes', badge: changelog && changelog.total_changes > 0 ? String(changelog.total_changes) : undefined },
+    { key: 'timeline', label: 'Timeline' },
+    { key: 'map', label: 'Map' },
+    { key: 'behavior', label: 'Behavior' },
+    { key: 'relationships', label: 'Relationships' },
+    { key: 'intelligence', label: 'Intelligence' },
+    { key: 'settings', label: 'Settings' },
+  ]
 
   return (
     <div>
-      <Link to="/entities" className="text-sm text-muted" style={{ marginBottom: '1rem', display: 'block' }}>
-        &larr; Back to entities
+      <Link to="/entities" className="mb-3 inline-flex items-center gap-1 text-sm text-text-muted hover:text-text-primary">
+        <ArrowLeft className="h-3.5 w-3.5" /> Back to people
       </Link>
 
-      <div className="card">
-        <div className="flex-between">
-          <div className="flex gap-1" style={{ alignItems: 'center' }}>
-            <FaceAvatar url={entity.face_crop_url} name={entity.canonical_name} size={48} />
-            <div>
-              <h2 style={{ marginBottom: '0.25rem' }}>{entity.canonical_name || '(unnamed)'}</h2>
-              <div className="text-sm text-muted">{entity.tier} &middot; {entity.platform_links.length} platforms</div>
-              <div className="flex gap-1" style={{ marginTop: '0.4rem' }}>
-                {(['priority', 'watching', 'archive'] as const).map((st) => (
-                  <button
-                    key={st}
-                    onClick={async () => {
-                      const next = entity.watch_status === st ? null : st
-                      await api.setWatch(entity.id, next)
-                      setEntity({ ...entity, watch_status: next })
-                    }}
-                    className={entity.watch_status === st ? 'primary' : ''}
-                    style={{ fontSize: '0.7rem', padding: '2px 8px', textTransform: 'capitalize' }}
-                  >
-                    {st}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-          <div style={{ textAlign: 'right' }}>
-            <div className="flex gap-1" style={{ alignItems: 'center', justifyContent: 'flex-end' }}>
-              <ConfidenceBar score={entity.confidence_score} />
-              <span style={{ fontWeight: 600 }}>{Math.round(entity.confidence_score * 100)}%</span>
-            </div>
-            <div className="text-sm text-muted">{entity.signal_count} signals</div>
+      <PageHeader
+        title={entity.canonical_name || '(unnamed)'}
+        description="Everything we know about this person — platform accounts, activity, evidence, alerts."
+        actions={
+          <div className="flex items-center gap-2">
             <a
               href={api.exportEntity(entity.id)}
-              className="text-sm"
-              style={{ marginTop: '0.25rem', display: 'inline-block' }}
+              className="text-xs text-text-muted hover:text-text-primary"
             >
               Export JSON
             </a>
-            <div className="flex gap-1" style={{ marginTop: '0.35rem', justifyContent: 'flex-end', alignItems: 'center' }}>
-              <select
-                value={pinCase}
-                onChange={(e) => setPinCase(e.target.value)}
-                className="rounded-md border border-border bg-card px-1 py-0.5 text-xs"
-              >
-                <option value="">Pin to case…</option>
-                {cases.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-              <button
-                disabled={!pinCase}
-                style={{ fontSize: '0.7rem', padding: '2px 8px' }}
-                onClick={async () => {
-                  if (!pinCase || !id) return
-                  await api.addCaseItem(pinCase, { item_type: 'entity', ref_id: id })
-                  setActionMsg('Pinned to case')
-                }}
-              >
-                Pin
-              </button>
+            <select
+              value={pinCase}
+              onChange={(e) => setPinCase(e.target.value)}
+              className="rounded-md border border-border bg-background px-2 py-1 text-xs text-text-primary"
+            >
+              <option value="">Pin to case…</option>
+              {cases.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!pinCase}
+              onClick={async () => {
+                if (!pinCase || !id) return
+                await api.addCaseItem(pinCase, { item_type: 'entity', ref_id: id })
+                setActionMsg('Pinned to case')
+              }}
+            >
+              Pin
+            </Button>
+          </div>
+        }
+      />
+
+      <Card className="mb-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <FaceAvatar url={entity.face_crop_url} name={entity.canonical_name} size={56} />
+            <div>
+              <div className="flex items-center gap-2 text-sm">
+                <span className="inline-flex items-center gap-1 rounded-full bg-hover px-2 py-0.5 text-xs font-medium">
+                  {LABELS.tier[entity.tier] ?? entity.tier}
+                  <InfoTip text="Confirmed people have strong, multiple pieces of evidence. Unconfirmed ones are kept but flagged as lower-certainty." />
+                </span>
+                <span className="text-text-muted">
+                  {entity.platform_links.length} platform{entity.platform_links.length === 1 ? '' : 's'}
+                </span>
+                <InfoTip text="Distinct social/messaging accounts we've linked to this person." />
+                {entity.last_seen_at && (
+                  <span className="text-text-muted">· last seen {new Date(entity.last_seen_at).toLocaleDateString()}</span>
+                )}
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-1">
+                <span className="mr-1 text-xs text-text-muted">Watch:</span>
+                {watchOptions.map((opt) => (
+                  <Button
+                    key={opt.key}
+                    size="sm"
+                    variant={entity.watch_status === opt.key ? 'primary' : 'ghost'}
+                    onClick={async () => {
+                      const next = entity.watch_status === opt.key ? null : opt.key
+                      await api.setWatch(entity.id, next)
+                      setEntity({ ...entity, watch_status: next })
+                    }}
+                    title={opt.help}
+                  >
+                    {opt.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="flex items-center justify-end gap-2">
+              <ConfidencePill score={entity.confidence_score} />
+            </div>
+            <div className="mt-1 text-xs text-text-muted">
+              {entity.signal_count} piece{entity.signal_count === 1 ? '' : 's'} of evidence
             </div>
           </div>
         </div>
-      </div>
+      </Card>
 
       {actionMsg && (
-        <div className="card" style={{ background: 'var(--bg-hover)', padding: '0.75rem' }}>
+        <Card className="mb-4 bg-hover">
           <div className="text-sm">{actionMsg}</div>
+        </Card>
+      )}
+
+      <div className="mb-4 flex flex-wrap gap-1">
+        {tabs.map((t) => (
+          <Button
+            key={t.key}
+            size="sm"
+            variant={tab === t.key ? 'primary' : 'ghost'}
+            onClick={() => setTab(t.key)}
+          >
+            {t.label}{t.badge ? ` (${t.badge})` : ''}
+          </Button>
+        ))}
+      </div>
+
+      {/* ── Identity ─────────────────────────────────────────────────── */}
+      {tab === 'identity' && (
+        <div className="space-y-4">
+          <IdentitySummary entity={entity} />
+
+          <Card
+            title="Platform links"
+            actions={
+              <InfoTip text="Each row is one social/messaging account linked to this person. Tick rows and click Split to peel them off into a new person." />
+            }
+          >
+            <DataTable
+              data={entity.platform_links}
+              columns={platformLinkCols}
+              pageSize={100}
+              emptyMessage="No platform links yet."
+            />
+            {selectedLinks.size > 0 && (
+              <div className="mt-3">
+                <Button variant="danger" size="sm" icon={<Trash2 className="h-3 w-3" />} onClick={handleSplit}>
+                  Split {selectedLinks.size} selected into new person
+                </Button>
+              </div>
+            )}
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                type="text"
+                placeholder="Paste entity ID to merge with…"
+                value={mergeTarget}
+                onChange={(e) => setMergeTarget(e.target.value)}
+                className="max-w-[340px] flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm text-text-primary"
+              />
+              <Button size="sm" onClick={handleMerge} disabled={!mergeTarget.trim()}>Merge</Button>
+              <InfoTip text="Merging combines all accounts, evidence, and history into a single person. Use this when two entities are clearly the same human." />
+            </div>
+          </Card>
+
+          <Card
+            title="Identity evidence"
+            actions={<InfoTip text="Individual clues linking this person to other accounts — same phone, similar name, same face in photos, etc. More independent clues = higher confidence." />}
+          >
+            {entity.identity_signals.length === 0 ? (
+              <div className="text-sm text-text-muted">No evidence recorded.</div>
+            ) : (
+              <DataTable
+                data={entity.identity_signals}
+                columns={signalCols}
+                pageSize={25}
+              />
+            )}
+          </Card>
         </div>
       )}
 
-      <div className="flex gap-1 mb-2">
-        <button className={tab === 'identity' ? 'primary' : ''} onClick={() => setTab('identity')}>Identity</button>
-        <button className={tab === 'changes' ? 'primary' : ''} onClick={() => setTab('changes')}>
-          Changes{changelog && changelog.total_changes > 0 ? ` (${changelog.total_changes})` : ''}
-        </button>
-        <button className={tab === 'timeline' ? 'primary' : ''} onClick={() => setTab('timeline')}>Timeline</button>
-        <button className={tab === 'map' ? 'primary' : ''} onClick={() => setTab('map')}>Map</button>
-        <button className={tab === 'behavior' ? 'primary' : ''} onClick={() => setTab('behavior')}>Behavior</button>
-        <button className={tab === 'relationships' ? 'primary' : ''} onClick={() => setTab('relationships')}>Relationships</button>
-        <button className={tab === 'intelligence' ? 'primary' : ''} onClick={() => setTab('intelligence')}>Intelligence</button>
-        <button className={tab === 'settings' ? 'primary' : ''} onClick={() => setTab('settings')}>Settings</button>
-      </div>
-
-      {tab === 'identity' && (
-        <>
-          <IdentitySummary entity={entity} />
-          <h3 style={{ fontSize: '1.1rem', marginBottom: '0.75rem' }}>Platform Links</h3>
-          <table>
-            <thead>
-              <tr>
-                <th style={{ width: '30px' }}></th>
-                <th>Platform</th>
-                <th>Username</th>
-                <th>Name</th>
-                <th>Confirmed</th>
-                <th>Method</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entity.platform_links.map(l => (
-                <tr key={l.id}>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={selectedLinks.has(l.id)}
-                      onChange={e => {
-                        const next = new Set(selectedLinks)
-                        e.target.checked ? next.add(l.id) : next.delete(l.id)
-                        setSelectedLinks(next)
-                      }}
-                    />
-                  </td>
-                  <td><PlatformBadge source={l.source} /></td>
-                  <td>{l.platform_username || l.platform_id}</td>
-                  <td>{l.platform_name || '-'}</td>
-                  <td>
-                    <span className={`badge ${l.is_confirmed ? 'badge-green' : 'badge-yellow'}`}>
-                      {l.is_confirmed ? 'confirmed' : 'candidate'}
-                    </span>
-                  </td>
-                  <td className="text-muted">{l.link_method}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {selectedLinks.size > 0 && (
-            <div className="flex gap-1" style={{ marginTop: '0.75rem' }}>
-              <button onClick={handleSplit} style={{ borderColor: 'var(--color-orange)', color: 'var(--color-orange)' }}>
-                Split {selectedLinks.size} selected into new entity
-              </button>
-            </div>
-          )}
-
-          <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-            <input
-              type="text"
-              placeholder="Paste entity ID to merge with..."
-              value={mergeTarget}
-              onChange={e => setMergeTarget(e.target.value)}
-              style={{ maxWidth: '340px' }}
-            />
-            <button onClick={handleMerge} disabled={!mergeTarget.trim()}>Merge</button>
-          </div>
-
-          <h3 style={{ fontSize: '1.1rem', margin: '1.5rem 0 0.75rem' }}>Identity Signals</h3>
-          {entity.identity_signals.length === 0 ? (
-            <div className="text-sm text-muted">No signals recorded</div>
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Type</th>
-                  <th>From</th>
-                  <th>To</th>
-                  <th>Value</th>
-                  <th>Confidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                {entity.identity_signals.map(s => (
-                  <tr key={s.id}>
-                    <td><span className="badge badge-blue">{s.signal_type}</span></td>
-                    <td><PlatformBadge source={s.source_platform} /></td>
-                    <td><PlatformBadge source={s.target_platform} /></td>
-                    <td className="text-sm" style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {s.value}
-                    </td>
-                    <td>{s.confidence}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </>
-      )}
-
+      {/* ── Changes ──────────────────────────────────────────────────── */}
       {tab === 'changes' && (
-        <>
-          {!changelog ? (
-            <div className="empty-state">Loading…</div>
-          ) : (
-            <>
-              <div className="flex-between mb-2">
-                <div className="text-sm text-muted">
-                  Since {changelog.since ? changelog.since.slice(0, 10) : '—'} · {changelog.total_changes} changes
-                </div>
-                <button onClick={async () => { if (id) { await api.markReviewed(id); loadChangelog() } }}>Mark reviewed</button>
+        !changelog ? (
+          <LoadingSpinner label="Loading changelog…" />
+        ) : (
+          <div className="space-y-3">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="text-sm text-text-muted">
+                Since {changelog.since ? changelog.since.slice(0, 10) : '—'} · {changelog.total_changes} changes
               </div>
-              {changelog.total_changes === 0 ? (
-                <div className="empty-state">Nothing new since your last visit 👍</div>
-              ) : (
-                <>
-                  {changelog.deletions.length > 0 && (
-                    <div className="card" style={{ marginBottom: '0.75rem', borderColor: 'var(--color-red)' }}>
-                      <div className="text-sm mb-1" style={{ fontWeight: 600, color: 'var(--color-red)' }}>
-                        🗑 Deleted messages ({changelog.deletions.length})
+              <Button size="sm" onClick={async () => { if (id) { await api.markReviewed(id); loadChangelog() } }}>
+                Mark reviewed
+              </Button>
+            </div>
+            {changelog.total_changes === 0 ? (
+              <EmptyState title="Nothing new" description="Nothing has changed since your last visit." />
+            ) : (
+              <>
+                {changelog.deletions.length > 0 && (
+                  <Card className="border-error/60">
+                    <div className="mb-1 text-sm font-semibold text-error">
+                      🗑 Deleted messages ({changelog.deletions.length})
+                    </div>
+                    {changelog.deletions.map((d, i) => (
+                      <div key={i} className="mb-1 text-sm">
+                        <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">{d.platform}</span>{' '}
+                        <span className="text-text-muted">{d.deleted_at?.slice(0, 10)}</span>{' '}
+                        {d.text
+                          ? (d.text.length > 120 ? d.text.slice(0, 120) + '…' : d.text)
+                          : <span className="text-text-muted">(no text / media)</span>}
                       </div>
-                      {changelog.deletions.map((d, i) => (
-                        <div key={i} className="text-sm" style={{ marginBottom: '0.25rem' }}>
-                          <span className="badge badge-gray">{d.platform}</span>{' '}
-                          <span className="text-muted">{d.deleted_at?.slice(0, 10)}</span>{' '}
-                          {d.text ? (d.text.length > 120 ? d.text.slice(0, 120) + '…' : d.text) : <span className="text-muted">(no text / media)</span>}
-                        </div>
+                    ))}
+                  </Card>
+                )}
+                {changelog.additions.platform_links.length > 0 && (
+                  <Card>
+                    <div className="mb-1 text-sm font-semibold">🆕 New accounts linked ({changelog.additions.platform_links.length})</div>
+                    <div className="flex flex-wrap gap-1">
+                      {changelog.additions.platform_links.map((l, i) => (
+                        <PlatformBadge key={i} source={l.source} label={`${l.source}:${l.username}`} />
                       ))}
                     </div>
-                  )}
-                  {changelog.additions.platform_links.length > 0 && (
-                    <div className="card" style={{ marginBottom: '0.75rem' }}>
-                      <div className="text-sm mb-1" style={{ fontWeight: 600 }}>🆕 New accounts linked ({changelog.additions.platform_links.length})</div>
-                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
-                        {changelog.additions.platform_links.map((l, i) => (
-                          <span key={i} className={`platform-icon p-${l.source}`}>{l.source}:{l.username}</span>
-                        ))}
+                  </Card>
+                )}
+                {changelog.additions.alerts.length > 0 && (
+                  <Card>
+                    <div className="mb-1 text-sm font-semibold">⚠ New alerts ({changelog.additions.alerts.length})</div>
+                    {changelog.additions.alerts.map((a, i) => (
+                      <div key={i} className="mb-0.5 text-sm">
+                        <span className="rounded-full bg-info/15 px-2 py-0.5 text-xs font-medium text-info">
+                          {LABELS.alertType[a.alert_type] ?? a.alert_type}
+                        </span>{' '}
+                        {a.title || a.detail}
                       </div>
+                    ))}
+                  </Card>
+                )}
+                {changelog.additions.timeline_events > 0 && (
+                  <Card>
+                    <div className="text-sm">
+                      <b>{changelog.additions.timeline_events.toLocaleString()}</b>{' '}
+                      <span className="text-text-muted">new timeline events since last visit</span>
                     </div>
-                  )}
-                  {changelog.additions.alerts.length > 0 && (
-                    <div className="card" style={{ marginBottom: '0.75rem' }}>
-                      <div className="text-sm mb-1" style={{ fontWeight: 600 }}>⚠ New alerts ({changelog.additions.alerts.length})</div>
-                      {changelog.additions.alerts.map((a, i) => (
-                        <div key={i} className="text-sm" style={{ marginBottom: '0.2rem' }}>
-                          <span className="badge badge-blue">{a.alert_type}</span> {a.title || a.detail}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {changelog.additions.timeline_events > 0 && (
-                    <div className="card">
-                      <div className="text-sm"><b>{changelog.additions.timeline_events.toLocaleString()}</b> <span className="text-muted">new timeline events since last visit</span></div>
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          )}
-        </>
+                  </Card>
+                )}
+              </>
+            )}
+          </div>
+        )
       )}
 
+      {/* ── Timeline ─────────────────────────────────────────────────── */}
       {tab === 'timeline' && (
-        <>
+        <div className="space-y-3">
           {lanes && lanes.total > 0 && (
-            <div className="card" style={{ marginBottom: '0.75rem' }}>
-              <div className="flex-between mb-1">
-                <div className="text-sm" style={{ fontWeight: 600 }}>Activity across platforms</div>
-                <div className="text-sm text-muted">{lanes.total.toLocaleString()} events</div>
+            <Card>
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-sm font-semibold">Activity across platforms</div>
+                <div className="text-xs text-text-muted">{lanes.total.toLocaleString()} events</div>
               </div>
               <TimelineLanes data={lanes} />
-            </div>
+            </Card>
           )}
           {events.length === 0 ? (
-            <div className="empty-state">No timeline events</div>
+            <EmptyState
+              icon={<Bell className="h-10 w-10" />}
+              title="No timeline events"
+              description="Posts, activities, and messages appear here as the collector picks them up."
+            />
           ) : (
             <>
               {events.map(ev => (
-                <div key={ev.id} className="card">
-                  <div className="flex-between">
-                    <div className="flex gap-1" style={{ alignItems: 'center' }}>
+                <Card key={ev.id}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
                       <PlatformBadge source={ev.source} />
-                      <span className="badge badge-gray">{ev.event_type}</span>
+                      <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">{ev.event_type}</span>
                     </div>
-                    <span className="text-sm text-muted">{formatDate(ev.occurred_at)}</span>
+                    <span className="text-xs text-text-muted">{formatDate(ev.occurred_at)}</span>
                   </div>
-                  {ev.title && <div style={{ marginTop: '0.5rem' }}>{ev.title}</div>}
-                </div>
+                  {ev.title && <div className="mt-2 text-sm">{ev.title}</div>}
+                </Card>
               ))}
-              <div className="flex-between" style={{ marginTop: '1rem' }}>
-                <span className="text-sm text-muted">{eventsTotal} events</span>
-                <div className="flex gap-1">
-                  <button disabled={eventsPage <= 1} onClick={() => setEventsPage(p => p - 1)}>Prev</button>
-                  <button disabled={eventsPage * 50 >= eventsTotal} onClick={() => setEventsPage(p => p + 1)}>Next</button>
+              <div className="flex items-center justify-between text-xs text-text-muted">
+                <span className="tabular-nums">{eventsTotal} events</span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<ChevronLeft className="h-3 w-3" />}
+                    disabled={eventsPage <= 1}
+                    onClick={() => setEventsPage(p => p - 1)}
+                  >
+                    Prev
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<ChevronRight className="h-3 w-3" />}
+                    disabled={eventsPage * 50 >= eventsTotal}
+                    onClick={() => setEventsPage(p => p + 1)}
+                  >
+                    Next
+                  </Button>
                 </div>
               </div>
             </>
           )}
-        </>
+        </div>
       )}
 
+      {/* ── Map ──────────────────────────────────────────────────────── */}
       {tab === 'map' && (
-        <>
-          {geo && (geo.counts.routes > 0 || geo.counts.points > 0) ? (
-            <div className="card">
-              <div className="flex-between mb-1">
-                <div className="text-sm" style={{ fontWeight: 600 }}>Geo footprint</div>
-                <div className="text-sm text-muted">{geo.counts.routes} routes · {geo.counts.points} places</div>
+        geo && (geo.counts.routes > 0 || geo.counts.points > 0) ? (
+          <Card>
+            <div className="mb-2 flex items-center justify-between">
+              <div className="text-sm font-semibold">Geo footprint</div>
+              <div className="text-xs text-text-muted">
+                {geo.counts.routes} routes · {geo.counts.points} places
               </div>
-              <GeoMap data={geo} />
             </div>
-          ) : (
-            <div className="empty-state">
-              No geo signals yet — Strava routes + Instagram places appear here as the collector populates them.
-            </div>
-          )}
-        </>
+            <GeoMap data={geo} />
+          </Card>
+        ) : (
+          <EmptyState
+            icon={<MapPin className="h-10 w-10" />}
+            title="No geo signals yet"
+            description="Strava routes and Instagram places will appear here as the collector populates them."
+          />
+        )
       )}
 
+      {/* ── Behavior ─────────────────────────────────────────────────── */}
       {tab === 'behavior' && (
-        <>
-          {!behavior ? (
-            <div className="empty-state">No behavioral data yet — run an analysis first</div>
-          ) : (
-            <>
-              <div className="card">
-                <div className="flex-between mb-1">
-                  <span className="text-sm text-muted">Total events analyzed</span>
-                  <span style={{ fontWeight: 600 }}>{behavior.total_events.toLocaleString()}</span>
-                </div>
-                <div className="flex-between mb-1">
-                  <span className="text-sm text-muted">Avg posting interval</span>
-                  <span style={{ fontWeight: 600 }}>
-                    {behavior.avg_post_interval_days < 1
-                      ? `${Math.round(behavior.avg_post_interval_days * 24)}h`
-                      : `${behavior.avg_post_interval_days.toFixed(1)} days`}
-                  </span>
-                </div>
-                {behavior.last_computed_at && (
-                  <div className="flex-between">
-                    <span className="text-sm text-muted">Last computed</span>
-                    <span className="text-sm">{formatDate(behavior.last_computed_at)}</span>
+        !behavior ? (
+          <EmptyState
+            title="No behavioral data yet"
+            description="Run an analysis first to compute posting rhythm and behavioral fingerprints."
+          />
+        ) : (
+          <div className="space-y-3">
+            <Card>
+              <StatRow label="Total events analyzed" value={behavior.total_events.toLocaleString()} />
+              <StatRow
+                label="Average posting interval"
+                value={behavior.avg_post_interval_days < 1
+                  ? `${Math.round(behavior.avg_post_interval_days * 24)}h`
+                  : `${behavior.avg_post_interval_days.toFixed(1)} days`}
+              />
+              {behavior.last_computed_at && (
+                <StatRow label="Last computed" value={formatDate(behavior.last_computed_at)} />
+              )}
+            </Card>
+
+            <Card>
+              <HeatmapGrid hourDist={behavior.posting_hour_dist} dowDist={behavior.posting_dow_dist} />
+            </Card>
+
+            <Card title="Activity by platform">
+              {behavior.source_breakdown.map(s => {
+                const pct = s.count / Math.max(1, behavior.total_events)
+                return (
+                  <div key={s.source} className="mb-2 flex items-center gap-2">
+                    <PlatformBadge source={s.source} />
+                    <div className="flex-1">
+                      <div className="h-1.5 rounded-full bg-border">
+                        <div className="h-full rounded-full bg-info" style={{ width: `${pct * 100}%` }} />
+                      </div>
+                    </div>
+                    <span className="min-w-[60px] text-right font-mono text-xs tabular-nums">
+                      {s.count.toLocaleString()}
+                    </span>
+                  </div>
+                )
+              })}
+            </Card>
+
+            {behavior.strava_patterns && (
+              <Card title="Strava patterns">
+                <StatRow label="Total activities" value={behavior.strava_patterns.total_activities} />
+                {behavior.strava_patterns.avg_distance_km != null && (
+                  <StatRow label="Avg distance" value={`${behavior.strava_patterns.avg_distance_km} km`} />
+                )}
+                {behavior.strava_patterns.avg_duration_min != null && (
+                  <StatRow label="Avg duration" value={`${behavior.strava_patterns.avg_duration_min} min`} />
+                )}
+                {behavior.strava_patterns.preferred_hour != null && (
+                  <StatRow label="Preferred hour" value={`${behavior.strava_patterns.preferred_hour}:00`} />
+                )}
+                {behavior.strava_patterns.preferred_day != null && (
+                  <StatRow label="Preferred day" value={DOW_LABELS[behavior.strava_patterns.preferred_day]} />
+                )}
+                {Object.keys(behavior.strava_patterns.activity_types).length > 0 && (
+                  <div className="mt-3">
+                    <div className="mb-1 text-xs text-text-muted">Activity types</div>
+                    <div className="flex flex-wrap gap-1">
+                      {Object.entries(behavior.strava_patterns.activity_types)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([type, count]) => (
+                          <span key={type} className="rounded-full bg-info/15 px-2 py-0.5 text-xs font-medium text-info">
+                            {type}: {count}
+                          </span>
+                        ))}
+                    </div>
                   </div>
                 )}
-              </div>
-
-              <div className="card">
-                <HeatmapGrid hourDist={behavior.posting_hour_dist} dowDist={behavior.posting_dow_dist} />
-              </div>
-
-              <div className="card">
-                <div className="text-sm text-muted mb-1">Activity by Platform</div>
-                {behavior.source_breakdown.map(s => {
-                  const pct = s.count / behavior.total_events
-                  return (
-                    <div key={s.source} className="flex gap-1" style={{ alignItems: 'center', marginBottom: '0.5rem' }}>
-                      <PlatformBadge source={s.source} />
-                      <div style={{ flex: 1 }}>
-                        <div style={{
-                          height: '6px', borderRadius: '3px', background: 'var(--color-border)',
-                        }}>
-                          <div style={{
-                            height: '100%', borderRadius: '3px', width: `${pct * 100}%`,
-                            background: 'var(--color-accent)',
-                          }} />
+                {behavior.strava_patterns.route_count > 0 && (
+                  <div className="mt-3">
+                    <div className="mb-1 text-xs text-text-muted">
+                      Repeated routes ({behavior.strava_patterns.route_count})
+                    </div>
+                    {Object.entries(behavior.strava_patterns.repeated_routes)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([name, count]) => (
+                        <div key={name} className="mb-0.5 text-sm">
+                          {name} <span className="text-text-muted">({count}x)</span>
                         </div>
-                      </div>
-                      <span className="text-sm" style={{ minWidth: '60px', textAlign: 'right' }}>
-                        {s.count.toLocaleString()}
-                      </span>
-                    </div>
-                  )
-                })}
-              </div>
-
-              {behavior.strava_patterns && (
-                <div className="card">
-                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Strava Patterns</div>
-                  <div className="flex-between mb-1">
-                    <span className="text-sm text-muted">Total activities</span>
-                    <span style={{ fontWeight: 600 }}>{behavior.strava_patterns.total_activities}</span>
+                      ))}
                   </div>
-                  {behavior.strava_patterns.avg_distance_km != null && (
-                    <div className="flex-between mb-1">
-                      <span className="text-sm text-muted">Avg distance</span>
-                      <span style={{ fontWeight: 600 }}>{behavior.strava_patterns.avg_distance_km} km</span>
-                    </div>
-                  )}
-                  {behavior.strava_patterns.avg_duration_min != null && (
-                    <div className="flex-between mb-1">
-                      <span className="text-sm text-muted">Avg duration</span>
-                      <span style={{ fontWeight: 600 }}>{behavior.strava_patterns.avg_duration_min} min</span>
-                    </div>
-                  )}
-                  {behavior.strava_patterns.preferred_hour != null && (
-                    <div className="flex-between mb-1">
-                      <span className="text-sm text-muted">Preferred hour</span>
-                      <span style={{ fontWeight: 600 }}>{behavior.strava_patterns.preferred_hour}:00</span>
-                    </div>
-                  )}
-                  {behavior.strava_patterns.preferred_day != null && (
-                    <div className="flex-between mb-1">
-                      <span className="text-sm text-muted">Preferred day</span>
-                      <span style={{ fontWeight: 600 }}>{DOW_LABELS[behavior.strava_patterns.preferred_day]}</span>
-                    </div>
-                  )}
-                  {Object.keys(behavior.strava_patterns.activity_types).length > 0 && (
-                    <div style={{ marginTop: '0.75rem' }}>
-                      <div className="text-sm text-muted mb-1">Activity types</div>
-                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
-                        {Object.entries(behavior.strava_patterns.activity_types)
-                          .sort((a, b) => b[1] - a[1])
-                          .map(([type, count]) => (
-                            <span key={type} className="badge badge-blue">{type}: {count}</span>
-                          ))}
-                      </div>
-                    </div>
-                  )}
-                  {behavior.strava_patterns.route_count > 0 && (
-                    <div style={{ marginTop: '0.75rem' }}>
-                      <div className="text-sm text-muted mb-1">Repeated routes ({behavior.strava_patterns.route_count})</div>
-                      {Object.entries(behavior.strava_patterns.repeated_routes)
+                )}
+              </Card>
+            )}
+
+            {behavior.bio_nlp && (
+              <Card title={`Bio analysis (${behavior.bio_nlp.bio_count} bio(s) from ${behavior.bio_nlp.bio_sources.join(', ')})`}>
+                {Object.keys(behavior.bio_nlp.categories).length > 0 && (
+                  <div className="mb-3">
+                    <div className="mb-1 text-xs text-text-muted">Categories</div>
+                    <div className="flex flex-wrap gap-1">
+                      {Object.entries(behavior.bio_nlp.categories)
                         .sort((a, b) => b[1] - a[1])
-                        .map(([name, count]) => (
-                          <div key={name} className="text-sm" style={{ marginBottom: '0.25rem' }}>
-                            {name} <span className="text-muted">({count}x)</span>
-                          </div>
+                        .map(([cat, score]) => (
+                          <span key={cat} className="rounded-full bg-success/15 px-2 py-0.5 text-xs font-medium text-success">
+                            {cat} ({score})
+                          </span>
                         ))}
                     </div>
-                  )}
-                </div>
-              )}
+                  </div>
+                )}
+                {behavior.bio_nlp.keywords.length > 0 && (
+                  <div className="mb-3">
+                    <div className="mb-1 text-xs text-text-muted">Keywords</div>
+                    <div className="flex flex-wrap gap-1">
+                      {behavior.bio_nlp.keywords.slice(0, 15).map(k => (
+                        <span key={k.word} className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
+                          {k.word} ({k.count})
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {behavior.bio_nlp.hashtags.length > 0 && (
+                  <div className="mb-3">
+                    <div className="mb-1 text-xs text-text-muted">Hashtags</div>
+                    <div className="flex flex-wrap gap-1">
+                      {behavior.bio_nlp.hashtags.map(h => (
+                        <span key={h.tag} className="rounded-full bg-info/15 px-2 py-0.5 text-xs font-medium text-info">
+                          #{h.tag} ({h.count})
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {behavior.bio_nlp.top_emojis.length > 0 && (
+                  <div>
+                    <div className="mb-1 text-xs text-text-muted">Top emojis</div>
+                    <div className="flex gap-2">
+                      {behavior.bio_nlp.top_emojis.map((e, i) => (
+                        <span key={i} className="text-2xl" title={`${e.count}x`}>{e.emoji}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </Card>
+            )}
 
-              {behavior.bio_nlp && (
-                <div className="card">
-                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>
-                    Bio Analysis ({behavior.bio_nlp.bio_count} bio(s) from {behavior.bio_nlp.bio_sources.join(', ')})
-                  </div>
-                  {Object.keys(behavior.bio_nlp.categories).length > 0 && (
-                    <div style={{ marginBottom: '0.75rem' }}>
-                      <div className="text-sm text-muted mb-1">Categories</div>
-                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
-                        {Object.entries(behavior.bio_nlp.categories)
-                          .sort((a, b) => b[1] - a[1])
-                          .map(([cat, score]) => (
-                            <span key={cat} className="badge badge-green">{cat} ({score})</span>
-                          ))}
-                      </div>
-                    </div>
-                  )}
-                  {behavior.bio_nlp.keywords.length > 0 && (
-                    <div style={{ marginBottom: '0.75rem' }}>
-                      <div className="text-sm text-muted mb-1">Keywords</div>
-                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
-                        {behavior.bio_nlp.keywords.slice(0, 15).map(k => (
-                          <span key={k.word} className="badge badge-gray">{k.word} ({k.count})</span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {behavior.bio_nlp.hashtags.length > 0 && (
-                    <div style={{ marginBottom: '0.75rem' }}>
-                      <div className="text-sm text-muted mb-1">Hashtags</div>
-                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
-                        {behavior.bio_nlp.hashtags.map(h => (
-                          <span key={h.tag} className="badge badge-blue">#{h.tag} ({h.count})</span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {behavior.bio_nlp.top_emojis.length > 0 && (
-                    <div>
-                      <div className="text-sm text-muted mb-1">Top Emojis</div>
-                      <div className="flex gap-1">
-                        {behavior.bio_nlp.top_emojis.map((e, i) => (
-                          <span key={i} style={{ fontSize: '1.5rem' }} title={`${e.count}x`}>{e.emoji}</span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {behavior.graph_analytics && (
-                <div className="card">
-                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Graph Position</div>
-                  <div className="flex-between mb-1">
-                    <span className="text-sm text-muted">Connections (degree)</span>
-                    <span style={{ fontWeight: 600 }}>{behavior.graph_analytics.degree}</span>
-                  </div>
-                  <div className="flex-between mb-1">
-                    <span className="text-sm text-muted">Connection strength</span>
-                    <span style={{ fontWeight: 600 }}>{behavior.graph_analytics.strength}</span>
-                  </div>
-                  <div className="flex-between mb-1">
-                    <span className="text-sm text-muted">Betweenness centrality</span>
-                    <span style={{ fontWeight: 600 }}>{behavior.graph_analytics.betweenness.toFixed(4)}</span>
-                  </div>
-                  <div className="flex-between mb-1">
-                    <span className="text-sm text-muted">Clustering coefficient</span>
-                    <span style={{ fontWeight: 600 }}>{behavior.graph_analytics.clustering.toFixed(4)}</span>
-                  </div>
-                  <div className="flex-between">
-                    <span className="text-sm text-muted">Community size</span>
-                    <span style={{ fontWeight: 600 }}>{behavior.graph_analytics.component_size}</span>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </>
+            {behavior.graph_analytics && (
+              <Card title="Graph position">
+                <StatRow
+                  label="Connections (degree)"
+                  value={behavior.graph_analytics.degree}
+                  help="Number of other people directly connected to this person in the graph."
+                />
+                <StatRow label="Connection strength" value={behavior.graph_analytics.strength} />
+                <StatRow
+                  label="Betweenness centrality"
+                  value={behavior.graph_analytics.betweenness.toFixed(4)}
+                  help="How often this person sits between others on shortest paths through the graph — a bridge score."
+                />
+                <StatRow label="Clustering coefficient" value={behavior.graph_analytics.clustering.toFixed(4)} />
+                <StatRow label="Community size" value={behavior.graph_analytics.component_size} />
+              </Card>
+            )}
+          </div>
+        )
       )}
 
+      {/* ── Relationships ────────────────────────────────────────────── */}
       {tab === 'relationships' && (
-        <>
+        <div className="space-y-3">
           {network && network.nodes.length > 0 && (
-            <div className="card" style={{ marginBottom: '0.75rem' }}>
-              <div className="text-sm mb-1" style={{ fontWeight: 600 }}>Connection graph <span className="text-muted">(click to pivot)</span></div>
+            <Card>
+              <div className="mb-1 text-sm font-semibold">
+                Connection graph <span className="text-text-muted">(click to pivot)</span>
+              </div>
               <NetworkGraph data={network} />
-            </div>
+            </Card>
           )}
           {associates && associates.associates.length > 0 && (
-            <div className="card" style={{ marginBottom: '0.75rem' }}>
-              <div className="text-sm mb-2" style={{ fontWeight: 600 }}>Seen with <span className="text-muted">(co-tagged in photos)</span></div>
-              <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+            <Card>
+              <div className="mb-2 text-sm font-semibold">
+                Seen with <span className="text-text-muted">(co-tagged in photos)</span>
+              </div>
+              <div className="flex flex-wrap gap-1">
                 {associates.associates.map((a, i) => {
                   const chip = (
-                    <span className="flex gap-1" style={{ alignItems: 'center', border: '1px solid var(--color-border)', borderRadius: 999, padding: '2px 8px 2px 2px', fontSize: '0.75rem' }}>
+                    <span className="inline-flex items-center gap-1 rounded-full border border-border py-0.5 pl-0.5 pr-2 text-xs">
                       <FaceAvatar url={a.face} name={a.entity_name || a.full_name || a.username} size={22} />
                       <span>{a.entity_name || a.full_name || a.username}</span>
-                      <span className="text-muted">×{a.shared}</span>
+                      <span className="text-text-muted">×{a.shared}</span>
                     </span>
                   )
                   return a.entity_id
@@ -745,140 +893,107 @@ export default function EntityDetailPage() {
                     : <span key={i}>{chip}</span>
                 })}
               </div>
-            </div>
+            </Card>
           )}
           {relationships.length === 0 ? (
-            <div className="empty-state">No relationships found</div>
+            <EmptyState
+              icon={<Users2 className="h-10 w-10" />}
+              title="No relationships found"
+              description="Connections to other tracked people appear here as the graph engine finds them."
+            />
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Connected Entity</th>
-                  <th>Type</th>
-                  <th>Weight</th>
-                  <th>Details</th>
-                </tr>
-              </thead>
-              <tbody>
-                {relationships.map(r => (
-                  <tr key={r.id}>
-                    <td>
-                      <Link to={`/entities/${r.other_entity_id}`}>
-                        {r.other_name || r.other_entity_id.slice(0, 8)}
-                      </Link>
-                    </td>
-                    <td><span className="badge badge-blue">{r.relationship_type}</span></td>
-                    <td style={{ fontWeight: 600 }}>{r.weight}</td>
-                    <td className="text-sm text-muted">
-                      {r.sources && typeof r.sources === 'object' && 'groups' in r.sources
-                        ? (r.sources as { groups: string[] }).groups.join(', ')
-                        : ''}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <Card>
+              <DataTable data={relationships} columns={relationshipCols} pageSize={20} />
+            </Card>
           )}
-        </>
+        </div>
       )}
 
+      {/* ── Intelligence ─────────────────────────────────────────────── */}
       {tab === 'intelligence' && (
-        <>
-          {!intelligence ? (
-            <div className="empty-state">Loading intelligence report...</div>
-          ) : (
-            <>
-              {intelligence.location && (
-                <div className="card">
-                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Location</div>
-                  {intelligence.location.primary_country && (
-                    <div className="flex-between mb-1">
-                      <span className="text-sm text-muted">Primary country</span>
-                      <span style={{ fontWeight: 600 }}>{intelligence.location.primary_country}</span>
+        !intelligence ? (
+          <LoadingSpinner label="Loading intelligence report…" />
+        ) : (
+          <div className="space-y-3">
+            {intelligence.location && (
+              <Card title="Location">
+                {intelligence.location.primary_country && (
+                  <StatRow label="Primary country" value={intelligence.location.primary_country} />
+                )}
+                {intelligence.location.primary_timezone && (
+                  <StatRow label="Primary timezone" value={intelligence.location.primary_timezone} />
+                )}
+                {intelligence.location.region && (
+                  <StatRow label="Region" value={intelligence.location.region} />
+                )}
+                {intelligence.location.source_countries && intelligence.location.source_countries.length > 0 && (
+                  <div className="mt-3">
+                    <div className="mb-1 text-xs text-text-muted">Source countries</div>
+                    <div className="flex flex-wrap gap-1">
+                      {intelligence.location.source_countries.map(c => (
+                        <span key={c} className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">{c}</span>
+                      ))}
                     </div>
-                  )}
-                  {intelligence.location.primary_timezone && (
-                    <div className="flex-between mb-1">
-                      <span className="text-sm text-muted">Primary timezone</span>
-                      <span style={{ fontWeight: 600 }}>{intelligence.location.primary_timezone}</span>
-                    </div>
-                  )}
-                  {intelligence.location.region && (
-                    <div className="flex-between mb-1">
-                      <span className="text-sm text-muted">Region</span>
-                      <span style={{ fontWeight: 600 }}>{intelligence.location.region}</span>
-                    </div>
-                  )}
-                  {intelligence.location.source_countries && intelligence.location.source_countries.length > 0 && (
-                    <div style={{ marginTop: '0.75rem' }}>
-                      <div className="text-sm text-muted mb-1">Source countries</div>
-                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
-                        {intelligence.location.source_countries.map(c => (
-                          <span key={c} className="badge badge-gray">{c}</span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
+                  </div>
+                )}
+              </Card>
+            )}
 
-              {intelligence.content_fingerprint && (
-                <div className="card">
-                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Content Fingerprint</div>
-                  <div className="flex-between mb-1">
-                    <span className="text-sm text-muted">Posts analyzed</span>
-                    <span style={{ fontWeight: 600 }}>{intelligence.content_fingerprint.post_count}</span>
-                  </div>
-                  <div className="flex-between mb-1">
-                    <span className="text-sm text-muted">Vocabulary size</span>
-                    <span style={{ fontWeight: 600 }}>{intelligence.content_fingerprint.vocab_size}</span>
-                  </div>
-                  <div className="flex-between mb-1">
-                    <span className="text-sm text-muted">Vocabulary richness</span>
-                    <span style={{ fontWeight: 600 }}>{intelligence.content_fingerprint.vocab_richness}</span>
-                  </div>
-                  {intelligence.content_fingerprint.top_words && intelligence.content_fingerprint.top_words.length > 0 && (
-                    <div style={{ marginTop: '0.75rem' }}>
-                      <div className="text-sm text-muted mb-1">Top words</div>
-                      <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
-                        {intelligence.content_fingerprint.top_words.slice(0, 15).map(w => (
-                          <span key={w} className="badge badge-gray">{w}</span>
-                        ))}
-                      </div>
+            {intelligence.content_fingerprint && (
+              <Card title="Content fingerprint">
+                <StatRow label="Posts analyzed" value={intelligence.content_fingerprint.post_count ?? '—'} />
+                <StatRow label="Vocabulary size" value={intelligence.content_fingerprint.vocab_size ?? '—'} />
+                <StatRow label="Vocabulary richness" value={intelligence.content_fingerprint.vocab_richness ?? '—'} />
+                {intelligence.content_fingerprint.top_words && intelligence.content_fingerprint.top_words.length > 0 && (
+                  <div className="mt-3">
+                    <div className="mb-1 text-xs text-text-muted">Top words</div>
+                    <div className="flex flex-wrap gap-1">
+                      {intelligence.content_fingerprint.top_words.slice(0, 15).map(w => (
+                        <span key={w} className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">{w}</span>
+                      ))}
                     </div>
-                  )}
-                </div>
-              )}
-
-              {intelligence.community_id && (
-                <div className="card">
-                  <div className="flex-between">
-                    <span className="text-sm text-muted">Community membership</span>
-                    <Link to="/communities" className="text-sm">View communities &rarr;</Link>
                   </div>
-                </div>
-              )}
+                )}
+              </Card>
+            )}
 
-              <div className="card">
-                <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Same-Person Candidates</div>
-                {intelligence.same_person_candidates.length === 0 ? (
-                  <div className="text-sm text-muted">None detected</div>
-                ) : (
-                  <table>
-                    <thead>
+            {intelligence.community_id && (
+              <Card>
+                <div className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1 text-sm text-text-muted">
+                    Community membership
+                    <InfoTip text="A community is a tightly-connected cluster of people the graph engine grouped together." />
+                  </span>
+                  <Link to="/communities" className="text-sm">View communities →</Link>
+                </div>
+              </Card>
+            )}
+
+            <Card
+              title="Possible same-person candidates"
+              actions={
+                <InfoTip text="Other entities the system thinks might be the same real person. Confirm to merge them, or dismiss to teach the scorer they're different." />
+              }
+            >
+              {intelligence.same_person_candidates.length === 0 ? (
+                <div className="text-sm text-text-muted">None detected.</div>
+              ) : (
+                <div className="overflow-auto">
+                  <table className="w-full">
+                    <thead className="border-b border-border">
                       <tr>
-                        <th>Entity</th>
-                        <th>Probability</th>
-                        <th>Cross-platform</th>
-                        <th>Contributing Signals</th>
-                        <th>Action</th>
+                        <th className="px-2 py-2 text-left text-xs font-medium uppercase tracking-wider text-text-muted">Entity</th>
+                        <th className="px-2 py-2 text-left text-xs font-medium uppercase tracking-wider text-text-muted">Same-person probability</th>
+                        <th className="px-2 py-2 text-left text-xs font-medium uppercase tracking-wider text-text-muted">Cross-platform</th>
+                        <th className="px-2 py-2 text-left text-xs font-medium uppercase tracking-wider text-text-muted">Contributing evidence</th>
+                        <th className="px-2 py-2 text-left text-xs font-medium uppercase tracking-wider text-text-muted">Action</th>
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody className="divide-y divide-border">
                       {intelligence.same_person_candidates.map(c => (
-                        <tr key={c.entity_id}>
-                          <td>
-                            <div className="flex gap-1" style={{ alignItems: 'center' }}>
+                        <tr key={c.entity_id} className="hover:bg-white/5">
+                          <td className="px-2 py-2">
+                            <div className="flex items-center gap-2">
                               {c.contributing_signals.some(s => s.type === 'media_face_match') && intelligence.entity.face_crop_url && (
                                 <FaceAvatar url={intelligence.entity.face_crop_url} name={intelligence.entity.canonical_name} size={30} />
                               )}
@@ -888,101 +1003,89 @@ export default function EntityDetailPage() {
                               </Link>
                             </div>
                           </td>
-                          <td>
-                            <div className="flex gap-1" style={{ alignItems: 'center' }}>
-                              <ConfidenceBar score={c.score ?? 0} />
-                              <span className="text-sm text-muted">{Math.round((c.score ?? 0) * 100)}%</span>
-                            </div>
+                          <td className="px-2 py-2">
+                            <ConfidencePill score={c.score ?? 0} />
                           </td>
-                          <td>
-                            <span className={`badge ${c.cross_platform ? 'badge-blue' : 'badge-gray'}`}>
-                              {c.cross_platform ? 'yes' : 'no'}
-                            </span>
+                          <td className="px-2 py-2">
+                            {c.cross_platform
+                              ? <StatusBadge status="success" label="yes" />
+                              : <StatusBadge status="idle" label="no" />}
                           </td>
-                          <td className="text-sm text-muted">
-                            {c.contributing_signals.map(s => `${s.type} (${s.confidence})`).join(', ')}
+                          <td className="px-2 py-2 text-xs text-text-muted">
+                            {c.contributing_signals
+                              .map(s => `${LABELS.signalType[s.type] ?? s.type} (${s.confidence})`)
+                              .join(', ')}
                           </td>
-                          <td>
+                          <td className="px-2 py-2">
                             <div className="flex gap-1">
-                              <button onClick={() => handleConfirmSame(c.entity_id)}>Same &rarr; merge</button>
-                              <button
-                                onClick={() => handleDismissMatch(c.entity_id)}
-                                style={{ borderColor: 'var(--color-orange)', color: 'var(--color-orange)' }}
-                              >
+                              <Button size="sm" onClick={() => handleConfirmSame(c.entity_id)}>
+                                Same → merge
+                              </Button>
+                              <Button size="sm" variant="danger" onClick={() => handleDismissMatch(c.entity_id)}>
                                 Not same
-                              </button>
+                              </Button>
                             </div>
                           </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
-                )}
-              </div>
-
-              {intelligence.timeline_summary && (
-                <div className="card">
-                  <div className="text-sm text-muted mb-1" style={{ fontWeight: 600 }}>Timeline Summary</div>
-                  <div className="flex-between mb-1">
-                    <span className="text-sm text-muted">First seen</span>
-                    <span className="text-sm">
-                      {intelligence.timeline_summary.first_seen ? formatDate(intelligence.timeline_summary.first_seen) : '-'}
-                    </span>
-                  </div>
-                  <div className="flex-between mb-1">
-                    <span className="text-sm text-muted">Last seen</span>
-                    <span className="text-sm">
-                      {intelligence.timeline_summary.last_seen ? formatDate(intelligence.timeline_summary.last_seen) : '-'}
-                    </span>
-                  </div>
-                  <div style={{ marginTop: '0.75rem' }}>
-                    <div className="text-sm text-muted mb-1">Events by source</div>
-                    <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
-                      {Object.entries(intelligence.timeline_summary.event_count_by_source).map(([source, count]) => (
-                        <span key={source} className="badge badge-blue">{source}: {count}</span>
-                      ))}
-                    </div>
-                  </div>
                 </div>
               )}
-            </>
-          )}
-        </>
+            </Card>
+
+            {intelligence.timeline_summary && (
+              <Card title="Timeline summary">
+                <StatRow
+                  label="First seen"
+                  value={intelligence.timeline_summary.first_seen ? formatDate(intelligence.timeline_summary.first_seen) : '—'}
+                />
+                <StatRow
+                  label="Last seen"
+                  value={intelligence.timeline_summary.last_seen ? formatDate(intelligence.timeline_summary.last_seen) : '—'}
+                />
+                <div className="mt-3">
+                  <div className="mb-1 text-xs text-text-muted">Events by source</div>
+                  <div className="flex flex-wrap gap-1">
+                    {Object.entries(intelligence.timeline_summary.event_count_by_source).map(([source, count]) => (
+                      <span key={source} className="rounded-full bg-info/15 px-2 py-0.5 text-xs font-medium text-info">
+                        {source}: {count}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </Card>
+            )}
+          </div>
+        )
       )}
 
+      {/* ── Settings ─────────────────────────────────────────────────── */}
       {tab === 'settings' && (
-        <div className="card">
-          <h3 style={{ fontSize: '1.1rem', marginBottom: '1rem' }}>Alert Tuning</h3>
-          <div style={{ marginBottom: '1rem' }}>
-            <label className="text-sm text-muted" style={{ display: 'block', marginBottom: '0.25rem' }}>
+        <Card title="Alert tuning">
+          <div className="mb-3">
+            <label className="mb-1 block text-xs text-text-muted">
               Custom silence threshold (days) — leave empty for automatic
             </label>
             <input
               type="text"
               placeholder="e.g. 14"
               value={silenceThreshold}
-              onChange={e => setSilenceThreshold(e.target.value)}
-              style={{ maxWidth: '200px' }}
+              onChange={(e) => setSilenceThreshold(e.target.value)}
+              className="max-w-[200px] rounded-md border border-border bg-background px-2 py-1.5 text-sm text-text-primary"
             />
           </div>
-          <div style={{ marginBottom: '1rem' }}>
-            <label className="text-sm text-muted" style={{ display: 'block', marginBottom: '0.25rem' }}>
-              Notes
-            </label>
+          <div className="mb-3">
+            <label className="mb-1 block text-xs text-text-muted">Notes</label>
             <textarea
               value={notes}
-              onChange={e => setNotes(e.target.value)}
+              onChange={(e) => setNotes(e.target.value)}
               rows={3}
-              style={{
-                width: '100%', maxWidth: '500px', padding: '0.5rem 0.75rem',
-                borderRadius: '6px', border: '1px solid var(--color-border)',
-                background: 'var(--bg)', color: 'var(--text)', fontSize: '0.875rem',
-                resize: 'vertical',
-              }}
+              className="w-full max-w-[500px] resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-text-primary"
             />
           </div>
-          <button className="primary" onClick={handleSaveSettings}>Save Settings</button>
-        </div>
+          <Button variant="primary" onClick={handleSaveSettings}>Save settings</Button>
+        </Card>
       )}
     </div>
   )
