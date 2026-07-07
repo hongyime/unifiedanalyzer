@@ -8,6 +8,7 @@ src/pipeline/media_analysis_tier1.py (Tier 1: 6D/6F/6H).
 import json
 import logging
 import os
+import re
 import subprocess
 from collections import defaultdict
 from pathlib import Path
@@ -449,17 +450,30 @@ async def emit_media_contact_signals(
     return stats
 
 
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$", re.IGNORECASE)
+
+
 async def fetch_media_item_entities(media_item_ids: list[str]) -> dict[str, tuple[str, str | None]]:
     """media_items.id -> (source, entity_id) for the given ids, from the
     collector DB. Used to resolve PARENT media items for derived rows
     (pdf_embedded_image / video_frame) when building entity-linked signals.
+
+    Filters non-UUID inputs before the query. Phase-6 derived rows can have
+    synthetic media_item_ids like '{parent_uuid}:pdf_img:{page}:{idx}' or
+    40-char content-hash IDs from certain sources; those are TEXT-typed
+    and would crash the ::uuid[] cast if passed through. Downstream callers
+    already handle missing lookups (item_entities.get(...) returns None ->
+    row skipped), so filtering out non-UUIDs is behaviour-preserving.
     """
     if not media_item_ids:
+        return {}
+    uuid_ids = [mid for mid in media_item_ids if mid and _UUID_RE.match(mid)]
+    if not uuid_ids:
         return {}
     collector = get_collector_pool()
     async with collector.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id::text, source, entity_id FROM media_items WHERE id = ANY($1::uuid[])",
-            media_item_ids,
+            uuid_ids,
         )
     return {r["id"]: (r["source"], r["entity_id"]) for r in rows}
