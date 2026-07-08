@@ -111,6 +111,21 @@ async def merge_entities(req: MergeRequest):
             VALUES ('merge', $1::uuid[], $2, $3)
         """, req.source_entity_ids, target_id, req.reason)
 
+        # Track-C: hash-chained audit entry. Non-fatal.
+        try:
+            from src.util.audit_log import append_audit
+            await append_audit(
+                conn, action="merge_entities", actor="dashboard",
+                entity_ids=req.source_entity_ids,
+                payload={
+                    "target_entity_id": str(target_id),
+                    "merged_count": len(others),
+                    "reason": req.reason or "",
+                },
+            )
+        except Exception:
+            pass  # never block a merge on audit log failure
+
     return {"ok": True, "target_entity_id": str(target_id), "merged": len(others)}
 
 
@@ -131,6 +146,17 @@ async def dismiss_match(req: DismissMatchRequest):
               AND ((entity_a_id = $1::uuid AND entity_b_id = $2::uuid)
                 OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
         """, req.entity_a, req.entity_b)
+
+        # Track-C: hash-chained audit entry. Non-fatal.
+        try:
+            from src.util.audit_log import append_audit
+            await append_audit(
+                conn, action="dismiss_match", actor="dashboard",
+                entity_ids=[req.entity_a, req.entity_b],
+                payload={},
+            )
+        except Exception:
+            pass
     return {"ok": True}
 
 

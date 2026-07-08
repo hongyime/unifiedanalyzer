@@ -44,6 +44,10 @@ from src.pipeline.auto_labeler import seed_ground_truth_labels
 from src.pipeline.timeline_embedder import embed_new_timeline_events
 from src.pipeline.topical_similarity import emit_topical_similarity_signals
 from src.pipeline.calibration_watchdog import check_calibration_readiness
+from src.pipeline.phone_enrichment import enrich_phone_signals
+from src.pipeline.email_breach import check_email_breaches
+from src.pipeline.handle_fanout import run_handle_fanout
+from src.pipeline.email_recognition import run_email_recognition
 from src.pipeline.geocode import geocode_step
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
@@ -245,6 +249,13 @@ def _secondary_phases() -> list[tuple[str, object]]:
         ("topical_similarity", emit_topical_similarity_signals),
         ("calibration_retrain", maybe_retrain),
         ("identity_scoring", compute_identity_scores),
+        # Track-C: OSINT enrichment tools. Each is env-gated (default off for
+        # network-heavy ones) and returns {"skipped": ...} when disabled.
+        # phone_enrichment is cheap + local (phonenumbers lib) so defaults on.
+        ("phone_enrichment", enrich_phone_signals),
+        ("email_breach_check", check_email_breaches),
+        ("handle_fanout", run_handle_fanout),
+        ("email_recognition", run_email_recognition),
         # Calibration cutover watchdog: emits CALIBRATION_READY alert + Telegram
         # notification when identity_labels >= CALIBRATION_MONITOR_MIN_LABELS
         # AND LR beats noisy-OR by >= CALIBRATION_MONITOR_MIN_DELTA AUC.

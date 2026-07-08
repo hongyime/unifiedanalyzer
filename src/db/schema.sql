@@ -51,6 +51,66 @@ CREATE TABLE IF NOT EXISTS identity_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_signals_entity ON identity_signals(entity_id);
 CREATE INDEX IF NOT EXISTS idx_signals_type ON identity_signals(signal_type);
+-- Track-C (2026-07-08): free-form JSONB metadata per signal so enrichments
+-- (phone country/carrier/line-type, breach names, Sherlock/Holehe evidence)
+-- can attach without stringifying into the `value` column. Nullable to keep
+-- every pre-existing signal row valid.
+ALTER TABLE identity_signals ADD COLUMN IF NOT EXISTS metadata JSONB;
+
+-- Track-C: hash-chained tamper-evident audit log for human decisions. Every
+-- entity merge/dismiss/split writes one row whose sha256 covers (prev_sha256,
+-- action, actor, entity_ids, payload, created_at). A gap or hash mismatch is
+-- detectable at read time. Modeled after the FORGE OSINT pattern; scoped to
+-- analyst decisions we want to preserve across UUID churn.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id           BIGSERIAL PRIMARY KEY,
+    prev_sha256  CHAR(64),
+    sha256       CHAR(64) NOT NULL,
+    action       VARCHAR(50) NOT NULL,        -- merge_entities | dismiss_match | split_entity | ...
+    actor        VARCHAR(100),                 -- 'dashboard' | 'cli' | 'system' | operator name
+    entity_ids   UUID[],                       -- the entities involved
+    payload      JSONB NOT NULL DEFAULT '{}',  -- action-specific detail
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_log_action  ON audit_log(action);
+
+-- Track-C: per-email breach findings from XposedOrNot (and any future breach
+-- provider). Analyzer-owned so we can enrich, alert, and time-track without
+-- re-querying the API on every run. UNIQUE guards dedup.
+CREATE TABLE IF NOT EXISTS email_breach_findings (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email        VARCHAR(320) NOT NULL,
+    breach_name  VARCHAR(200) NOT NULL,
+    breach_date  DATE,
+    source       VARCHAR(30) NOT NULL DEFAULT 'xposedornot',
+    detail       JSONB DEFAULT '{}',
+    created_at   TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (email, breach_name, source)
+);
+CREATE INDEX IF NOT EXISTS idx_email_breach_email ON email_breach_findings(email);
+CREATE INDEX IF NOT EXISTS idx_email_breach_source ON email_breach_findings(source);
+
+-- Track-C: Sherlock/Holehe handle-fanout discoveries staged before promotion
+-- to entity_platform_links. Kept as a distinct table so we can review + accept
+-- results without polluting the primary graph.
+CREATE TABLE IF NOT EXISTS handle_discoveries (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_id     UUID REFERENCES entities(id) ON DELETE CASCADE,
+    source_query  VARCHAR(255) NOT NULL,     -- the handle or email queried
+    tool          VARCHAR(30) NOT NULL,      -- 'sherlock' | 'holehe' | ...
+    platform      VARCHAR(80) NOT NULL,       -- e.g. 'GitHub', 'Reddit'
+    url           TEXT,
+    confidence    FLOAT DEFAULT 0.6,
+    promoted      BOOLEAN DEFAULT FALSE,      -- true after review + entity_platform_links write
+    dismissed     BOOLEAN DEFAULT FALSE,
+    detail        JSONB DEFAULT '{}',
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (entity_id, tool, platform, source_query)
+);
+CREATE INDEX IF NOT EXISTS idx_handle_discoveries_entity ON handle_discoveries(entity_id);
+CREATE INDEX IF NOT EXISTS idx_handle_discoveries_pending
+    ON handle_discoveries(entity_id) WHERE NOT promoted AND NOT dismissed;
 
 CREATE TABLE IF NOT EXISTS timeline_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

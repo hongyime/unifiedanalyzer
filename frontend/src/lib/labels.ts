@@ -85,6 +85,14 @@ export const ALERT_LABELS: Record<string, { name: string; meaning: string }> = {
     name: 'Location conflict',
     meaning: 'Accounts for this person show up in different countries.',
   },
+  IDENTITY_BREACHED: {
+    name: 'Data breach exposure',
+    meaning: 'This person\u2019s email appears in one or more known data breaches.',
+  },
+  CALIBRATION_READY: {
+    name: 'Calibration cutover ready',
+    meaning: 'The trained same-person model now beats hand-set weights. Ready to activate.',
+  },
 }
 
 export function alertLabel(type: string): string {

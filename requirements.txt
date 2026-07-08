@@ -45,3 +45,11 @@ python-multipart>=0.0.9
 # multilingual-e5-small ONNX embedder. onnxruntime is already listed above;
 # pgvector-Python is already listed above.
 tokenizers>=0.20
+
+# Track-C OSINT tools (2026-07-08)
+# phonenumbers: Google libphonenumber port, offline phone parsing/enrichment
+phonenumbers>=8.13.0
+# sherlock-project: 400-site username fanout (subprocess-invoked)
+sherlock-project>=0.15.0
+# holehe: 100+ services email-recognises-account check (subprocess-invoked)
+holehe>=1.61
