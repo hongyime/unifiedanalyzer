@@ -69,6 +69,15 @@ _SCORING_SIGNALS: frozenset[str] = frozenset({
     # deliberately NOT added to _HARD_SIGNALS — topical overlap is not
     # deterministic (peers/co-workers commonly share topics).
     "topical_similarity",
+    # NER enrichment: shared rare ORG/school/location. Also weak — a shared
+    # small employer is suggestive but not deterministic (colleagues exist).
+    # Deliberately NOT in _HARD_SIGNALS.
+    "shared_life_context",
+    # Face social graph (2026-07-08): associative — B's primary face matched
+    # A's face_association. Deliberately NOT a hard-anchor: a hit means "B is
+    # in A's social circle" OR "B is A viewed via a friend's photo", the
+    # former is common and does not imply same-person.
+    "social_face_link",
 })
 
 _AUTO_POSITIVE_SOURCE = "auto_positive_v1"

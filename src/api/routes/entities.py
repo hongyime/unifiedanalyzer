@@ -138,7 +138,7 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
             JOIN entities ea ON r.entity_a_id = ea.id
             JOIN entities eb ON r.entity_b_id = eb.id
             WHERE r.relationship_type = 'same_person_probability'
-            ORDER BY r.weight DESC
+            ORDER BY r.cross_platform DESC, r.weight DESC
             LIMIT $1
         """, limit)
         ids: list[str] = []
@@ -185,6 +185,7 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
             "handles_b": handles.get(b, []),
             "score": meta.get("score"),
             "cross_platform": r["cross_platform"],
+            "same_platform": (not r["cross_platform"]) or bool(meta.get("same_platform")),
             "signals": meta.get("contributing_signals", []),
             "face_a": face_crop_url(rep.get(a)),
             "face_b": face_crop_url(rep.get(b)),

@@ -42,6 +42,16 @@ FEATURE_ORDER = [
     # append-only; do not reorder (would invalidate every persisted feature
     # snapshot in identity_labels).
     "topical_similarity",
+    # NER enrichment: shared rare ORG/school/location (spaCy). Emitted by
+    # src/pipeline/shared_life_context.py. Append-only (17th entry) — do not
+    # reorder or every persisted feature snapshot in identity_labels breaks.
+    "shared_life_context",
+    # Face social graph (2026-07-08): entity B's primary face matched entity A's
+    # face_association at cosine >= 0.55. Emitted by
+    # src/pipeline/social_face_link.py. Append-only — must be LAST at write time
+    # so existing persisted feature vectors and trained models keep their
+    # positions. Tolerates any additional appends by parallel subagents.
+    "social_face_link",
 ]
 
 _MODEL_PATH = os.getenv(

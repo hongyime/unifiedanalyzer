@@ -70,7 +70,10 @@ export default function ReviewPage() {
       ) : (
         <div className="flex flex-col gap-2">
           {candidates.map((c, i) => (
-            <Card key={`${c.entity_a}-${c.entity_b}-${i}`} className="flex items-center justify-between gap-4">
+            <Card
+              key={`${c.entity_a}-${c.entity_b}-${i}`}
+              className={`flex items-center justify-between gap-4 ${c.same_platform ? 'opacity-60' : ''}`}
+            >
               <div className="flex items-center gap-1">
                 <FaceAvatar url={c.face_a} name={c.name_a} size={44} />
                 <FaceAvatar url={c.face_b} name={c.name_b} size={44} />
@@ -94,7 +97,16 @@ export default function ReviewPage() {
                   })()}
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-text-muted">
                     <Confidence score={c.score} />
-                    <span>· {c.cross_platform ? 'different platforms' : 'same platform'}</span>
+                    {c.same_platform ? (
+                      <span
+                        className="rounded-sm border border-border px-1.5 py-0.5 text-xs uppercase tracking-wide text-text-muted"
+                        title="Same-platform pairs are usually different people with similar names/handles. Kept visible for the rare burner-account case."
+                      >
+                        same-platform · weak
+                      </span>
+                    ) : (
+                      <span className="text-xs text-text-secondary">· cross-platform</span>
+                    )}
                     {c.signals.length > 0 && (
                       <span>· {c.signals.map((s) => LABELS.signalType[s.type] ?? s.type.replace(/_/g, ' ')).join(', ')}</span>
                     )}

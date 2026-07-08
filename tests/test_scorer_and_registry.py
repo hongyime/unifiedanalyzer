@@ -1,0 +1,193 @@
+"""Sanity tests for scorer same-platform multiplier + signal-registry consistency.
+
+Not a full end-to-end suite - runs without DB by monkey-patching the pool. The
+purpose is to catch:
+  * A registry drift (a signal appended to _TYPE_WEIGHT but forgotten in
+    FEATURE_ORDER / _SCORING_SIGNALS, or vice versa)
+  * The same-platform multiplier logic breaking under refactor
+  * The phase list losing any of the four new Track-1 phases
+
+Run: `python -m pytest tests/test_scorer_and_registry.py -v`
+     (or from a fresh Docker rebuild: `pytest -q tests/`)
+
+Requires: pytest, pytest-asyncio (installed via requirements-dev.txt or pip
+install once).  If neither is present, tests skip with a clear message.
+"""
+from __future__ import annotations
+
+import importlib
+import os
+import sys
+from pathlib import Path
+
+# Make `src.*` importable when running standalone (python tests/foo.py) as
+# well as under pytest. Repo root is the parent of this file's directory.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    import pytest
+except ImportError:
+    print("pytest not installed; skip: `pip install pytest pytest-asyncio`")
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Signal registry consistency
+# ---------------------------------------------------------------------------
+
+def test_type_weight_matches_feature_order():
+    """Every _TYPE_WEIGHT key must appear in FEATURE_ORDER (else the calibrated
+    LR model has no feature slot for that signal) and vice versa."""
+    from src.pipeline.identity_scorer import _TYPE_WEIGHT
+    from src.pipeline.identity_calibration import FEATURE_ORDER
+    weight_keys = set(_TYPE_WEIGHT.keys())
+    feature_keys = set(FEATURE_ORDER)
+    assert weight_keys == feature_keys, (
+        f"Registry drift: in _TYPE_WEIGHT but not FEATURE_ORDER = "
+        f"{weight_keys - feature_keys}, "
+        f"in FEATURE_ORDER but not _TYPE_WEIGHT = {feature_keys - weight_keys}"
+    )
+
+
+def test_scoring_signals_matches_type_weight():
+    """auto_labeler._SCORING_SIGNALS must include every scorer key so
+    confluence-based labeling can consider it."""
+    from src.pipeline.identity_scorer import _TYPE_WEIGHT
+    from src.pipeline.auto_labeler import _SCORING_SIGNALS
+    weight_keys = set(_TYPE_WEIGHT.keys())
+    scoring_keys = set(_SCORING_SIGNALS)
+    assert weight_keys == scoring_keys, (
+        f"Registry drift: in scorer but not auto_labeler._SCORING_SIGNALS = "
+        f"{weight_keys - scoring_keys}, "
+        f"in auto_labeler._SCORING_SIGNALS but not scorer = {scoring_keys - weight_keys}"
+    )
+
+
+def test_hard_signals_are_deterministic_only():
+    """_HARD_SIGNALS is the confluence-anchor set. Weak / associative signals
+    (topical_similarity, social_face_link, shared_life_context, etc.) MUST
+    NOT be listed here or auto-label training gets a garbage positive rule."""
+    from src.pipeline.auto_labeler import _HARD_SIGNALS
+    forbidden = {"topical_similarity", "social_face_link", "shared_life_context",
+                 "content_similarity", "temporal_copost", "group_cooccurrence",
+                 "username_similar", "bio_mention"}
+    leaked = _HARD_SIGNALS & forbidden
+    assert not leaked, f"Weak signals leaked into _HARD_SIGNALS: {leaked}"
+
+
+def test_track_c_signals_registered():
+    """The Track-1/2 new-signal shipment (2026-07-08): both social_face_link
+    and shared_life_context must be present in the registry."""
+    from src.pipeline.identity_scorer import _TYPE_WEIGHT
+    for sig in ("social_face_link", "shared_life_context"):
+        assert sig in _TYPE_WEIGHT, f"{sig} missing from _TYPE_WEIGHT"
+
+
+# ---------------------------------------------------------------------------
+# Phase wiring
+# ---------------------------------------------------------------------------
+
+def test_phase_list_has_new_phases():
+    """The four new phases must be wired into _secondary_phases()."""
+    from src.pipeline.incremental_runner import _secondary_phases
+    names = [name for name, _ in _secondary_phases()]
+    required = {"face_associations", "social_face_link",
+                "entity_enrichment", "shared_life_context"}
+    missing = required - set(names)
+    assert not missing, f"Missing new phases in _secondary_phases: {missing}"
+
+
+def test_face_associations_before_social_face_link():
+    """Ordering matters: face_associations populates the table
+    social_face_link then reads."""
+    from src.pipeline.incremental_runner import _secondary_phases
+    names = [name for name, _ in _secondary_phases()]
+    fa_idx = names.index("face_associations")
+    sfl_idx = names.index("social_face_link")
+    assert fa_idx < sfl_idx, (
+        f"face_associations (@{fa_idx}) must precede social_face_link "
+        f"(@{sfl_idx}) - the latter reads what the former writes."
+    )
+
+
+def test_entity_enrichment_before_shared_life_context():
+    """entity_enrichment populates entities.metadata.enrichment which
+    shared_life_context then reads to build the inverted index."""
+    from src.pipeline.incremental_runner import _secondary_phases
+    names = [name for name, _ in _secondary_phases()]
+    ee_idx = names.index("entity_enrichment")
+    slc_idx = names.index("shared_life_context")
+    assert ee_idx < slc_idx
+
+
+# ---------------------------------------------------------------------------
+# Same-platform multiplier
+# ---------------------------------------------------------------------------
+
+def test_same_platform_multiplier_env_configurable():
+    """SCORER_SAME_PLATFORM_MULTIPLIER must default to 0.3 and be tunable."""
+    # Force a fresh module load so the module-level float reflects the env.
+    os.environ["SCORER_SAME_PLATFORM_MULTIPLIER"] = "0.7"
+    if "src.pipeline.identity_scorer" in sys.modules:
+        importlib.reload(sys.modules["src.pipeline.identity_scorer"])
+    from src.pipeline.identity_scorer import _SAME_PLATFORM_MULTIPLIER
+    assert _SAME_PLATFORM_MULTIPLIER == 0.7
+
+    # Reset back to default for other tests.
+    del os.environ["SCORER_SAME_PLATFORM_MULTIPLIER"]
+    importlib.reload(sys.modules["src.pipeline.identity_scorer"])
+    from src.pipeline.identity_scorer import _SAME_PLATFORM_MULTIPLIER as default_mult
+    assert default_mult == 0.3
+
+
+def test_same_platform_penalty_source_annotates_flag():
+    """A same-platform pair persisted by compute_identity_scores must set
+    sources.same_platform=True in the entity_relationships row (verified by
+    inspecting the code path - actual DB writes tested at integration level).
+    """
+    # Read the source text and verify the exact line is present. This is a
+    # lightweight smoke check to catch a refactor that drops the flag.
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "src" / "pipeline" / "identity_scorer.py"
+    text = src.read_text(encoding="utf-8")
+    assert '"same_platform": r["same_platform"]' in text, (
+        "Scorer must persist same_platform boolean in sources JSON."
+    )
+    assert "_SAME_PLATFORM_MULTIPLIER" in text, "Multiplier constant missing."
+    assert "if same_platform:" in text, "Multiplier not applied conditionally."
+
+
+# ---------------------------------------------------------------------------
+# New module import smoke tests
+# ---------------------------------------------------------------------------
+
+def test_new_modules_importable():
+    """The four new pipeline modules must import without side-effects that
+    reach out to a live DB. The functions themselves are async and won't
+    execute at import; we just verify the module structure is intact."""
+    from src.pipeline.face_associations import build_face_associations
+    from src.pipeline.social_face_link import emit_social_face_link_signals
+    from src.pipeline.entity_enrichment import enrich_entities_with_ner
+    from src.pipeline.shared_life_context import emit_shared_life_context_signals
+    for fn in (build_face_associations, emit_social_face_link_signals,
+               enrich_entities_with_ner, emit_shared_life_context_signals):
+        assert callable(fn), f"{fn} is not callable"
+
+
+if __name__ == "__main__":
+    # Standalone runnable without pytest: just call each function.
+    all_tests = [(n, obj) for n, obj in globals().items()
+                 if n.startswith("test_") and callable(obj)]
+    passed, failed = 0, []
+    for name, fn in all_tests:
+        try:
+            fn()
+            print(f"  ok  {name}")
+            passed += 1
+        except Exception as e:
+            print(f"  FAIL {name}: {type(e).__name__}: {e}")
+            failed.append((name, e))
+    print(f"\n{passed}/{len(all_tests)} passed")
+    sys.exit(1 if failed else 0)

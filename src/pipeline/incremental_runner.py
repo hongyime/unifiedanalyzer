@@ -12,6 +12,8 @@ from src.pipeline.behavioral_profiler import compute_behavioral_profiles
 from src.pipeline.group_graph import build_whatsapp_group_graph, build_telegram_group_graph
 from src.pipeline.strava_patterns import analyze_strava_patterns
 from src.pipeline.bio_nlp import analyze_bios
+from src.pipeline.entity_enrichment import enrich_entities_with_ner
+from src.pipeline.shared_life_context import emit_shared_life_context_signals
 from src.pipeline.graph_analytics import compute_graph_analytics
 from src.pipeline.graph_overlap import compute_graph_overlap
 from src.pipeline.bio_mention import detect_bio_mentions
@@ -39,6 +41,8 @@ from src.pipeline.media_analysis_tier1 import (
 from src.pipeline.identity_scorer import compute_identity_scores
 from src.pipeline.face_clustering import run_face_clustering, propagate_drive_faces_via_knn
 from src.pipeline.face_pair_signals import emit_face_pair_signals
+from src.pipeline.face_associations import build_face_associations
+from src.pipeline.social_face_link import emit_social_face_link_signals
 from src.pipeline.identity_calibration import maybe_retrain
 from src.pipeline.auto_labeler import seed_ground_truth_labels
 from src.pipeline.timeline_embedder import embed_new_timeline_events
@@ -210,6 +214,12 @@ def _secondary_phases() -> list[tuple[str, object]]:
         ("telegram_group_graph", build_telegram_group_graph),
         ("strava_patterns", analyze_strava_patterns),
         ("bio_nlp", analyze_bios),
+        # NER enrichment (spaCy en_core_web_trf) + cross-entity shared rare
+        # ORG/school/location signal. Placed after bio_nlp so both share the
+        # same bio-source pattern; before identity_scoring (later in this
+        # list) so the shared_life_context signal is visible to the scorer.
+        ("entity_enrichment", enrich_entities_with_ner),
+        ("shared_life_context", emit_shared_life_context_signals),
         ("graph_analytics", compute_graph_analytics),
         ("graph_overlap", compute_graph_overlap),
         ("bio_mention", detect_bio_mentions),
@@ -237,6 +247,13 @@ def _secondary_phases() -> list[tuple[str, object]]:
         # now recognise. Runs after drive_face_xref so it sees anchors added
         # by the kNN path.
         ("face_pair_knn", emit_face_pair_signals),
+        # Face social graph (2026-07-08). face_associations must precede
+        # social_face_link so its inserts are visible; both run BEFORE
+        # face_match_signals since neither writes to entity_faces (they read
+        # facetracker.faces directly). Placement immediately after face_pair_knn
+        # keeps every face-based derivation in one contiguous block.
+        ("face_associations", build_face_associations),
+        ("social_face_link", emit_social_face_link_signals),
         ("face_match_signals", rebuild_face_match_signals),
         ("auto_label_seed", seed_ground_truth_labels),
         # Axis-1 MVP: sentence-embed new timeline_events.title into

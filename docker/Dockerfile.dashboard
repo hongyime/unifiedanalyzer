@@ -25,6 +25,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# NER enrichment (src/pipeline/entity_enrichment.py) — the transformer model
+# is ~450MB plus torch ~700MB. Bakes into the image so the scheduler doesn't
+# hit the network on first run.
+RUN python -m spacy download en_core_web_trf
+
 COPY src/ src/
 COPY --from=frontend /app/frontend/dist/ frontend/dist/
 COPY docker/embed-backfill-loop.sh /app/embed-backfill-loop.sh

@@ -75,10 +75,29 @@ _TYPE_WEIGHT = {
     # deterministic anchor. Emitted by src/pipeline/topical_similarity.py; not a
     # hard-anchor in auto_labeler._HARD_SIGNALS. Append-only (16th entry).
     "topical_similarity": 0.15,
+    # Face social graph (2026-07-08): entity B's primary face matched entity A's
+    # stored face_association at cosine >= 0.55. ASSOCIATIVE, not
+    # identity-direct — a hit means "B is in A's social circle" OR "B is A
+    # viewed via a friend's photo", so weight is deliberately below
+    # face_pair_knn (0.60, which is direct portrait-vs-portrait) and above
+    # topical_similarity (0.15). Append-only; must not reorder.
+    "social_face_link": 0.30,
+    # NER enrichment: two entities share a RARE ORG/school/location extracted
+    # by spaCy from bios + recent timeline titles. Emitted by
+    # src/pipeline/shared_life_context.py. Rarity guard (≤5% of entities by
+    # default) is what keeps this from being ubiquitous — a shared 'Google' or
+    # 'Singapore' produces nothing.
+    "shared_life_context": 0.35,
 }
 
 _MIN_SCORE = 0.10
 _HIGH_CONFIDENCE = 0.70
+# 2026-07-08: penalty multiplier for same-platform candidate pairs. Cross-platform
+# pairs are unpenalised (multiplier=1.0). Same-platform pairs get score * this,
+# which by design dims them in the review queue while keeping them discoverable
+# for the rare burner-account case. Tune with env SCORER_SAME_PLATFORM_MULTIPLIER.
+import os as _os_scorer
+_SAME_PLATFORM_MULTIPLIER = float(_os_scorer.getenv("SCORER_SAME_PLATFORM_MULTIPLIER", "0.3"))
 
 
 def _pair_key(a: str, b: str) -> tuple[str, str]:
@@ -171,12 +190,26 @@ async def compute_identity_scores() -> dict:
                 prob_none *= (1 - _TYPE_WEIGHT[sig_type] * confidence)
             score = 1 - prob_none
 
-        if score < _MIN_SCORE:
-            continue
-
         platforms_a = entity_platforms.get(a, set())
         platforms_b = entity_platforms.get(b, set())
+        # Cross-platform: A and B have at least one DISJOINT platform (i.e.
+        # the sets differ, at least one entity has a platform the other
+        # doesn't). Same-platform: identical platform sets.
         cross_platform = platforms_a != platforms_b
+        same_platform = not cross_platform
+
+        # 2026-07-08: same-platform pairs get a 0.3x penalty. Rationale:
+        # if A and B are only on Telegram (say), their platform user_ids
+        # differ - so unless it's a burner-account case, they're
+        # different people even when usernames or content look similar.
+        # Cross-platform pairs remain unpenalised. Tunable via env.
+        # score is still emitted (dim + deprioritise on the UI side),
+        # NOT excluded - preserves the rare burner discovery path.
+        if same_platform:
+            score = score * _SAME_PLATFORM_MULTIPLIER
+
+        if score < _MIN_SCORE:
+            continue
 
         results.append({
             "entity_a": a,
@@ -184,6 +217,7 @@ async def compute_identity_scores() -> dict:
             "score": score,
             "breakdown": breakdown,
             "cross_platform": cross_platform,
+            "same_platform": same_platform,
         })
 
     # --- Persist: delete-and-reinsert ---
@@ -192,6 +226,7 @@ async def compute_identity_scores() -> dict:
         sources = {
             "score": round(r["score"], 4),
             "method": scoring_method,
+            "same_platform": r["same_platform"],
             "contributing_signals": r["breakdown"],
         }
         insert_rows.append((

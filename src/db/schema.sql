@@ -386,3 +386,38 @@ CREATE INDEX IF NOT EXISTS idx_timeline_emb_hnsw
     ON timeline_embeddings USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_timeline_emb_entity ON timeline_embeddings(entity_id);
 CREATE INDEX IF NOT EXISTS idx_timeline_emb_occurred ON timeline_embeddings(occurred_at DESC);
+
+-- Face social graph (2026-07-08). For each entity A that posts a media_item
+-- with >=2 detected faces and whose primary face is among them, the OTHER
+-- detected faces are stored here as A's "associates" (friends/co-appearing
+-- people). At scoring time the `social_face_link` builder emits an identity
+-- signal whenever entity B's primary face matches one of A's associates at
+-- cosine >= 0.55 — either B is in A's social circle, or B is A viewed via a
+-- friend's photo.
+--
+-- Cross-schema-by-value: associated_face_id references facetracker.faces.id by
+-- value (no FK, so facetracker can be rebuilt without breaking analyzer rows);
+-- media_item_id references unifiedcollector.media_items.id by value. UNIQUE
+-- guards idempotent inserts across repeated pipeline passes.
+CREATE TABLE IF NOT EXISTS face_associations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_id UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    associated_face_id INTEGER NOT NULL,
+    media_item_id TEXT NOT NULL,
+    source_platform VARCHAR(30),
+    quality_score FLOAT,
+    first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (entity_id, associated_face_id, media_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_face_assoc_entity ON face_associations(entity_id);
+CREATE INDEX IF NOT EXISTS idx_face_assoc_face ON face_associations(associated_face_id);
+
+-- Face social graph: the entity's "primary face" — the highest-quality face
+-- resolved via method='media_attribution' from a profile_photo media_item
+-- (priority 1), or the largest bridged cluster's representative face
+-- (fallback). Set by src/pipeline/face_associations.py; nullable because not
+-- every entity has bridged faces yet. Partial index because most entities do
+-- not carry a primary_face_id at any given time.
+ALTER TABLE entities ADD COLUMN IF NOT EXISTS primary_face_id INTEGER;
+CREATE INDEX IF NOT EXISTS idx_entities_primary_face
+    ON entities(primary_face_id) WHERE primary_face_id IS NOT NULL;

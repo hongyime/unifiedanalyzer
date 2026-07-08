@@ -53,3 +53,7 @@ phonenumbers>=8.13.0
 sherlock-project>=0.15.0
 # holehe: 100+ services email-recognises-account check (subprocess-invoked)
 holehe>=1.61
+
+
+# NER via spaCy (2026-07-08)
+spacy>=3.7.0

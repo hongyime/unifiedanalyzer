@@ -46,6 +46,7 @@ export interface ReviewCandidate {
   handles_b: string[]
   score: number | null
   cross_platform: boolean
+  same_platform: boolean
   signals: { type: string; confidence: number }[]
   face_a: string | null
   face_b: string | null
