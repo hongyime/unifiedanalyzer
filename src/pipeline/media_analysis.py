@@ -11,6 +11,7 @@ backfill the entire 120k-item backlog in one sitting.
 See docs/media_analysis_plan.md for the full spec. Tier 1 (6D/6F/6H) lives in
 src/pipeline/media_analysis_tier1.py.
 """
+import asyncio
 import json
 import logging
 import os
@@ -465,24 +466,36 @@ async def analyze_media_phash(limit: int | None = None) -> dict:
 
     items = await fetch_unprocessed_media(_PHASH_CONTENT_TYPES, "phash", limit=limit)
     items += await fetch_unprocessed_derived(["pdf_image", "video_frame"], "phash", limit=limit)
+    logger.info("6B perceptual hash: fetched %d items to process", len(items))
 
-    rows = []
-    for item in items:
-        path = resolve_media_path(item["file_path"])
-        if path is None:
-            continue
-        try:
-            with Image.open(path) as img:
-                phash = imagehash.phash(img)
-        except Exception:
-            logger.debug("phash failed for %s", path, exc_info=True)
-            continue
-        rows.append({
-            "media_item_id": item["id"], "parent_media_item_id": item.get("parent_media_item_id"),
-            "source": item["source"], "content_type": item["content_type"],
-            "analysis_type": "phash", "perceptual_hash": str(phash),
-            "model_version": "imagehash-phash-v1",
-        })
+    def _phash_loop(items_: list[dict]) -> list[dict]:
+        """CPU-bound: PIL image open + imagehash.phash serially per item.
+        Runs in a thread via asyncio.to_thread so the scheduler's heartbeat
+        loop keeps ticking. Progress-logs every 100 items so a stuck image
+        leaves a clear last-known-good breadcrumb."""
+        out: list[dict] = []
+        n = len(items_)
+        for i, item in enumerate(items_):
+            if i > 0 and i % 100 == 0:
+                logger.info("6B perceptual hash: progress %d/%d (%.0f%%)", i, n, 100.0 * i / n)
+            path = resolve_media_path(item["file_path"])
+            if path is None:
+                continue
+            try:
+                with Image.open(path) as img:
+                    phash = imagehash.phash(img)
+            except Exception:
+                logger.debug("phash failed for %s", path, exc_info=True)
+                continue
+            out.append({
+                "media_item_id": item["id"], "parent_media_item_id": item.get("parent_media_item_id"),
+                "source": item["source"], "content_type": item["content_type"],
+                "analysis_type": "phash", "perceptual_hash": str(phash),
+                "model_version": "imagehash-phash-v1",
+            })
+        return out
+
+    rows = await asyncio.to_thread(_phash_loop, items)
     await upsert_media_analysis(rows)
     stats["processed"] = len(rows)
 

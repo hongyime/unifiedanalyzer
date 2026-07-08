@@ -135,37 +135,51 @@ async def analyze_media_ocr(limit: int | None = None) -> dict:
 
     derived_parent_ids = {item["parent_media_item_id"] for item in items if item.get("parent_media_item_id")}
     item_entities = await fetch_media_item_entities(list(derived_parent_ids)) if derived_parent_ids else {}
+    logger.info("6D OCR: fetched %d items to process", len(items))
 
-    rows = []
-    for item in items:
-        path = resolve_media_path(item["file_path"])
-        if path is None:
-            continue
-        text = ""
-        try:
-            text = _ocr_image(path)[:_MAX_OCR_TEXT_LEN]
-        except Exception:
-            logger.debug("OCR failed for %s", path, exc_info=True)
+    def _ocr_loop(items_: list[dict]) -> tuple[list[dict], dict[str, list[tuple[str, str]]]]:
+        """CPU + subprocess-bound (tesseract via _ocr_image). Runs in a thread
+        via asyncio.to_thread so the scheduler's heartbeat loop keeps ticking.
+        Progress-logs every 50 items so a stuck image leaves a breadcrumb."""
+        out_rows: list[dict] = []
+        out_texts: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        n = len(items_)
+        for i, item in enumerate(items_):
+            if i > 0 and i % 50 == 0:
+                logger.info("6D OCR: progress %d/%d (%.0f%%)", i, n, 100.0 * i / n)
+            path = resolve_media_path(item["file_path"])
+            if path is None:
+                continue
+            text = ""
+            try:
+                text = _ocr_image(path)[:_MAX_OCR_TEXT_LEN]
+            except Exception:
+                logger.debug("OCR failed for %s", path, exc_info=True)
 
-        rows.append({
-            "media_item_id": item["id"], "parent_media_item_id": item.get("parent_media_item_id"),
-            "source": item["source"], "content_type": item["content_type"],
-            "analysis_type": "ocr_text", "extracted_text": text or None,
-            "model_version": "tesseract-v1",
-        })
-        if not text:
-            continue
+            out_rows.append({
+                "media_item_id": item["id"], "parent_media_item_id": item.get("parent_media_item_id"),
+                "source": item["source"], "content_type": item["content_type"],
+                "analysis_type": "ocr_text", "extracted_text": text or None,
+                "model_version": "tesseract-v1",
+            })
+            if not text:
+                continue
 
-        parent_id = item.get("parent_media_item_id")
-        eid = None
-        if parent_id:
-            src = item_entities.get(parent_id)
-            if src:
-                eid = lookup_entity(entity_lookup, src[0], src[1])
-        elif item.get("entity_id"):
-            eid = lookup_entity(entity_lookup, item["source"], item["entity_id"])
-        if eid:
-            entity_texts[eid].append((item["source"], text))
+            parent_id = item.get("parent_media_item_id")
+            eid = None
+            if parent_id:
+                src = item_entities.get(parent_id)
+                if src:
+                    eid = lookup_entity(entity_lookup, src[0], src[1])
+            elif item.get("entity_id"):
+                eid = lookup_entity(entity_lookup, item["source"], item["entity_id"])
+            if eid:
+                out_texts[eid].append((item["source"], text))
+        return out_rows, out_texts
+
+    rows, entity_texts_thread = await asyncio.to_thread(_ocr_loop, items)
+    for k, v in entity_texts_thread.items():
+        entity_texts[k].extend(v)
 
     await upsert_media_analysis(rows)
     stats["processed"] = len(rows)
@@ -267,43 +281,59 @@ async def analyze_media_faces(limit: int | None = None) -> dict:
 
     detector = cv2.FaceDetectorYN_create(str(_FACE_DETECTOR_MODEL), "", (320, 320))
     recognizer = cv2.FaceRecognizerSF_create(str(_FACE_RECOGNIZER_MODEL), "")
+    logger.info("6F face detection: fetched %d items to process", len(items))
 
-    detection_rows, embedding_rows = [], []
-    for item in items:
-        path = resolve_media_path(item["file_path"])
-        if path is None:
-            continue
-        img = _load_image_for_face(path)
-        if img is None:
-            continue
-        try:
-            faces_info, best_idx, embedding = _detect_and_embed(img, detector, recognizer)
-        except Exception:
-            logger.debug("Face detection failed for %s", path, exc_info=True)
-            continue
+    def _face_loop(items_: list[dict]) -> tuple[list[dict], list[dict], int]:
+        """CPU-bound: cv2 YuNet detection + SFace embedding per image. Runs
+        in a thread via asyncio.to_thread so the scheduler's heartbeat loop
+        keeps ticking. Progress-logs every 25 items - cv2 face detection is
+        the slowest of the media phases so we sample finely."""
+        det_rows: list[dict] = []
+        emb_rows: list[dict] = []
+        n_faces_detected = 0
+        n = len(items_)
+        for i, item in enumerate(items_):
+            if i > 0 and i % 25 == 0:
+                logger.info("6F face detection: progress %d/%d (%.0f%%) faces_so_far=%d",
+                            i, n, 100.0 * i / n, n_faces_detected)
+            path = resolve_media_path(item["file_path"])
+            if path is None:
+                continue
+            img = _load_image_for_face(path)
+            if img is None:
+                continue
+            try:
+                faces_info, best_idx, embedding = _detect_and_embed(img, detector, recognizer)
+            except Exception:
+                logger.debug("Face detection failed for %s", path, exc_info=True)
+                continue
 
-        detection_rows.append({
-            "media_item_id": item["id"], "parent_media_item_id": item.get("parent_media_item_id"),
-            "source": item["source"], "content_type": item["content_type"],
-            "analysis_type": "face_detection",
-            "result_json": {"face_count": len(faces_info), "faces": faces_info},
-            "model_version": "yunet-2023mar",
-        })
-        stats["faces_detected"] += len(faces_info)
-
-        if embedding is not None:
-            embedding_rows.append({
+            det_rows.append({
                 "media_item_id": item["id"], "parent_media_item_id": item.get("parent_media_item_id"),
                 "source": item["source"], "content_type": item["content_type"],
-                "analysis_type": "face_embedding",
-                "result_json": {
-                    "bbox": faces_info[best_idx]["bbox"], "face_index": best_idx,
-                    "face_count": len(faces_info),
-                },
-                "face_embedding": embedding,
-                "model_version": "sface-2021dec",
+                "analysis_type": "face_detection",
+                "result_json": {"face_count": len(faces_info), "faces": faces_info},
+                "model_version": "yunet-2023mar",
             })
-            stats["embeddings"] += 1
+            n_faces_detected += len(faces_info)
+
+            if embedding is not None:
+                emb_rows.append({
+                    "media_item_id": item["id"], "parent_media_item_id": item.get("parent_media_item_id"),
+                    "source": item["source"], "content_type": item["content_type"],
+                    "analysis_type": "face_embedding",
+                    "result_json": {
+                        "bbox": faces_info[best_idx]["bbox"], "face_index": best_idx,
+                        "face_count": len(faces_info),
+                    },
+                    "face_embedding": embedding,
+                    "model_version": "sface-2021dec",
+                })
+        return det_rows, emb_rows, n_faces_detected
+
+    detection_rows, embedding_rows, faces_detected_count = await asyncio.to_thread(_face_loop, items)
+    stats["faces_detected"] = faces_detected_count
+    stats["embeddings"] = len(embedding_rows)
 
     await upsert_media_analysis(detection_rows)
     await upsert_media_analysis(embedding_rows)
