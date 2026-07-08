@@ -42,7 +42,7 @@ _ALREADY_COLLECTED_SITES = {
 
 
 def _is_enabled() -> bool:
-    return os.getenv(_ENABLED, "0") == "1"
+    return os.getenv(_ENABLED, "1") == "1"
 
 
 def _sherlock_available() -> bool:

@@ -37,7 +37,7 @@ _USER_AGENT = "unifiedanalyzer/1.0 (breach-check; personal-osint)"
 
 
 def _is_enabled() -> bool:
-    return os.getenv(_ENABLED, "0") == "1"
+    return os.getenv(_ENABLED, "1") == "1"
 
 
 def _api_url(email: str) -> str:

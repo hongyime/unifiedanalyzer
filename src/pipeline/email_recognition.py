@@ -33,7 +33,7 @@ _HOLEHE_TIMEOUT = int(os.getenv("HOLEHE_TIMEOUT_S", "180"))
 
 
 def _is_enabled() -> bool:
-    return os.getenv(_ENABLED, "0") == "1"
+    return os.getenv(_ENABLED, "1") == "1"
 
 
 def _holehe_available() -> bool:
