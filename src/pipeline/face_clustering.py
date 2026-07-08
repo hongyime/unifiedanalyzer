@@ -29,6 +29,7 @@ SCALE NOTE: agglomerative clustering is O(n^2) memory. Bounded by
 FACE_CLUSTER_MAX (top-N by quality). For >~50k faces, swap to a FAISS-kNN graph
 + community detection (TODO).
 """
+import asyncio
 import json
 import logging
 import os
@@ -179,10 +180,19 @@ async def cluster_faces() -> dict:
     """Cluster facetracker.faces by embedding; write cluster_id back. Returns
     stats. P2-6: uses a FAISS mutual-kNN graph + connected components (O(n*k)
     memory), replacing the old average-linkage agglomerative O(n^2) matrix so it
-    scales past ~30-50k faces."""
+    scales past ~30-50k faces.
+
+    Instrumentation (2026-07-08): every heavy sync step logs its start + wall
+    time, and the CPU-bound blocks (JSON parse + numpy normalize + FAISS kNN)
+    run via asyncio.to_thread so the scheduler's heartbeat loop keeps firing.
+    This prevents the pattern where a deadlock in one FAISS thread wedged the
+    whole event loop and kept run_phase_status blank for hours."""
+    import time
+    t0 = time.monotonic()
     analyzer = get_analyzer_pool()
     async with analyzer.acquire() as conn:
         await _ensure_schema(conn)
+        logger.info("cluster_faces: loading embeddings from facetracker.faces (LIMIT %d)", _FACE_CLUSTER_MAX)
         rows = await conn.fetch("""
             SELECT id, embedding_vec::text AS emb
             FROM facetracker.faces
@@ -190,18 +200,30 @@ async def cluster_faces() -> dict:
             ORDER BY quality_score DESC NULLS LAST
             LIMIT $1
         """, _FACE_CLUSTER_MAX)
+    logger.info("cluster_faces: loaded %d rows in %.1fs", len(rows), time.monotonic() - t0)
 
     if len(rows) < 2:
         return {"faces": len(rows), "clusters": 0, "skipped": "too_few_faces"}
 
-    face_ids = [r["id"] for r in rows]
-    M = np.asarray([json.loads(r["emb"]) for r in rows], dtype=np.float32)
-    # Normalize so inner product = cosine similarity.
-    norms = np.linalg.norm(M, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    M /= norms
+    def _parse_and_normalize(rows_):
+        face_ids_ = [r["id"] for r in rows_]
+        M_ = np.asarray([json.loads(r["emb"]) for r in rows_], dtype=np.float32)
+        norms = np.linalg.norm(M_, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        M_ /= norms
+        return face_ids_, M_
 
-    labels = _knn_connected_components(M, _CLUSTER_THRESHOLD, _FACE_KNN)
+    t1 = time.monotonic()
+    face_ids, M = await asyncio.to_thread(_parse_and_normalize, rows)
+    logger.info("cluster_faces: parsed+normalized %d embeddings in %.1fs (shape=%s)",
+                len(face_ids), time.monotonic() - t1, M.shape)
+
+    t2 = time.monotonic()
+    labels = await asyncio.to_thread(
+        _knn_connected_components, M, _CLUSTER_THRESHOLD, _FACE_KNN
+    )
+    logger.info("cluster_faces: kNN+connected-components in %.1fs (unique_labels=%d)",
+                time.monotonic() - t2, len(set(int(x) for x in labels)))
 
     # Persist assignments + cluster sizes.
     sizes: dict[int, int] = {}
@@ -211,6 +233,7 @@ async def cluster_faces() -> dict:
         sizes[lab] = sizes.get(lab, 0) + 1
         assignments.append((lab, fid))
 
+    t3 = time.monotonic()
     async with analyzer.acquire() as conn:
         async with conn.transaction():
             # Reset only the faces we re-clustered this pass.
@@ -226,8 +249,11 @@ async def cluster_faces() -> dict:
                 "INSERT INTO facetracker.face_clusters (cluster_id, size) VALUES ($1, $2)",
                 list(sizes.items()),
             )
+    logger.info("cluster_faces: persisted %d assignments in %.1fs", len(assignments), time.monotonic() - t3)
 
     multi = sum(1 for s in sizes.values() if s > 1)
+    logger.info("cluster_faces: DONE total_wall=%.1fs faces=%d clusters=%d multi_face=%d",
+                time.monotonic() - t0, len(face_ids), len(sizes), multi)
     return {"faces": len(face_ids), "clusters": len(sizes), "multi_face_clusters": multi}
 
 
@@ -305,6 +331,9 @@ async def propagate_entity_faces() -> dict:
 
     Returns stats incl. how many drive-origin faces got cross-referenced.
     """
+    import time
+    _t = time.monotonic()
+    logger.info("propagate_entity_faces: starting")
     analyzer = get_analyzer_pool()
     stats = {"clusters_with_entity": 0, "propagated": 0, "drive_cross_ref": 0,
              "ambiguous_skipped": 0, "impurity_skipped": 0,
