@@ -458,6 +458,9 @@ export const api = {
       counts: { routes: number; points: number }
     }>(`/entities/${entityId}/geo`),
 
+  getEntitySocialCircle: (entityId: string) =>
+    get<{ associations: SocialCircleEntry[] }>(`/entities/${entityId}/social-circle`),
+
   getEntityAssociates: (entityId: string) =>
     get<{ associates: { username: string; full_name: string | null; shared: number; entity_id: string | null; entity_name: string | null; face: string | null }[] }>(
       `/entities/${entityId}/associates`,

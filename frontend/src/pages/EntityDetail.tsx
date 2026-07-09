@@ -11,6 +11,7 @@ import {
   IntelligenceReport,
   PlatformLink,
   Signal,
+  SocialCircleEntry,
 } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { TimelineLanes } from '../components/TimelineLanes'
