@@ -110,6 +110,7 @@ type TabKey =
   | 'map'
   | 'behavior'
   | 'relationships'
+  | 'social-circle'
   | 'intelligence'
   | 'settings'
 
@@ -180,6 +181,12 @@ export default function EntityDetailPage() {
   useEffect(() => {
     if (!id || tab !== 'map') return
     api.getEntityGeo(id).then(setGeo).catch(() => setGeo(null))
+  }, [id, tab])
+
+  const [socialCircle, setSocialCircle] = useState<SocialCircleEntry[] | null>(null)
+  useEffect(() => {
+    if (!id || tab !== 'social-circle') return
+    api.getEntitySocialCircle(id).then(d => setSocialCircle(d.associations)).catch(() => setSocialCircle([]))
   }, [id, tab])
 
   const [changelog, setChangelog] = useState<Awaited<ReturnType<typeof api.getChangelog>> | null>(null)
@@ -379,6 +386,7 @@ export default function EntityDetailPage() {
     { key: 'map', label: 'Map' },
     { key: 'behavior', label: 'Behavior' },
     { key: 'relationships', label: 'Relationships' },
+    { key: 'social-circle', label: 'Social Circle' },
     { key: 'intelligence', label: 'Intelligence' },
     { key: 'settings', label: 'Settings' },
   ]
@@ -541,6 +549,51 @@ export default function EntityDetailPage() {
                 columns={signalCols}
                 pageSize={25}
               />
+            )}
+          </Card>
+        </div>
+      )}
+
+      {/* ── Social Circle ──────────────────────────────────────────────── */}
+      {tab === 'social-circle' && (
+        <div className="space-y-4">
+          <Card title="Face Associations">
+            <div className="text-sm text-text-secondary mb-4">
+              Faces found in photos posted by this entity. These can establish social connections.
+            </div>
+            
+            {!socialCircle ? (
+              <LoadingSpinner label="Loading social circle…" />
+            ) : socialCircle.length === 0 ? (
+              <EmptyState title="No face associations" description="No faces were found in this entity's photos." />
+            ) : (
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {socialCircle.map((assoc, i) => (
+                  <div key={i} className="rounded-md border border-border p-3 flex flex-col gap-2">
+                    <FaceAvatar url={assoc.face_crop_url || null} name="Associate" size={60} />
+                    <div className="text-xs text-text-muted break-all">
+                      From Media: {assoc.media_item_id.slice(0,8)}...
+                    </div>
+                    {assoc.matched_entity_id ? (
+                      <div className="mt-2 text-sm border-t border-border pt-2">
+                        <div className="font-medium text-text-secondary text-xs uppercase tracking-wider mb-1">Matched Entity</div>
+                        <Link to={`/entities/${assoc.matched_entity_id}`} className="block truncate text-accent hover:underline">
+                          {assoc.matched_entity_name || assoc.matched_entity_id.slice(0, 8)}
+                        </Link>
+                        {assoc.matched_confidence && (
+                          <div className="text-xs text-text-muted mt-0.5">
+                            Confidence: {Math.round(assoc.matched_confidence * 100)}%
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-xs text-text-muted border-t border-border pt-2 italic">
+                        Unmatched face
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
           </Card>
         </div>

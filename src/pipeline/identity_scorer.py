@@ -98,7 +98,7 @@ _HIGH_CONFIDENCE = 0.70
 # for the rare burner-account case. Tune with env SCORER_SAME_PLATFORM_MULTIPLIER.
 import os as _os_scorer
 _SAME_PLATFORM_MULTIPLIER = float(_os_scorer.getenv("SCORER_SAME_PLATFORM_MULTIPLIER", "0.3"))
-
+_CROSS_PLATFORM_MULTIPLIER = float(_os_scorer.getenv("SCORER_CROSS_PLATFORM_MULTIPLIER", "1.5"))
 
 def _pair_key(a: str, b: str) -> tuple[str, str]:
     """Normalize pair ordering — lexicographically smaller UUID first."""
@@ -207,6 +207,8 @@ async def compute_identity_scores() -> dict:
         # NOT excluded - preserves the rare burner discovery path.
         if same_platform:
             score = score * _SAME_PLATFORM_MULTIPLIER
+        elif cross_platform:
+            score = min(score * _CROSS_PLATFORM_MULTIPLIER, 1.0)
 
         if score < _MIN_SCORE:
             continue

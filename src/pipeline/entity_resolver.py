@@ -336,6 +336,23 @@ async def resolve_entities() -> dict:
     profiles_by_username, no_username_profiles = await load_platform_profiles()
     commit_emails = await load_commit_emails()
     photo_hashes = await load_profile_photo_hashes()
+    
+    # 2026-07-09: Load NER persons_mentioned from analyzer DB to extend real_name_fuzzy.
+    ner_persons: dict[tuple[str, str], list[str]] = {}
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT epl.source, epl.platform_id, e.metadata->'enrichment'->'persons_mentioned' AS persons
+            FROM entity_platform_links epl
+            JOIN entities e ON epl.entity_id = e.id
+            WHERE e.metadata->'enrichment'->'persons_mentioned' IS NOT NULL
+        """)
+        for r in rows:
+            persons_json = r["persons"]
+            if persons_json:
+                persons = json.loads(persons_json)
+                if persons:
+                    ner_persons[(r["source"], r["platform_id"])] = [p["item"] for p in persons]
 
     all_profiles: list[PlatformProfile] = []
     for group in profiles_by_username.values():
@@ -448,22 +465,44 @@ async def resolve_entities() -> dict:
                         confidence=35.0,
                     ))
 
-        # Strava real name signal
-        strava_profiles = [p for p in candidate.profiles if p.source == "strava" and p.name]
-        for sp in strava_profiles:
-            for other in candidate.profiles:
-                if other.source != "strava" and other.name:
-                    score = fuzz.token_sort_ratio(sp.name, other.name)
-                    if score >= NAME_FUZZY_MIN_SCORE:
-                        candidate.signals.append(SignalMatch(
-                            signal_type="real_name_fuzzy",
-                            source_platform="strava",
-                            target_platform=other.source,
-                            source_record_id=sp.platform_id,
-                            target_record_id=other.platform_id,
-                            value=f"{sp.name} ~ {other.name} ({score}%)",
-                            confidence=15.0,
-                        ))
+        # Strava real name signal + NER extended (T2.3)
+        # Any profile with a name OR NER persons can fuzzy match another profile's name or NER persons.
+        # Previously only Strava names were checked against other names.
+        for i, p1 in enumerate(candidate.profiles):
+            names1 = []
+            if p1.name: names1.append(p1.name)
+            names1.extend(ner_persons.get((p1.source, p1.platform_id), []))
+            if not names1:
+                continue
+                
+            for p2 in candidate.profiles[i + 1:]:
+                if p1.source == p2.source:
+                    continue
+                names2 = []
+                if p2.name: names2.append(p2.name)
+                names2.extend(ner_persons.get((p2.source, p2.platform_id), []))
+                if not names2:
+                    continue
+                
+                best_score = 0
+                best_pair = None
+                for n1 in names1:
+                    for n2 in names2:
+                        score = fuzz.token_sort_ratio(n1, n2)
+                        if score > best_score:
+                            best_score = score
+                            best_pair = (n1, n2)
+                
+                if best_score >= NAME_FUZZY_MIN_SCORE:
+                    candidate.signals.append(SignalMatch(
+                        signal_type="real_name_fuzzy",
+                        source_platform=p1.source,
+                        target_platform=p2.source,
+                        source_record_id=p1.platform_id,
+                        target_record_id=p2.platform_id,
+                        value=f"{best_pair[0]} ~ {best_pair[1]} ({best_score}%)",
+                        confidence=15.0,
+                    ))
 
         # Profile photo SHA256 match
         profile_sources = {(p.source, p.platform_id) for p in candidate.profiles}
@@ -792,7 +831,11 @@ async def resolve_entities() -> dict:
         # possibly-different people. Skipped for handles shared by too many
         # entities (too common to be evidence).
         loose_norm_entities: dict[str, set] = {}
+        # Build entity_id → set[platform] so we can filter same-platform pairs.
+        entity_platforms: dict[str, set[str]] = {}
         for candidate, eid, *_ in resolved:
+            platforms = {p.source for p in candidate.profiles}
+            entity_platforms[str(eid)] = platforms
             for n in {normalize_username(p.username) for p in candidate.profiles}:
                 if n:
                     # str() — recovered ids are asyncpg UUIDs, new ones are strings.
@@ -804,6 +847,12 @@ async def resolve_entities() -> dict:
             eid_list = sorted(eid_set)
             for i, a in enumerate(eid_list):
                 for b in eid_list[i + 1:]:
+                    # 2026-07-09: skip same-platform pairs — entities that only
+                    # exist on the same platform(s) with different user_ids are
+                    # definitively different people. username_similar should only
+                    # fire cross-platform to be meaningful evidence.
+                    if entity_platforms.get(a) == entity_platforms.get(b):
+                        continue
                     sim_rows.append((a, "username_similar", "multi", n, "multi", b, n, 0.7))
         if sim_rows:
             await conn.executemany("""

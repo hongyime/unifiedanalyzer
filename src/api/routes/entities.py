@@ -138,7 +138,7 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
             JOIN entities ea ON r.entity_a_id = ea.id
             JOIN entities eb ON r.entity_b_id = eb.id
             WHERE r.relationship_type = 'same_person_probability'
-            ORDER BY r.cross_platform DESC, r.weight DESC
+            ORDER BY r.cross_platform DESC, jsonb_array_length(r.sources->'contributing_signals') DESC, r.weight DESC
             LIMIT $1
         """, limit)
         ids: list[str] = []

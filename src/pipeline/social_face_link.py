@@ -167,8 +167,34 @@ async def emit_social_face_link_signals() -> dict:
                      source_record_id, target_platform, target_record_id, value, confidence, metadata)
                 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             """, new_signals)
+            
+        # Mutual social face logic (T1.3)
+        mutual_pairs = set()
+        for (owner, target_b), (cos, _, _) in items:
+            if (target_b, owner) in pair_best:
+                # To avoid duplicate (A->B and B->A), just sort them
+                a, b = (owner, target_b) if owner < target_b else (target_b, owner)
+                if (a, b) not in mutual_pairs:
+                    mutual_pairs.add((a, b))
+        
+        await conn.execute(
+            "DELETE FROM entity_relationships WHERE relationship_type = 'mutual_social_face'"
+        )
+        if mutual_pairs:
+            rel_rows = []
+            for a, b in mutual_pairs:
+                rel_rows.append((
+                    a, b, "mutual_social_face", 90, True, 
+                    json.dumps({"method": "social_face_link_bilateral_check"})
+                ))
+            await conn.executemany("""
+                INSERT INTO entity_relationships
+                    (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
+                VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb)
+            """, rel_rows)
 
     stats["signals_emitted"] = len(new_signals)
+    stats["mutual_social_faces"] = len(mutual_pairs)
     stats["max_cosine"] = round(max_seen, 4)
     logger.info("social_face_link signals: %s", stats)
     return stats

@@ -35,6 +35,16 @@ export interface Entity {
   face_crop_url?: string | null
 }
 
+export interface SocialCircleEntry {
+  associated_face_id: number
+  face_crop_url: string | null
+  media_item_id: string
+  matched_entity_id: string | null
+  matched_entity_name: string | null
+  matched_confidence: number | null
+  first_seen_at: string
+}
+
 export interface ReviewCandidate {
   entity_a: string
   name_a: string | null
