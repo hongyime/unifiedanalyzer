@@ -358,7 +358,20 @@ async def resolve_entities() -> dict:
                 persons = persons_json if isinstance(persons_json, (list, dict)) \
                     else json.loads(persons_json)
                 if persons:
-                    ner_persons[(r["source"], r["platform_id"])] = [p["item"] for p in persons]
+                    # persons_mentioned entries are {"text": <name>, "count": N}
+                    # (spaCy NER output from entity_enrichment). Earlier code read
+                    # a non-existent "item" key -> KeyError crashed full_resolution.
+                    # Tolerate dicts (text/item/name keys) and bare strings.
+                    names = []
+                    for p in persons:
+                        if isinstance(p, dict):
+                            v = p.get("text") or p.get("item") or p.get("name")
+                        else:
+                            v = p
+                        if v:
+                            names.append(v)
+                    if names:
+                        ner_persons[(r["source"], r["platform_id"])] = names
 
     all_profiles: list[PlatformProfile] = []
     for group in profiles_by_username.values():
