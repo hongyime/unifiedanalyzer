@@ -436,8 +436,15 @@ async def run_full_resolution() -> dict:
         stats["entities"] = resolver_stats.get("entities", 0)
         stats["signals"] = resolver_stats.get("signals", 0)
 
-        # Rebuild timeline with no since filter
-        timeline_stats = await build_timeline(since=None)
+        # Full re-attribution rescan, but skip github: its ~7.3M commits are a
+        # hard attribution ceiling (~6 tracked github entities) and dominate the
+        # rescan cost. New github events still arrive via the 2-hourly
+        # incremental (build_timeline(since=last_run)). Override with
+        # FULL_REBUILD_SKIP_SOURCES="" to force a github rescan. (2026-07-10)
+        import os as _os_ir
+        _skip = _os_ir.getenv("FULL_REBUILD_SKIP_SOURCES", "github")
+        skip_sources = {s.strip() for s in _skip.split(",") if s.strip()}
+        timeline_stats = await build_timeline(since=None, skip_sources=skip_sources)
         stats["events"] = timeline_stats.get("inserted", 0)
 
         alert_stats = await run_alerts()

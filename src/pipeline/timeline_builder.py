@@ -219,9 +219,26 @@ async def ensure_timeline_partitions(months_ahead: int = 6) -> None:
                 logger.debug("Could not create partition %s (non-fatal)", name, exc_info=True)
 
 
-async def build_timeline(since: datetime | None = None) -> dict:
+async def build_timeline(
+    since: datetime | None = None,
+    skip_sources: set[str] | None = None,
+) -> dict:
+    """Build/refresh timeline_events from the collector.
+
+    since: only pull collector rows newer than this (incremental). None = full
+        rescan, used by full_resolution to RE-ATTRIBUTE events whose entity was
+        resolved after the event was first built.
+    skip_sources: platform sources to skip entirely this pass. The full-rescan
+        re-attribution is O(all collector rows), dominated by github's ~7.3M
+        commits — but github attribution is a hard ceiling (~6 tracked github
+        entities) so reprocessing it every 12h yields nothing while pinning a
+        CPU on a cursor loop for tens of minutes. The full run passes
+        {"github"} here; NEW github events are still picked up by the ordinary
+        2-hourly incremental (since=last_run, no skip). (2026-07-10 perf fix)
+    """
     collector = get_collector_pool()
     analyzer = get_analyzer_pool()
+    skip_sources = skip_sources or set()
     # Keep upcoming monthly partitions provisioned before inserting.
     try:
         await ensure_timeline_partitions()
@@ -232,6 +249,9 @@ async def build_timeline(since: datetime | None = None) -> dict:
     stats = {"total": 0, "inserted": 0, "skipped_tables": []}
 
     for pq in PLATFORM_QUERIES:
+        if pq["source"] in skip_sources:
+            stats["skipped_tables"].append(f"{pq['source']}/{pq['event_type']} (skip_sources)")
+            continue
         where_clause = ""
         params: list = []
         if since:
