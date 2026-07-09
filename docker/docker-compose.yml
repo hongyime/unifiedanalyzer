@@ -1,3 +1,5 @@
+name: unifiedanalyzer
+
 # Cap container log growth. Docker's json-file logs live INSIDE the C:-backed
 # WSL2 vhdx, so uncapped logs are one of the few ways these long-running services
 # can quietly grow the disk. 3 x 10MB = 30MB max per service (oldest rotated out).
@@ -9,6 +11,7 @@ x-logging: &default-logging
 
 services:
   analyzer:
+    container_name: unifiedanalyzer_analyzer
     # Dashboard image bundles the built frontend + API + scheduler.
     # Auto-starts with Docker Desktop via restart: unless-stopped.
     image: unifiedanalyzer:latest
@@ -57,6 +60,7 @@ services:
   # dashboard with it — for the whole run. Reuses the same image; owns the
   # Telegram run-summary + heartbeat notifications.
   scheduler:
+    container_name: unifiedanalyzer_scheduler
     image: unifiedanalyzer:latest
     depends_on:
       - analyzer
@@ -100,6 +104,7 @@ services:
   # restored (task B1). Reads/writes the same Z: derived + model dirs and the
   # shared analyzer DB.
   face_worker:
+    container_name: unifiedanalyzer_face_worker
     image: unifiedanalyzer:latest
     depends_on:
       - analyzer

@@ -13,10 +13,10 @@
 #                      Rotated by the shell (kept small).
 #
 # Launch from host via:
-#   docker exec -d docker-scheduler-1 /app/embed-backfill-loop.sh
+#   docker exec -d unifiedanalyzer_scheduler /app/embed-backfill-loop.sh
 #
 # Stop via:
-#   docker exec docker-scheduler-1 touch /tmp/embed-backfill.stop
+#   docker exec unifiedanalyzer_scheduler touch /tmp/embed-backfill.stop
 set -eu
 
 LOG=${EMBED_BACKFILL_LOG:-/tmp/embed-backfill.log}
