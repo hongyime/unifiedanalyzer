@@ -492,6 +492,52 @@ All new env vars documented under `IDENTITY CALIBRATION`, `AXIS-3 FACE LOOP
 CLOSURE`, and `AXIS-1 SEMANTIC TIMELINE SEARCH` sections. See `.env.example`
 for the authoritative list.
 
+## 14. Attribution + starvation fixes (2026-07-09/10)
+
+End-to-end review found the recurring "signals emit zero" symptom was mostly
+**upstream starvation**, not scorer/emitter bugs. Four root causes fixed
+(commits `d6f9453`, `cb6af41`):
+
+1. **Event→entity attribution matched the wrong columns** (`timeline_builder`).
+   WhatsApp matched on `u.name` (display name), YouTube on `ch.title`, Telegram
+   on username — but `entity_platform_links` is keyed on JID / `platform_channel_id`
+   / `platform_user_id`. **0% of 50.7k WhatsApp + 22.4k YouTube events were
+   attributed** despite 637 + 491 entities. Now matches the id columns
+   (`phone_number||'@s.whatsapp.net'`, `platform_channel_id`, `platform_user_id`)
+   with handle/username fallback via a new `entity_ref2` column + loop.
+   **Result: WhatsApp 0→19.8%, YouTube 0→77.5%; total attributed events
+   18,378 → 45,806 (2.5×); entities with timeline activity → 864;
+   behavioral_profiles 957 → 1,216.** Telegram stays ~1.3% (only 110 of 3,374
+   users are tracked entities — genuine data ceiling, not a bug).
+   The upsert now guards `entity_id IS DISTINCT FROM EXCLUDED.entity_id` so a
+   full rebuild only rewrites *changed* rows — no dead-tuple churn on the
+   C:-backed Postgres volume ([[storage-derived-on-z]] disk-safety).
+
+2. **`full_resolution` crashed every run** (`entity_resolver`). The spaCy-NER
+   `persons_mentioned` path had two never-executed bugs: missing `import json`
+   (NameError) and reading a `"item"` key that doesn't exist (entries are
+   `{"text","count"}`). Both fixed + made tolerant of already-decoded JSONB.
+
+3. **Embedder starved `topical_similarity`** (`timeline_embedder`). No entity
+   filter + no ORDER BY → Postgres drained the oldest 2005-era partitions first,
+   piling 339k of 348k embeddings onto ~15 github-heavy NULL-entity accounts.
+   Now embeds only `entity_id IS NOT NULL`, most-recent-first — coverage
+   broadens across all active entities as the 5k/run budget is spent on the
+   newly-attributed WhatsApp/YouTube backlog.
+
+4. **Face indexer starved `entity_faces`** (`face_worker`). Selected media
+   `collected_at DESC` with no owner priority, so untracked github/search/website
+   avatars crowded out tracked media (bridge = 29 / 13.7k faces). Added
+   `tracked_only` ingest mode + a tracked-first pass in `loop()` + an
+   `ingest-tracked` CLI. **Capped by reality:** only 41 tracked-entity images
+   physically exist on Z: after the media refill, so face signals grow as the
+   collector brings media in ([[analyzer-docker-stack]]).
+
+Confirmed **not** bugs (data-gated, correct behavior): `media_gps_colocation`
+(only 129 of 49k EXIF rows carry GPS, mostly untracked), and the scorer itself
+(115 pairs, none > 0.31, all lone `username_similar` — the bottleneck was signal
+sparsity, which #1–#4 address at the source).
+
 ---
 
 ### Key files
