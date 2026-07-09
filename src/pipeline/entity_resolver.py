@@ -1,4 +1,5 @@
 import re
+import json
 import uuid as uuid_module
 import logging
 from dataclasses import dataclass, field
@@ -350,7 +351,12 @@ async def resolve_entities() -> dict:
         for r in rows:
             persons_json = r["persons"]
             if persons_json:
-                persons = json.loads(persons_json)
+                # asyncpg may return JSONB already-decoded (list/dict) or as a
+                # raw string depending on codec config — handle both. (Missing
+                # `import json` here previously crashed every full_resolution run
+                # with NameError once an entity had persons_mentioned metadata.)
+                persons = persons_json if isinstance(persons_json, (list, dict)) \
+                    else json.loads(persons_json)
                 if persons:
                     ner_persons[(r["source"], r["platform_id"])] = [p["item"] for p in persons]
 

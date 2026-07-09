@@ -64,15 +64,26 @@ async def embed_new_timeline_events(batch_size: int = 500, max_events: int | Non
     while remaining > 0:
         this_batch = min(batch_size, remaining)
         async with pool.acquire() as conn:
+            # Only embed ENTITY-ATTRIBUTED events, most-recent first. The sole
+            # consumer (topical_similarity) groups embeddings by entity_id and
+            # uses each entity's most recent K events, so NULL-entity rows are
+            # dead weight. Previously this had no entity filter and no ORDER BY:
+            # Postgres drained the oldest month partitions first, so 339k of
+            # 348k embeddings piled onto ~15 prolific github accounts (most with
+            # NULL entity_id) while the recent activity of 1,000+ entities was
+            # never reached. Recent-first + the attribution fix spreads coverage
+            # across all active entities. (2026-07-10 embedder coverage fix)
             rows = await conn.fetch(
                 """
                 SELECT te.id::text AS id, te.entity_id::text AS entity_id,
                        te.source, te.occurred_at, te.title
                 FROM timeline_events te
                 WHERE te.title IS NOT NULL AND te.title <> ''
+                  AND te.entity_id IS NOT NULL
                   AND NOT EXISTS (
                     SELECT 1 FROM timeline_embeddings e WHERE e.event_id = te.id
                   )
+                ORDER BY te.occurred_at DESC
                 LIMIT $1
                 """,
                 this_batch,

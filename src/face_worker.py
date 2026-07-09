@@ -144,7 +144,7 @@ def _build_entity_lookup(analyzer_conn) -> dict:
     return lookup
 
 
-def ingest_collector_media(limit: int = 50) -> dict:
+def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
     """Stage 2: index faces from collector image media into facetracker.faces,
     linking to analyzer entities via public.entity_faces.
 
@@ -153,6 +153,18 @@ def ingest_collector_media(limit: int = 50) -> dict:
     facetracker schema (deduped by file_path), and bridges to entities by the
     media item's (source, entity_id) attribution. Bounded by `limit` for
     resumable batching. Reuses src/pipeline media-path resolution.
+
+    tracked_only (2026-07-09 face->identity fix): when True, restrict the
+    candidate set to media whose (source, entity_id) resolves to a KNOWN analyzer
+    entity BEFORE spending detector time. Rationale: the collector's media volume
+    is dominated by untracked owners (github contributor avatars, search-result
+    thumbnails, scraped website images) that will never bridge to an entity, so a
+    plain `collected_at DESC` scan starves the handful of tracked-entity images
+    (e.g. only 15 of ~1,650 owner-matched lemon8 images were indexed). Those
+    untracked faces still have drive-social-graph value, but only tracked-owner
+    faces can populate public.entity_faces and thus feed face_pair_knn /
+    social_face_link / media_face_match. The `loop` runs a tracked_only pass FIRST
+    each tick so entity_faces coverage is never starved by avatar volume.
     """
     import cv2
     from sqlalchemy import create_engine, text
@@ -196,6 +208,17 @@ def ingest_collector_media(limit: int = 50) -> dict:
             ),
             {"cts": list(_FACE_CONTENT_TYPES)},
         ).fetchall()
+
+    # tracked_only: drop candidates whose owner doesn't resolve to an analyzer
+    # entity, so the (expensive) detector time is spent only on media that can
+    # actually populate public.entity_faces. entity_lookup was built above from
+    # entity_platform_links (keyed by both platform_id and lowercased username).
+    if tracked_only:
+        rows = [
+            r for r in rows
+            if entity_lookup.get((r.source, r.entity_id))
+            or (entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None)
+        ]
 
     detector = None
     Session = sessionmaker(bind=analyzer_engine)
@@ -692,6 +715,17 @@ def loop(batch: int, interval: int) -> None:
     )
     tick = 0
     while True:
+        # Tracked-entity media FIRST (2026-07-09 face->identity fix): index media
+        # owned by known entities before general media, so entity_faces coverage
+        # is never starved by high-volume untracked avatars. Cheap when caught up
+        # (dedupes by file_path). Uses the same batch budget.
+        try:
+            tstats = ingest_collector_media(batch, tracked_only=True)
+            if tstats.get("images_indexed"):
+                logger.info("tracked-entity ingest tick: %s", tstats)
+        except Exception:
+            logger.exception("tracked ingest tick failed (will retry next interval)")
+
         try:
             stats = ingest_collector_media(batch)
             if stats.get("images_indexed"):
@@ -730,6 +764,14 @@ def main() -> None:
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else 50
         logger.info("Stage 2 ingest (limit=%d)…", limit)
         logger.info("ingest stats: %s", ingest_collector_media(limit))
+    elif cmd == "ingest-tracked":
+        # One-shot: index ONLY media owned by known analyzer entities. Used to
+        # backfill entity_faces coverage that a plain collected_at-DESC scan
+        # starved (see ingest_collector_media tracked_only doc). Big default
+        # limit so a single run drains the tracked backlog.
+        limit = int(sys.argv[2]) if len(sys.argv) > 2 else 5000
+        logger.info("Tracked-entity ingest (limit=%d)…", limit)
+        logger.info("tracked ingest stats: %s", ingest_collector_media(limit, tracked_only=True))
     elif cmd == "scan":
         # One-shot drive scan over DRIVE_SOURCES (W/X/Y/Z mounts). Used for
         # testing/manual backfill; the `loop` command runs it on a cadence.

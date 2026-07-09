@@ -61,9 +61,14 @@ PLATFORM_QUERIES = [
     {
         "source": "telegram",
         "event_type": "MESSAGE_SENT",
+        # entity_ref = platform_user_id (matches entity_platform_links.platform_id,
+        # the stable numeric Telegram id) with username as fallback. Previously
+        # this matched on username ALONE, which is NULL for most senders — only
+        # ~1.2% of 1.28M telegram events were attributed. (2026-07-10 attribution fix)
         "query": """
             SELECT m.platform_message_id AS record_id, m.platform_created_at AS occurred_at,
-                   LEFT(m.text, 200) AS title, u.username AS entity_ref
+                   LEFT(m.text, 200) AS title,
+                   u.platform_user_id AS entity_ref, u.username AS entity_ref2
             FROM telegram_messages m
             LEFT JOIN telegram_users u ON m.sender_id = u.id
             WHERE m.platform_created_at IS NOT NULL {where_clause}
@@ -74,9 +79,16 @@ PLATFORM_QUERIES = [
     {
         "source": "whatsapp",
         "event_type": "MESSAGE_SENT",
+        # entity_ref = reconstructed JID (phone_number || '@s.whatsapp.net'), which
+        # is what entity_platform_links.platform_id stores for WhatsApp; bare
+        # phone_number is the fallback. Previously matched on u.name (display name),
+        # which never matches a JID key — 0% of 50.7k whatsapp events were
+        # attributed despite 637 whatsapp entities. (2026-07-10 attribution fix)
         "query": """
             SELECT m.platform_message_id AS record_id, m.timestamp AS occurred_at,
-                   LEFT(m.text, 200) AS title, u.name AS entity_ref
+                   LEFT(m.text, 200) AS title,
+                   (u.phone_number || '@s.whatsapp.net') AS entity_ref,
+                   u.phone_number AS entity_ref2
             FROM whatsapp_messages m
             LEFT JOIN whatsapp_users u ON m.sender_id = u.id
             WHERE m.timestamp IS NOT NULL {where_clause}
@@ -100,9 +112,14 @@ PLATFORM_QUERIES = [
     {
         "source": "youtube",
         "event_type": "VIDEO_PUBLISHED",
+        # entity_ref = platform_channel_id (the UC... id in
+        # entity_platform_links.platform_id) with custom_url (@handle) fallback.
+        # Previously matched on ch.title (display name) — 0% of 22.4k youtube
+        # events were attributed despite 491 youtube entities. (2026-07-10 fix)
         "query": """
             SELECT v.platform_video_id AS record_id, v.platform_published_at AS occurred_at,
-                   v.title AS title, ch.title AS entity_ref
+                   v.title AS title,
+                   ch.platform_channel_id AS entity_ref, ch.custom_url AS entity_ref2
             FROM youtube_videos v
             LEFT JOIN youtube_channels ch ON v.channel_id = ch.id
             WHERE v.platform_published_at IS NOT NULL {where_clause}
@@ -234,12 +251,20 @@ async def build_timeline(since: datetime | None = None) -> dict:
                     row_count = 0
 
                     async for row in cursor:
-                        entity_ref = row.get("entity_ref")
+                        # Try the primary entity_ref then an optional fallback
+                        # (entity_ref2) — some sources match on an id column but
+                        # keep a handle/username as a secondary key (see the
+                        # per-source query comments). First ref that resolves wins.
                         entity_id = None
-                        if entity_ref:
-                            entity_id = entity_lookup.get((pq["source"], entity_ref.lower()))
-                            if not entity_id:
-                                entity_id = entity_lookup.get((pq["source"], entity_ref))
+                        for _ref_col in ("entity_ref", "entity_ref2"):
+                            entity_ref = row.get(_ref_col)
+                            if not entity_ref:
+                                continue
+                            entity_ref = str(entity_ref)
+                            entity_id = entity_lookup.get((pq["source"], entity_ref.lower())) \
+                                or entity_lookup.get((pq["source"], entity_ref))
+                            if entity_id:
+                                break
 
                         occurred_at = row["occurred_at"]
                         if occurred_at and not occurred_at.tzinfo:
@@ -294,4 +319,10 @@ async def _insert_batch(pool, batch: list[tuple]) -> None:
             -- 3-col semantics. Backed by idx_timeline_uniq4.
             ON CONFLICT (source, event_type, source_record_id, occurred_at)
             DO UPDATE SET entity_id = EXCLUDED.entity_id
+            -- Only write when the attribution actually changes. Without this
+            -- guard every conflicting row is rewritten on each full rebuild,
+            -- churning millions of dead tuples and growing the C:-backed
+            -- Postgres volume for no reason. IS DISTINCT FROM handles NULLs on
+            -- both sides. (2026-07-10 disk-safety + re-attribution fix)
+            WHERE timeline_events.entity_id IS DISTINCT FROM EXCLUDED.entity_id
         """, batch)
