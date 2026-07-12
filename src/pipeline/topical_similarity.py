@@ -42,7 +42,12 @@ async def emit_topical_similarity_signals() -> dict:
     import numpy as np
     from src.db.connection import get_analyzer_pool
 
-    threshold = float(os.getenv("TOPICAL_SIMILARITY_THRESHOLD", "0.85") or 0.85)
+    # 0.95 default (raised from 0.85 on 2026-07-12): multilingual-e5-small
+    # centroids of entity timelines cluster tightly (generic social-media text),
+    # so 0.85 fired on ~62% of all pairs — flooding the scorer/review queue with
+    # ~46k weak topical signals. 0.95 keeps only the most topically-aligned ~7%
+    # (~5k), where this weak (0.15) corroborating signal is actually meaningful.
+    threshold = float(os.getenv("TOPICAL_SIMILARITY_THRESHOLD", "0.95") or 0.95)
     max_events = int(os.getenv("TOPICAL_MAX_EVENTS_PER_ENTITY", "200") or 200)
 
     stats = {
@@ -61,13 +66,18 @@ async def emit_topical_similarity_signals() -> dict:
         rows = await conn.fetch(
             """
             WITH ranked AS (
-                SELECT entity_id::text AS entity_id,
-                       embedding::text AS emb,
+                SELECT te.entity_id::text AS entity_id,
+                       te.embedding::text AS emb,
                        row_number() OVER (
-                           PARTITION BY entity_id ORDER BY occurred_at DESC
+                           PARTITION BY te.entity_id ORDER BY te.occurred_at DESC
                        ) AS rn
-                FROM timeline_embeddings
-                WHERE entity_id IS NOT NULL
+                FROM timeline_embeddings te
+                -- Only entities that STILL exist. timeline_embeddings.entity_id is
+                -- copied at embed time and can go stale after an entity merge/delete;
+                -- emitting a topical_similarity signal for a vanished entity violates
+                -- identity_signals_entity_id_fkey and aborts the whole phase.
+                JOIN entities e ON e.id = te.entity_id
+                WHERE te.entity_id IS NOT NULL
             )
             SELECT entity_id, emb FROM ranked WHERE rn <= $1
             """,

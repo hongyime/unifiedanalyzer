@@ -356,7 +356,14 @@ async def run_incremental() -> dict:
         alert_stats = await run_alerts()
         stats["alerts"] = sum(alert_stats.values())
 
-        await compute_behavioral_profiles()
+        # Non-fatal: behavioral profiling scans entities x timeline_events and can
+        # time out under heavy concurrent collector write load. It must not abort
+        # the run before _run_secondary_phases (content/temporal/embeddings/
+        # topical/faces/identity_scoring) — those are the payload. (2026-07-12)
+        try:
+            await compute_behavioral_profiles()
+        except Exception:
+            logger.warning("compute_behavioral_profiles failed (non-fatal, secondary phases continue)", exc_info=True)
 
         # P2-3: all non-fatal secondary phases (media analysis, graphs, face
         # clustering, identity scoring, geocode) — each timed + status-recorded.
@@ -450,7 +457,14 @@ async def run_full_resolution() -> dict:
         alert_stats = await run_alerts()
         stats["alerts"] = sum(alert_stats.values())
 
-        await compute_behavioral_profiles()
+        # Non-fatal: behavioral profiling scans entities x timeline_events and can
+        # time out under heavy concurrent collector write load. It must not abort
+        # the run before _run_secondary_phases (content/temporal/embeddings/
+        # topical/faces/identity_scoring) — those are the payload. (2026-07-12)
+        try:
+            await compute_behavioral_profiles()
+        except Exception:
+            logger.warning("compute_behavioral_profiles failed (non-fatal, secondary phases continue)", exc_info=True)
 
         # P2-3: all non-fatal secondary phases (shared with run_incremental),
         # each timed + status-recorded so a persistently failing step is visible.
