@@ -44,6 +44,9 @@ services:
       # collector Postgres. The API serves many concurrent requests -> 10.
       DB_MAX_POOL_SIZE: "${ANALYZER_DB_POOL_SIZE:-10}"
     volumes:
+      # Live-mount src so code edits apply on recreate (no image rebuild — the
+      # shared Docker vhdx must not grow). Mirrors the collector's pattern.
+      - "../src:/app/src"
       # Collector media (read-only) for thumbnails of real media items.
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       # Derived artifacts (PDF images / video frames / ONNX models) on Z:.
@@ -87,6 +90,8 @@ services:
       NUMEXPR_NUM_THREADS: "${SCHEDULER_THREADS:-2}"
       VECLIB_MAXIMUM_THREADS: "${SCHEDULER_THREADS:-2}"
     volumes:
+      # Live-mount src (no image rebuild — shared Docker vhdx must not grow).
+      - "../src:/app/src"
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
     networks:

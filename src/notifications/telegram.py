@@ -17,13 +17,18 @@ _CHAT_ID: str | None = None
 _THREAD_ID: int | None = None
 _TAILSCALE_IP: str | None = None
 _API_PORT: str = "8002"
+# The collector-health alert links to the UnifiedCollector dashboard (a separate
+# service on :8700, which has the rich /collectors view), NOT the analyzer's own
+# :8002 dashboard. Configurable via COLLECTOR_DASHBOARD_PORT.
+_COLLECTOR_PORT: str = "8700"
 
 
 def _get_config():
-    global _BOT_TOKEN, _CHAT_ID, _THREAD_ID, _TAILSCALE_IP, _API_PORT
+    global _BOT_TOKEN, _CHAT_ID, _THREAD_ID, _TAILSCALE_IP, _API_PORT, _COLLECTOR_PORT
     _BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     _CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
     _API_PORT = os.getenv("API_PORT", "8002")
+    _COLLECTOR_PORT = os.getenv("COLLECTOR_DASHBOARD_PORT", "8700")
     thread = os.getenv("TELEGRAM_THREAD_ID")
     _THREAD_ID = int(thread) if thread else None
     if not _BOT_TOKEN or not _CHAT_ID:
@@ -51,6 +56,14 @@ def _detect_tailscale_ip() -> str | None:
 def get_dashboard_url() -> str:
     host = _TAILSCALE_IP or "127.0.0.1"
     return f"http://{host}:{_API_PORT}"
+
+
+def get_collector_dashboard_url() -> str:
+    """UnifiedCollector dashboard (:8700 by default) — used for collector-health
+    alerts so the link opens the live collector /collectors view, not the
+    analyzer's own :8002 dashboard."""
+    host = _TAILSCALE_IP or "127.0.0.1"
+    return f"http://{host}:{_COLLECTOR_PORT}"
 
 
 def _send_sync(text: str, parse_mode: str = "HTML") -> bool:

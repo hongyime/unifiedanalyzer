@@ -73,7 +73,7 @@ async def notify_run_summary(run_type: str, stats: dict):
 async def notify_collector_health(issues: list[dict]):
     if not issues:
         return
-    url = telegram.get_dashboard_url()
+    url = telegram.get_collector_dashboard_url()
     lines = ["\U0001f6a8 <b>Collector health warning</b>\n"]
     for issue in issues:
         lines.append(f"• <b>{issue['source']}</b>: {issue['message']}")
