@@ -33,7 +33,11 @@ def _get_config():
     _THREAD_ID = int(thread) if thread else None
     if not _BOT_TOKEN or not _CHAT_ID:
         return False
-    _TAILSCALE_IP = _detect_tailscale_ip()
+    # Prefer an explicit TAILSCALE_IP env over CLI detection: the `tailscale`
+    # binary isn't present inside the container, so _detect_tailscale_ip()
+    # returns None there and alert URLs would fall back to 127.0.0.1 (useless
+    # when the alert is opened from a phone / another machine).
+    _TAILSCALE_IP = os.getenv("TAILSCALE_IP") or _detect_tailscale_ip()
     return True
 
 
