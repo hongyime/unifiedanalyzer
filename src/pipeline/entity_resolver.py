@@ -335,8 +335,21 @@ async def resolve_entities() -> dict:
     """Main identity resolution pipeline. Returns run stats."""
     targets = await load_collection_targets()
     profiles_by_username, no_username_profiles = await load_platform_profiles()
-    commit_emails = await load_commit_emails()
-    photo_hashes = await load_profile_photo_hashes()
+    # commit_email / profile_photo signals are OPTIONAL enrichers. Their queries
+    # scan large collector tables (github_commits is ~7.3M rows) and can time out
+    # under heavy concurrent load — but that must NOT abort the whole resolution
+    # run (which was crashing full_resolution with a TimeoutError). Degrade
+    # gracefully to an empty map; the next quieter run picks them back up.
+    try:
+        commit_emails = await load_commit_emails()
+    except Exception:
+        logger.warning("load_commit_emails failed (non-fatal, skipping commit_email signal)", exc_info=True)
+        commit_emails = {}
+    try:
+        photo_hashes = await load_profile_photo_hashes()
+    except Exception:
+        logger.warning("load_profile_photo_hashes failed (non-fatal, skipping profile_photo signal)", exc_info=True)
+        photo_hashes = {}
     
     # 2026-07-09: Load NER persons_mentioned from analyzer DB to extend real_name_fuzzy.
     ner_persons: dict[tuple[str, str], list[str]] = {}
