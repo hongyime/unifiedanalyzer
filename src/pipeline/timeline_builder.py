@@ -147,6 +147,35 @@ PLATFORM_QUERIES = [
         "time_col": "COALESCE(p.platform_created_at, p.collected_at)",
     },
     {
+        "source": "threads",
+        "event_type": "CONTENT_PUBLISHED",
+        # entity_ref = author_username; entity_platform_links.platform_id for
+        # threads/x is the handle (threads=IG handle). SYNC #34 — entity links
+        # for these were added by SYNC #30; this attributes their posts.
+        "query": """
+            SELECT p.platform_post_id AS record_id,
+                   COALESCE(p.platform_created_at, p.collected_at) AS occurred_at,
+                   LEFT(p.caption, 200) AS title, p.author_username AS entity_ref
+            FROM threads_posts p
+            WHERE COALESCE(p.platform_created_at, p.collected_at) IS NOT NULL {where_clause}
+            ORDER BY COALESCE(p.platform_created_at, p.collected_at) DESC
+        """,
+        "time_col": "COALESCE(p.platform_created_at, p.collected_at)",
+    },
+    {
+        "source": "x",
+        "event_type": "CONTENT_PUBLISHED",
+        "query": """
+            SELECT p.platform_post_id AS record_id,
+                   COALESCE(p.platform_created_at, p.collected_at) AS occurred_at,
+                   LEFT(p.caption, 200) AS title, p.author_username AS entity_ref
+            FROM x_posts p
+            WHERE COALESCE(p.platform_created_at, p.collected_at) IS NOT NULL {where_clause}
+            ORDER BY COALESCE(p.platform_created_at, p.collected_at) DESC
+        """,
+        "time_col": "COALESCE(p.platform_created_at, p.collected_at)",
+    },
+    {
         "source": "github",
         "event_type": "ISSUE_OPENED",
         "query": """
