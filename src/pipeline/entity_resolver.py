@@ -229,6 +229,27 @@ async def load_platform_profiles() -> tuple[dict[str, list[PlatformProfile]], li
                 name=row["nickname"],
             ))
 
+        # threads: a threads handle IS the same Meta account's instagram handle,
+        # so keying threads authors by username lets them cluster with instagram
+        # (guaranteed same-person). No numeric id -> platform_id = username.
+        # (SYNC #30/#34)
+        for row in await conn.fetch(
+            "SELECT DISTINCT author_username FROM threads_posts "
+            "WHERE author_username IS NOT NULL AND author_username <> ''"
+        ):
+            profiles.append(PlatformProfile(
+                source="threads", platform_id=row["author_username"],
+                username=row["author_username"], name=None,
+            ))
+        for row in await conn.fetch(
+            "SELECT DISTINCT author_username FROM x_posts "
+            "WHERE author_username IS NOT NULL AND author_username <> ''"
+        ):
+            profiles.append(PlatformProfile(
+                source="x", platform_id=row["author_username"],
+                username=row["author_username"], name=None,
+            ))
+
         for row in await conn.fetch(
             "SELECT platform_user_id, name, pushname FROM whatsapp_users"
         ):
@@ -436,7 +457,12 @@ async def resolve_entities() -> dict:
             if len(relevant) < 2:
                 continue
             has_target = any((p.source, p.platform_id) in target_sources for p in relevant)
-            if not has_target and not has_target_name:
+            # Corroborated-scope (SYNC #30): keep a cluster if target-linked OR it
+            # spans >=2 platforms with the SAME strict handle (cross-platform
+            # same-person). Lone single-platform non-target clusters still skip,
+            # so group-chat randoms don't become entities.
+            n_platforms = len({p.source for p in relevant})
+            if not has_target and not has_target_name and n_platforms < 2:
                 continue
 
             candidate = EntityCandidate(profiles=relevant)
