@@ -257,13 +257,19 @@ digital fused on the same axis.
   *Accept:* tagged-photo events on timelines; tag/mention edges present. Notes
   2026-07-15: analyzer backfill inserted `TAGGED_IN=33806` timeline rows; live
   interactions now include `instagram/tagged=278` and `instagram/mentioned=20`.
-- [ ] **T4.3 Likes: counts yes, per-liker no.** RESOLVED: individual liker lists
+- [x] **T4.3 Likes: counts yes, per-liker no.** RESOLVED: individual liker lists
   are NOT collectable (IG hides them; scrape/mobile-limited like lemon8 — see
   `IDENTITY_KEYS.md`). BUT `media_items.metadata->>'likes_count'` +
   `comments_count`/`views_count` ARE present per post/tagged/story → use as an
   **engagement metric** on the entity/media, not as like-edges. Document; no
   per-liker collection task.
-  *Accept:* engagement counts surfaced on entity/media; gap documented.
+  *Accept:* engagement counts surfaced on entity/media; gap documented. Notes
+  2026-07-15: timeline builder now preserves `likes_count/comments_count/views_count`
+  on `TAGGED_IN` events, and the entity timeline UI renders them as engagement
+  chips. Live backfill refreshed `TAGGED_IN=33806`; analyzer counts now show
+  `TAGGED_IN likes=33640 comments=33806 views=1087`. Example live timeline row
+  for entity `b479c472-012e-428e-95d8-adb34062e9e5` carries
+  `likes_count=25 comments_count=0`.
 
 ## PHASE 5 — Edge & Relationship Intelligence (deepen the graph)
 Many of these already exist as `identity_signals`/`entity_relationships` but are

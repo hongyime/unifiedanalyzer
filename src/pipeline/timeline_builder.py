@@ -377,6 +377,8 @@ PLATFORM_QUERIES = [
                        'kind', m.kind,
                        'content_id', m.content_id,
                        'likes_count', NULLIF(m.metadata->>'likes_count', ''),
+                       'comments_count', NULLIF(m.metadata->>'comments_count', ''),
+                       'views_count', NULLIF(m.metadata->>'views_count', ''),
                        'caption', NULLIF(m.metadata->>'caption', ''),
                        'source_url', m.source_url,
                        'timestamp_source', CASE
@@ -428,6 +430,8 @@ PLATFORM_QUERIES = [
                        'kind', m.kind,
                        'content_id', m.content_id,
                        'likes_count', NULLIF(m.metadata->>'likes_count', ''),
+                       'comments_count', NULLIF(m.metadata->>'comments_count', ''),
+                       'views_count', NULLIF(m.metadata->>'views_count', ''),
                        'caption', NULLIF(m.metadata->>'caption', ''),
                        'source_url', m.source_url,
                        'timestamp_source', CASE
@@ -474,7 +478,10 @@ PLATFORM_QUERIES = [
                        'media_id', NULLIF(split_part(m.content_id, '_', 2), ''),
                        'owner_platform_user_id', NULLIF(split_part(m.content_id, '_', 3), ''),
                        'owner_username', su.username,
-                       'source_url', m.source_url
+                       'source_url', m.source_url,
+                       'likes_count', NULLIF(m.metadata->>'likes_count', ''),
+                       'comments_count', NULLIF(m.metadata->>'comments_count', ''),
+                       'views_count', NULLIF(m.metadata->>'views_count', '')
                    )) AS metadata
             FROM media_items m
             LEFT JOIN social_users su

@@ -41,6 +41,22 @@ function isoFromEpoch(ts: number | null): string | null {
   return ts == null ? null : new Date(ts * 1000).toISOString()
 }
 
+function engagementMetrics(metadata: Record<string, unknown> | null | undefined) {
+  const out: { label: string; value: string }[] = []
+  if (!metadata || typeof metadata !== 'object') return out
+  for (const [key, label] of [
+    ['likes_count', 'likes'],
+    ['comments_count', 'comments'],
+    ['views_count', 'views'],
+  ] as const) {
+    const raw = metadata[key]
+    if (raw == null || raw === '') continue
+    const num = typeof raw === 'number' ? raw : Number(raw)
+    out.push({ label, value: Number.isFinite(num) ? num.toLocaleString() : String(raw) })
+  }
+  return out
+}
+
 /** Reused hour+day activity bars. Uses the info accent for both charts so the
  *  read is "the taller the bar, the more posts". */
 function HeatmapGrid({ hourDist, dowDist }: { hourDist: Record<string, number>; dowDist: Record<string, number> }) {
@@ -742,6 +758,15 @@ export default function EntityDetailPage() {
                     <span className="text-xs text-text-muted">{formatDate(ev.occurred_at)}</span>
                   </div>
                   {ev.title && <div className="mt-2 text-sm">{ev.title}</div>}
+                  {engagementMetrics(ev.metadata).length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {engagementMetrics(ev.metadata).map((metric) => (
+                        <span key={metric.label} className="rounded-full bg-info/15 px-2 py-0.5 text-xs font-medium text-info">
+                          {metric.value} {metric.label}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </Card>
               ))}
               <div className="flex items-center justify-between text-xs text-text-muted">
