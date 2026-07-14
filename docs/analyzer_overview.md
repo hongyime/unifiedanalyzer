@@ -509,6 +509,16 @@ End-to-end review found the recurring "signals emit zero" symptom was mostly
    18,378 → 45,806 (2.5×); entities with timeline activity → 864;
    behavioral_profiles 957 → 1,216.** Telegram stays ~1.3% (only 110 of 3,374
    users are tracked entities — genuine data ceiling, not a bug).
+
+   > **Correction (2026-07-14, SYNC #30/#31/#41):** the "3,374 users / genuine
+   > data ceiling" framing was wrong. The collector holds **149,660**
+   > `telegram_users`; the low attribution was the entity-creation gate on
+   > `collection_targets`, not a real ceiling. SYNC #30 broadened entity creation
+   > to corroborated + target-contact scope (telegram `entity_platform_links`
+   > 125 → 347, instagram 9 → 149, +threads/x), and SYNC #31 bridges beeper's
+   > native ids (1,292 telegram matches) into the same entities. Attribution
+   > headroom is far larger than "3,374"; treat these numbers as a
+   > pre-SYNC snapshot.
    The upsert now guards `entity_id IS DISTINCT FROM EXCLUDED.entity_id` so a
    full rebuild only rewrites *changed* rows — no dead-tuple churn on the
    C:-backed Postgres volume ([[storage-derived-on-z]] disk-safety).
