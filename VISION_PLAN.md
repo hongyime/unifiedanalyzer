@@ -118,32 +118,32 @@ blocks to `timeline_builder.py::SOURCE_QUERIES` (each: `source, event_type,
 query` returning `record_id, occurred_at, title, entity_ref[, entity_ref2]`,
 `time_col`). Attribution keys per `IDENTITY_KEYS.md`.
 
-- [ ] **T1.1 Reactions → `REACTION_GIVEN`.** Source `telegram_reactions`
+- [x] **T1.1 Reactions → `REACTION_GIVEN`.** Source `telegram_reactions`
   (105,082): `entity_ref` = `user_id` (reactor's telegram platform id); JOIN
   `telegram_messages m ON m.id=message_id` to put target author + `emoji` +
   target `title` in `metadata`. `time_col`=`added_at`.
-  *Accept:* `SELECT count(*) FROM timeline_events WHERE event_type='REACTION_GIVEN'` > 0; events show on reactor timelines.
+  *Accept:* `SELECT count(*) FROM timeline_events WHERE event_type='REACTION_GIVEN'` > 0; events show on reactor timelines. Notes 2026-07-14: filtered backfill runner completed with `REACTION_GIVEN=105082`, matching `telegram_reactions`.
 - [ ] **T1.2 Replies → `REPLIED`.** Source `telegram_messages` where
   `reply_to_message_id IS NOT NULL` (144,095): `entity_ref`=sender; self-join to
   the replied-to message for target author/preview in `metadata`.
   *Accept:* reply events present; metadata carries the target.
-- [ ] **T1.3 Comments → `COMMENT_POSTED`.** `instagram_comments`(6,567),
+- [x] **T1.3 Comments → `COMMENT_POSTED`.** `instagram_comments`(6,567),
   `tiktok_comments`, `youtube_comments`, `strava_activity_comments`. `entity_ref`
   = comment author; post/owner in metadata.
-  *Accept:* comment events per platform present.
-- [ ] **T1.4 Follows → `FOLLOWED`.** `follow_edges` (`owner_account`→`target_uid`,
+  *Accept:* comment events per platform present. Notes 2026-07-14: `timeline_builder.py` now emits owner metadata for Instagram + YouTube comments; live backfill produced `instagram=6567`, `youtube=1851`. Current collector tables hold `tiktok_comments=0` and `strava_activity_comments=0`, so those source blocks are present but no-op today.
+- [x] **T1.4 Follows → `FOLLOWED`.** `follow_edges` (`owner_account`→`target_uid`,
   `direction`). Emit for `direction='following'`; store target handle in metadata.
-  *Accept:* follow events present.
-- [ ] **T1.5 IG geo-posts carry location.** For `instagram_posts` with
+  *Accept:* follow events present. Notes 2026-07-14: backfill produced `FOLLOWED=325`; metadata includes `target_uid`, `target_username`, `first_seen`, `last_seen`.
+- [x] **T1.5 IG geo-posts carry location.** For `instagram_posts` with
   `location_lat` (4,512): ensure the existing IG post event puts
   `location_lat/lng/name` into `timeline_events.metadata` (needed by T3.3/geo).
-  *Accept:* IG post events have geo in metadata.
-- [ ] **T1.6 Stories/highlights → `STORY_POSTED` / `HIGHLIGHT_POSTED`.**
+  *Accept:* IG post events have geo in metadata. Notes 2026-07-14: `timeline_events` now has `4512` Instagram `CONTENT_PUBLISHED` rows with `metadata.location_lat`, matching the current source-row count.
+- [x] **T1.6 Stories/highlights → `STORY_POSTED` / `HIGHLIGHT_POSTED`.**
   RESOLVED: stories = `media_items` source=instagram `kind='story'` (1,206),
   highlights `kind='highlight'` (3,776) — both fully entity-attributed
   (`entity_id`), timestamp in `metadata->>'taken_at'` (unix). Add timeline blocks
   keyed on `entity_id`; carry caption/likes_count in metadata.
-  *Accept:* story + highlight events on entity timelines.
+  *Accept:* story + highlight events on entity timelines. Notes 2026-07-14: live rows do not currently carry `metadata.taken_at`, so the analyzer backfill falls back to `created_at`/`collected_at` and records `timestamp_source` in metadata. Backfill counts: `STORY_POSTED=1279`, `HIGHLIGHT_POSTED=3776`.
 - [ ] **T1.7 Verify pipeline picks up new blocks.** After T1.1–1.6, run one full
   build (`docker exec unifiedanalyzer_analyzer python -m src.main full` or wait
   for scheduler); spot-check a rich entity's timeline is no longer Strava-only.

@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -50,13 +51,71 @@ PLATFORM_QUERIES = [
         "event_type": "CONTENT_PUBLISHED",
         "query": """
             SELECT p.platform_post_id AS record_id, p.platform_created_at AS occurred_at,
-                   LEFT(p.caption, 200) AS title, pr.username AS entity_ref
+                   LEFT(p.caption, 200) AS title,
+                   pr.platform_user_id::text AS entity_ref, pr.username AS entity_ref2,
+                   CASE
+                       WHEN p.location_lat IS NOT NULL
+                         OR p.location_lng IS NOT NULL
+                         OR p.location_name IS NOT NULL
+                       THEN jsonb_strip_nulls(jsonb_build_object(
+                           'location_lat', p.location_lat,
+                           'location_lng', p.location_lng,
+                           'location_name', p.location_name
+                       ))
+                       ELSE '{{}}'::jsonb
+                   END AS metadata
             FROM instagram_posts p
             LEFT JOIN instagram_profiles pr ON p.profile_id = pr.id
             WHERE p.platform_created_at IS NOT NULL {where_clause}
             ORDER BY p.platform_created_at DESC
         """,
         "time_col": "p.platform_created_at",
+    },
+    {
+        "source": "telegram",
+        "event_type": "REACTION_GIVEN",
+        "query": """
+            SELECT r.id::text AS record_id, r.added_at AS occurred_at,
+                   LEFT(COALESCE(m.text, m.caption, ''), 200) AS title,
+                   actor.platform_user_id AS entity_ref, actor.username AS entity_ref2,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'emoji', r.emoji,
+                       'target_message_id', m.platform_message_id,
+                       'target_platform_user_id', target.platform_user_id,
+                       'target_username', target.username,
+                       'target_preview', LEFT(COALESCE(m.text, m.caption, ''), 200)
+                   )) AS metadata
+            FROM telegram_reactions r
+            LEFT JOIN telegram_users actor ON actor.id = r.user_id
+            LEFT JOIN telegram_messages m ON m.id = r.message_id
+            LEFT JOIN telegram_users target ON target.id = m.sender_id
+            WHERE r.added_at IS NOT NULL {where_clause}
+            ORDER BY r.added_at DESC
+        """,
+        "time_col": "r.added_at",
+    },
+    {
+        "source": "telegram",
+        "event_type": "REPLIED",
+        "query": """
+            SELECT m.platform_message_id AS record_id, m.platform_created_at AS occurred_at,
+                   LEFT(COALESCE(m.text, m.caption, ''), 200) AS title,
+                   actor.platform_user_id AS entity_ref, actor.username AS entity_ref2,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'reply_to_message_id', m.reply_to_message_id,
+                       'target_platform_user_id', target.platform_user_id,
+                       'target_username', target.username,
+                       'target_preview', LEFT(COALESCE(parent.text, parent.caption, ''), 200)
+                   )) AS metadata
+            FROM telegram_messages m
+            LEFT JOIN telegram_users actor ON actor.id = m.sender_id
+            LEFT JOIN telegram_messages parent ON parent.platform_message_id = m.reply_to_message_id
+            LEFT JOIN telegram_users target ON target.id = parent.sender_id
+            WHERE m.reply_to_message_id IS NOT NULL
+              AND m.platform_created_at IS NOT NULL {where_clause}
+            ORDER BY m.platform_created_at DESC
+        """,
+        "time_col": "m.platform_created_at",
     },
     {
         "source": "telegram",
@@ -192,12 +251,211 @@ PLATFORM_QUERIES = [
         "event_type": "COMMENT_POSTED",
         "query": """
             SELECT c.platform_comment_id AS record_id, c.platform_created_at AS occurred_at,
-                   LEFT(c.text, 200) AS title, c.author_username AS entity_ref
+                   LEFT(c.text, 200) AS title,
+                   c.author_platform_id AS entity_ref, c.author_username AS entity_ref2,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'post_id', p.platform_post_id,
+                       'owner_platform_user_id', pr.platform_user_id,
+                       'owner_username', pr.username,
+                       'parent_comment_id', c.parent_comment_id,
+                       'is_reply', c.is_reply
+                   )) AS metadata
             FROM instagram_comments c
+            LEFT JOIN instagram_posts p ON p.id = c.post_id
+            LEFT JOIN instagram_profiles pr ON pr.id = p.profile_id
             WHERE c.platform_created_at IS NOT NULL {where_clause}
             ORDER BY c.platform_created_at DESC
         """,
         "time_col": "c.platform_created_at",
+    },
+    {
+        "source": "tiktok",
+        "event_type": "COMMENT_POSTED",
+        "query": """
+            SELECT c.platform_comment_id AS record_id, c.platform_created_at AS occurred_at,
+                   LEFT(c.text, 200) AS title,
+                   c.author_username AS entity_ref,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'post_id', p.platform_post_id,
+                       'owner_platform_user_id', pr.platform_user_id,
+                       'owner_username', pr.username,
+                       'parent_comment_id', c.parent_comment_id,
+                       'reply_count', c.reply_count
+                   )) AS metadata
+            FROM tiktok_comments c
+            LEFT JOIN tiktok_posts p ON p.id = c.post_id
+            LEFT JOIN tiktok_profiles pr ON pr.id = p.profile_id
+            WHERE c.platform_created_at IS NOT NULL {where_clause}
+            ORDER BY c.platform_created_at DESC
+        """,
+        "time_col": "c.platform_created_at",
+    },
+    {
+        "source": "youtube",
+        "event_type": "COMMENT_POSTED",
+        "query": """
+            SELECT c.platform_comment_id AS record_id, c.platform_published_at AS occurred_at,
+                   LEFT(c.text_original, 200) AS title,
+                   c.author_channel_id AS entity_ref, c.author_name AS entity_ref2,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'video_id', v.platform_video_id,
+                       'owner_platform_channel_id', ch.platform_channel_id,
+                       'owner_handle', ch.custom_url,
+                       'parent_comment_id', c.parent_comment_id,
+                       'is_reply', c.is_reply
+                   )) AS metadata
+            FROM youtube_comments c
+            LEFT JOIN youtube_videos v ON v.id = c.video_id
+            LEFT JOIN youtube_channels ch ON ch.id = v.channel_id
+            WHERE c.platform_published_at IS NOT NULL {where_clause}
+            ORDER BY c.platform_published_at DESC
+        """,
+        "time_col": "c.platform_published_at",
+    },
+    {
+        "source": "strava",
+        "event_type": "COMMENT_POSTED",
+        "query": """
+            SELECT c.id::text AS record_id, c.platform_created_at AT TIME ZONE 'UTC' AS occurred_at,
+                   LEFT(c.comment_text, 200) AS title,
+                   c.platform_athlete_id::text AS entity_ref, c.athlete_name AS entity_ref2,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'activity_id', a.platform_activity_id,
+                       'owner_platform_athlete_id', owner.platform_athlete_id,
+                       'owner_username', owner.username
+                   )) AS metadata
+            FROM strava_activity_comments c
+            LEFT JOIN strava_activities a ON a.platform_activity_id = c.platform_activity_id
+            LEFT JOIN strava_athletes owner ON owner.id = a.athlete_id
+            WHERE c.platform_created_at IS NOT NULL {where_clause}
+            ORDER BY c.platform_created_at DESC
+        """,
+        "time_col": "c.platform_created_at",
+    },
+    {
+        "source": "instagram",
+        "event_type": "FOLLOWED",
+        "query": """
+            SELECT CONCAT_WS(':', f.platform, f.owner_account, f.target_uid, f.direction) AS record_id,
+                   COALESCE(f.first_seen, f.last_seen) AS occurred_at,
+                   COALESCE(f.target_username, f.target_uid) AS title,
+                   f.owner_account AS entity_ref,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'target_uid', f.target_uid,
+                       'target_username', f.target_username,
+                       'direction', f.direction,
+                       'first_seen', f.first_seen,
+                       'last_seen', f.last_seen
+                   )) AS metadata
+            FROM follow_edges f
+            WHERE f.platform = 'instagram'
+              AND f.direction = 'following'
+              AND COALESCE(f.first_seen, f.last_seen) IS NOT NULL {where_clause}
+            ORDER BY COALESCE(f.first_seen, f.last_seen) DESC
+        """,
+        "time_col": "COALESCE(f.first_seen, f.last_seen)",
+    },
+    {
+        "source": "instagram",
+        "event_type": "STORY_POSTED",
+        "query": """
+            SELECT m.id::text AS record_id,
+                   COALESCE(
+                       CASE
+                           WHEN COALESCE(m.metadata->>'taken_at', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+                           THEN to_timestamp((m.metadata->>'taken_at')::double precision)
+                       END,
+                       m.created_at,
+                       m.collected_at
+                   ) AS occurred_at,
+                   LEFT(COALESCE(NULLIF(m.metadata->>'caption', ''), m.entity_name, m.content_id), 200) AS title,
+                   m.entity_id AS entity_ref, m.entity_name AS entity_ref2,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'kind', m.kind,
+                       'content_id', m.content_id,
+                       'likes_count', NULLIF(m.metadata->>'likes_count', ''),
+                       'caption', NULLIF(m.metadata->>'caption', ''),
+                       'source_url', m.source_url,
+                       'timestamp_source', CASE
+                           WHEN COALESCE(m.metadata->>'taken_at', '') ~ '^[0-9]+(\\.[0-9]+)?$' THEN 'metadata.taken_at'
+                           WHEN m.created_at IS NOT NULL THEN 'created_at'
+                           ELSE 'collected_at'
+                       END
+                   )) AS metadata
+            FROM media_items m
+            WHERE m.source = 'instagram'
+              AND m.kind = 'story'
+              AND COALESCE(
+                    CASE
+                        WHEN COALESCE(m.metadata->>'taken_at', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+                        THEN to_timestamp((m.metadata->>'taken_at')::double precision)
+                    END,
+                    m.created_at,
+                    m.collected_at
+                  ) IS NOT NULL {where_clause}
+            ORDER BY occurred_at DESC
+        """,
+        "time_col": """
+            COALESCE(
+                CASE
+                    WHEN COALESCE(m.metadata->>'taken_at', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+                    THEN to_timestamp((m.metadata->>'taken_at')::double precision)
+                END,
+                m.created_at,
+                m.collected_at
+            )
+        """,
+    },
+    {
+        "source": "instagram",
+        "event_type": "HIGHLIGHT_POSTED",
+        "query": """
+            SELECT m.id::text AS record_id,
+                   COALESCE(
+                       CASE
+                           WHEN COALESCE(m.metadata->>'taken_at', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+                           THEN to_timestamp((m.metadata->>'taken_at')::double precision)
+                       END,
+                       m.created_at,
+                       m.collected_at
+                   ) AS occurred_at,
+                   LEFT(COALESCE(NULLIF(m.metadata->>'caption', ''), m.entity_name, m.content_id), 200) AS title,
+                   m.entity_id AS entity_ref, m.entity_name AS entity_ref2,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'kind', m.kind,
+                       'content_id', m.content_id,
+                       'likes_count', NULLIF(m.metadata->>'likes_count', ''),
+                       'caption', NULLIF(m.metadata->>'caption', ''),
+                       'source_url', m.source_url,
+                       'timestamp_source', CASE
+                           WHEN COALESCE(m.metadata->>'taken_at', '') ~ '^[0-9]+(\\.[0-9]+)?$' THEN 'metadata.taken_at'
+                           WHEN m.created_at IS NOT NULL THEN 'created_at'
+                           ELSE 'collected_at'
+                       END
+                   )) AS metadata
+            FROM media_items m
+            WHERE m.source = 'instagram'
+              AND m.kind = 'highlight'
+              AND COALESCE(
+                    CASE
+                        WHEN COALESCE(m.metadata->>'taken_at', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+                        THEN to_timestamp((m.metadata->>'taken_at')::double precision)
+                    END,
+                    m.created_at,
+                    m.collected_at
+                  ) IS NOT NULL {where_clause}
+            ORDER BY occurred_at DESC
+        """,
+        "time_col": """
+            COALESCE(
+                CASE
+                    WHEN COALESCE(m.metadata->>'taken_at', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+                    THEN to_timestamp((m.metadata->>'taken_at')::double precision)
+                END,
+                m.created_at,
+                m.collected_at
+            )
+        """,
     },
 ]
 
@@ -256,6 +514,8 @@ async def ensure_timeline_partitions(months_ahead: int = 6) -> None:
 async def build_timeline(
     since: datetime | None = None,
     skip_sources: set[str] | None = None,
+    only_sources: set[str] | None = None,
+    only_event_types: set[str] | None = None,
 ) -> dict:
     """Build/refresh timeline_events from the collector.
 
@@ -273,6 +533,8 @@ async def build_timeline(
     collector = get_collector_pool()
     analyzer = get_analyzer_pool()
     skip_sources = skip_sources or set()
+    only_sources = only_sources or set()
+    only_event_types = only_event_types or set()
     # Keep upcoming monthly partitions provisioned before inserting.
     try:
         await ensure_timeline_partitions()
@@ -285,6 +547,10 @@ async def build_timeline(
     for pq in PLATFORM_QUERIES:
         if pq["source"] in skip_sources:
             stats["skipped_tables"].append(f"{pq['source']}/{pq['event_type']} (skip_sources)")
+            continue
+        if only_sources and pq["source"] not in only_sources:
+            continue
+        if only_event_types and pq["event_type"] not in only_event_types:
             continue
         where_clause = ""
         params: list = []
@@ -337,6 +603,7 @@ async def build_timeline(
                             str(row["record_id"]),
                             occurred_at,
                             row.get("title"),
+                            _jsonb_param(row.get("metadata")),
                         ))
                         row_count += 1
 
@@ -364,19 +631,33 @@ async def _insert_batch(pool, batch: list[tuple]) -> None:
     async with pool.acquire() as conn:
         await conn.executemany("""
             INSERT INTO timeline_events
-                (entity_id, source, event_type, source_record_id, occurred_at, title)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6)
+                (entity_id, source, event_type, source_record_id, occurred_at, title, metadata)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb)
             -- P2-5: 4-col conflict target (includes occurred_at) so the upsert
             -- works on the month-partitioned table, where every unique key must
             -- include the partition column. occurred_at is deterministic per
             -- (source,event_type,source_record_id), so this preserves the old
             -- 3-col semantics. Backed by idx_timeline_uniq4.
             ON CONFLICT (source, event_type, source_record_id, occurred_at)
-            DO UPDATE SET entity_id = EXCLUDED.entity_id
+            DO UPDATE SET
+                entity_id = EXCLUDED.entity_id,
+                title = EXCLUDED.title,
+                metadata = EXCLUDED.metadata
             -- Only write when the attribution actually changes. Without this
             -- guard every conflicting row is rewritten on each full rebuild,
             -- churning millions of dead tuples and growing the C:-backed
             -- Postgres volume for no reason. IS DISTINCT FROM handles NULLs on
-            -- both sides. (2026-07-10 disk-safety + re-attribution fix)
+            -- both sides. Metadata/title updates are also allowed so newly-added
+            -- source payloads can backfill existing timeline rows.
             WHERE timeline_events.entity_id IS DISTINCT FROM EXCLUDED.entity_id
+               OR timeline_events.title IS DISTINCT FROM EXCLUDED.title
+               OR timeline_events.metadata IS DISTINCT FROM EXCLUDED.metadata
         """, batch)
+
+
+def _jsonb_param(raw) -> str:
+    if raw is None:
+        return "{}"
+    if isinstance(raw, str):
+        return raw
+    return json.dumps(raw, default=str)
