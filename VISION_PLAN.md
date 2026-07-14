@@ -164,7 +164,7 @@ query` returning `record_id, occurred_at, title, entity_ref[, entity_ref2]`,
 Goal: model "X did ACTION to Y", queryable both directions. `entity_relationships`
 is undirected (a/b) → build a NEW directed layer.
 
-- [ ] **T2.1 New model `entity_interactions`.** New additive migration
+- [x] **T2.1 New model `entity_interactions`.** New additive migration
   (`src/db/migrations/…` — nullable columns only; never edit an applied migration
   — checksum drift bricks migrate-on-boot). Columns:
   `id, actor_entity_id, target_entity_id, interaction_type
@@ -172,6 +172,9 @@ is undirected (a/b) → build a NEW directed layer.
   source, source_record_id, occurred_at, weight, metadata, created_at`;
   unique `(interaction_type, source, source_record_id)`; indexes on
   `(actor_entity_id, occurred_at)` and `(target_entity_id, occurred_at)`.
+  Notes 2026-07-15: implemented in analyzer schema (`src/db/schema.sql`) and
+  applied live; table now holds directed interaction rows and supports typed,
+  directional aggregation.
 - [ ] **T2.2 Builder `src/pipeline/interaction_graph.py`.** Populate from:
   reactions (reactor→msg author), replies (`reply_to_message_id`), comments
   (author→post owner), IG `mentions` (parse @handle → resolve to entity via
@@ -180,29 +183,48 @@ is undirected (a/b) → build a NEW directed layer.
   skip rows where either side is unresolved (log counts). Idempotent upsert.
   Wire into `incremental_runner.py` after `build_timeline`.
   *Accept:* `entity_interactions` populated; each `interaction_type` has rows;
-  re-run doesn't duplicate.
-- [ ] **T2.3 Aggregate directed edges into `entity_relationships`.** Roll up
+  re-run doesn't duplicate. Notes 2026-07-15: live populated types currently
+  `telegram/reacted=6233`, `telegram/replied=1191`, `telegram/forwarded=14`,
+  `instagram/followed=51`, `instagram/tagged=278`,
+  `instagram/commented=36`, `instagram/mentioned=20`. Current raw-source gaps:
+  `instagram_dm=0`, `strava_activity_comments=0`, `face_associations=0`;
+  `youtube/commented` resolves to no tracked cross-entity pairs today.
+- [x] **T2.3 Aggregate directed edges into `entity_relationships`.** Roll up
   `entity_interactions` into a directed-aware `relationship_type='interaction'`
   (or keep separate) with per-type counts + `last_seen_at` in `sources` jsonb, so
   the graph weights reflect real interaction volume + recency.
-  *Accept:* graph weights change to reflect interaction counts.
-- [ ] **T2.4 API: reciprocal interactions.** New `/entities/{id}/interactions`
+  *Accept:* graph weights change to reflect interaction counts. Notes
+  2026-07-15: relationship rollup refreshed live to `1119` directed interaction
+  relationships with per-type/per-source counts in `sources`.
+- [x] **T2.4 API: reciprocal interactions.** New `/entities/{id}/interactions`
   (`src/api/routes/graph.py`) returning, per connected entity, both directions
   with type breakdown + counts + last_ts (e.g. `{out:{reacted:96}, in:{replied:12}}`).
-  *Accept:* endpoint returns directed, typed, dated edges.
-- [ ] **T2.5 Frontend: directed typed edges.** `NetworkGraph.tsx` — arrowheads +
+  *Accept:* endpoint returns directed, typed, dated edges. Notes 2026-07-15:
+  live `/api/entities/6c76d679-34d3-4da4-91f1-44e1c1a97b4e/interactions`
+  returned `107` peers overall and `5` peers inside a 2026-07-13..2026-07-14
+  time window, confirming typed directional filtering.
+- [x] **T2.5 Frontend: directed typed edges.** `NetworkGraph.tsx` — arrowheads +
   edge color/label by `interaction_type`; neighbour tooltip shows reciprocal
   summary. `EntityDetail.tsx` — an "Interactions" panel.
   *Accept:* directed typed edges render; reciprocal shown on both entities.
+  Notes 2026-07-15: frontend builds clean after adding the interactions panel,
+  reciprocal summaries, and type-colored arrowheads.
 
 ## PHASE 3 — Unified physical+digital scrubber (the "OSINT" feel)
 Goal: one time-brush drives timeline + map + graph together; physical and
 digital fused on the same axis.
 
-- [ ] **T3.1 Master time-brush.** `TimelineLanes.tsx` emits a selected
+- [x] **T3.1 Master time-brush.** `TimelineLanes.tsx` emits a selected
   `[t0,t1]`; `EntityDetail.tsx` passes it to `GeoMap` + `NetworkGraph` as a
   filter. Backend: `/geo` and `/interactions` accept `?from=&to=`.
-  *Accept:* scrubbing the timeline filters map + graph in sync.
+  *Accept:* scrubbing the timeline filters map + graph in sync. Notes
+  2026-07-15: shared brush state now lives in `EntityDetail.tsx`; `TimelineLanes`
+  emits the selected window via dual sliders and dims out-of-window events.
+  Live API verification:
+  `/geo` for entity `3bea0c54-d6c4-459a-be38-c61676df8868` changed from
+  `routes=4, points=4` to `routes=0, points=0` for a non-overlapping window;
+  `/interactions` for entity `6c76d679-34d3-4da4-91f1-44e1c1a97b4e` dropped from
+  `107` peers overall to `5` peers in a 2026-07-13..2026-07-14 window.
 - [ ] **T3.2 Zoom levels (year→second).** Timeline supports zoom + windowing on
   `occurred_at` (already second-resolution); bucket adaptively; virtualize dense
   windows.
@@ -221,14 +243,16 @@ digital fused on the same axis.
   and a `PHOTO_COAPPEARANCE` timeline event on both entities, using media
   ownership (who posted) + face match. Confidence from face score.
   *Accept:* face-tag events on both entities' timelines.
-- [ ] **T4.2 Tagged photos + @-mentions → `tagged`/`mentioned` (both senses).**
+- [x] **T4.2 Tagged photos + @-mentions → `tagged`/`mentioned` (both senses).**
   (a) Metadata sense — RESOLVED: `media_items kind='tagged'` (**33,806**, 524
   ents, `metadata.taken_at`) = photos an entity is tagged in by others → emit a
   `TAGGED_IN` timeline event on the tagged entity AND a `tagged` interaction
   (poster→tagged) once poster is resolvable from `source_url`/owner.
   (b) `instagram_posts.mentions` (23,519) + caption `@handle` parse → `mentioned`
   interactions (feeds T2.2).
-  *Accept:* tagged-photo events on timelines; tag/mention edges present.
+  *Accept:* tagged-photo events on timelines; tag/mention edges present. Notes
+  2026-07-15: analyzer backfill inserted `TAGGED_IN=33806` timeline rows; live
+  interactions now include `instagram/tagged=278` and `instagram/mentioned=20`.
 - [ ] **T4.3 Likes: counts yes, per-liker no.** RESOLVED: individual liker lists
   are NOT collectable (IG hides them; scrape/mobile-limited like lemon8 — see
   `IDENTITY_KEYS.md`). BUT `media_items.metadata->>'likes_count'` +

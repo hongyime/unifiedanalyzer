@@ -460,6 +460,35 @@ PLATFORM_QUERIES = [
             )
         """,
     },
+    {
+        "source": "instagram",
+        "event_type": "TAGGED_IN",
+        "query": """
+            SELECT m.id::text AS record_id,
+                   COALESCE(m.created_at, m.collected_at) AS occurred_at,
+                   LEFT(COALESCE(m.entity_name, 'Tagged photo'), 200) AS title,
+                   m.entity_name AS entity_ref,
+                   m.entity_id AS entity_ref2,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'content_id', m.content_id,
+                       'media_id', NULLIF(split_part(m.content_id, '_', 2), ''),
+                       'owner_platform_user_id', NULLIF(split_part(m.content_id, '_', 3), ''),
+                       'owner_username', su.username,
+                       'source_url', m.source_url
+                   )) AS metadata
+            FROM media_items m
+            LEFT JOIN social_users su
+              ON su.platform = 'instagram'
+             AND su.platform_user_id = NULLIF(split_part(m.content_id, '_', 3), '')
+            WHERE m.source = 'instagram'
+              AND m.kind = 'tagged'
+              AND m.entity_name IS NOT NULL
+              AND m.entity_name <> ''
+              AND COALESCE(m.created_at, m.collected_at) IS NOT NULL {where_clause}
+            ORDER BY COALESCE(m.created_at, m.collected_at) DESC
+        """,
+        "time_col": "COALESCE(m.created_at, m.collected_at)",
+    },
 ]
 
 

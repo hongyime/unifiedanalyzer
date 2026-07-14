@@ -8,8 +8,8 @@ import L from 'leaflet'
  * Populates as the collector fills strava_gps_streams / IG post geo.
  */
 type Geo = {
-  routes: { name: string | null; type: string | null; date: string | null; points: [number, number][] }[]
-  points: { lat: number; lng: number; label: string | null; source: string }[]
+  routes: { name: string | null; type: string | null; date: string | null; source: string; points: [number, number][] }[]
+  points: { lat: number; lng: number; label: string | null; source: string; occurred_at: string | null }[]
   counts: { routes: number; points: number }
 }
 
@@ -45,7 +45,7 @@ export function GeoMap({ data }: { data: Geo }) {
         color: p.source === 'strava' ? '#fc4c02' : '#e1306c',
         fillOpacity: 0.6,
       })
-        .bindPopup(p.label || p.source)
+        .bindPopup(`${p.label || p.source}${p.occurred_at ? ` · ${p.occurred_at.slice(0, 10)}` : ''}`)
         .addTo(layer)
       bounds.push([p.lat, p.lng])
     })

@@ -91,7 +91,7 @@ SOURCE_QUERIES = [
                    c.platform_created_at AS occurred_at,
                    c.author_platform_id AS actor_ref,
                    c.author_username AS actor_ref2,
-                   pr.platform_user_id::text AS target_ref,
+                   COALESCE(pr.platform_user_id::text, NULLIF(split_part(p.platform_post_id, '_', 2), '')) AS target_ref,
                    pr.username AS target_ref2,
                    jsonb_strip_nulls(jsonb_build_object(
                        'post_id', p.platform_post_id,
@@ -157,7 +157,7 @@ SOURCE_QUERIES = [
         "query": """
             SELECT CONCAT(p.platform_post_id, ':', mention.handle) AS record_id,
                    p.platform_created_at AS occurred_at,
-                   pr.platform_user_id::text AS actor_ref,
+                   COALESCE(pr.platform_user_id::text, NULLIF(split_part(p.platform_post_id, '_', 2), '')) AS actor_ref,
                    pr.username AS actor_ref2,
                    mention.handle AS target_ref,
                    mention.handle AS target_ref2,

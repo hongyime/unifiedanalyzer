@@ -37,6 +37,10 @@ function formatDate(iso: string) {
   return new Date(iso).toLocaleString()
 }
 
+function isoFromEpoch(ts: number | null): string | null {
+  return ts == null ? null : new Date(ts * 1000).toISOString()
+}
+
 /** Reused hour+day activity bars. Uses the info accent for both charts so the
  *  read is "the taller the bar, the more posts". */
 function HeatmapGrid({ hourDist, dowDist }: { hourDist: Record<string, number>; dowDist: Record<string, number> }) {
@@ -137,7 +141,9 @@ export default function EntityDetailPage() {
   const [actionMsg, setActionMsg] = useState('')
   const [cases, setCases] = useState<{ id: string; name: string }[]>([])
   const [pinCase, setPinCase] = useState('')
+  const [brushRange, setBrushRange] = useState<[number, number] | null>(null)
   useEffect(() => { api.getCases().then(d => setCases(d.cases)).catch(() => {}) }, [])
+  useEffect(() => { setBrushRange(null) }, [id])
 
   useEffect(() => {
     if (!id) return
@@ -151,17 +157,27 @@ export default function EntityDetailPage() {
 
   useEffect(() => {
     if (!id || tab !== 'timeline') return
-    api.getTimeline(id, eventsPage).then(r => {
+    api.getTimeline(
+      id,
+      eventsPage,
+      '',
+      '',
+      isoFromEpoch(brushRange?.[0] ?? null),
+      isoFromEpoch(brushRange?.[1] ?? null),
+    ).then(r => {
       setEvents(r.data)
       setEventsTotal(r.total)
     })
-  }, [id, tab, eventsPage])
+  }, [id, tab, eventsPage, brushRange])
 
   const [lanes, setLanes] = useState<Awaited<ReturnType<typeof api.getTimelineLanes>> | null>(null)
   useEffect(() => {
-    if (!id || tab !== 'timeline') return
-    api.getTimelineLanes(id).then(setLanes).catch(() => setLanes(null))
-  }, [id, tab])
+    if (!id) return
+    api.getTimelineLanes(id).then((data) => {
+      setLanes(data)
+      setBrushRange((current) => current ?? (data.min_t != null && data.max_t != null ? [data.min_t, data.max_t] : null))
+    }).catch(() => setLanes(null))
+  }, [id])
 
   useEffect(() => {
     if (!id || tab !== 'behavior') return
@@ -170,8 +186,12 @@ export default function EntityDetailPage() {
 
   useEffect(() => {
     if (!id || tab !== 'interactions') return
-    api.getInteractions(id).then(r => setInteractions(r.data)).catch(() => setInteractions([]))
-  }, [id, tab])
+    api.getInteractions(
+      id,
+      isoFromEpoch(brushRange?.[0] ?? null),
+      isoFromEpoch(brushRange?.[1] ?? null),
+    ).then(r => setInteractions(r.data)).catch(() => setInteractions([]))
+  }, [id, tab, brushRange])
 
   useEffect(() => {
     if (!id || tab !== 'relationships') return
@@ -189,8 +209,12 @@ export default function EntityDetailPage() {
   const [geo, setGeo] = useState<Awaited<ReturnType<typeof api.getEntityGeo>> | null>(null)
   useEffect(() => {
     if (!id || tab !== 'map') return
-    api.getEntityGeo(id).then(setGeo).catch(() => setGeo(null))
-  }, [id, tab])
+    api.getEntityGeo(
+      id,
+      isoFromEpoch(brushRange?.[0] ?? null),
+      isoFromEpoch(brushRange?.[1] ?? null),
+    ).then(setGeo).catch(() => setGeo(null))
+  }, [id, tab, brushRange])
 
   const [socialCircle, setSocialCircle] = useState<SocialCircleEntry[] | null>(null)
   useEffect(() => {
@@ -689,7 +713,7 @@ export default function EntityDetailPage() {
                 <div className="text-sm font-semibold">Activity across platforms</div>
                 <div className="text-xs text-text-muted">{lanes.total.toLocaleString()} events</div>
               </div>
-              <TimelineLanes data={lanes} />
+              <TimelineLanes data={lanes} selectedRange={brushRange} onRangeChange={setBrushRange} />
             </Card>
           )}
           {events.length === 0 ? (
@@ -750,6 +774,11 @@ export default function EntityDetailPage() {
                 {geo.counts.routes} routes · {geo.counts.points} places
               </div>
             </div>
+            {lanes && lanes.total > 0 && (
+              <div className="mb-3">
+                <TimelineLanes data={lanes} selectedRange={brushRange} onRangeChange={setBrushRange} />
+              </div>
+            )}
             <GeoMap data={geo} />
           </Card>
         ) : (
@@ -929,6 +958,15 @@ export default function EntityDetailPage() {
       {/* ── Relationships ────────────────────────────────────────────── */}
       {tab === 'interactions' && (
         <div className="space-y-3">
+          {lanes && lanes.total > 0 && (
+            <Card>
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-sm font-semibold">Time window</div>
+                <div className="text-xs text-text-muted">Filters graph + summary</div>
+              </div>
+              <TimelineLanes data={lanes} selectedRange={brushRange} onRangeChange={setBrushRange} />
+            </Card>
+          )}
           {interactions.length === 0 ? (
             <EmptyState
               icon={<Users2 className="h-10 w-10" />}

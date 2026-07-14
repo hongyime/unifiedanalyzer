@@ -70,7 +70,11 @@ def _downsample(pts: list, target: int = 120) -> list:
 
 
 @router.get("/entities/{entity_id}/geo")
-async def entity_geo(entity_id: str):
+async def entity_geo(
+    entity_id: str,
+    from_date: datetime | None = Query(None, alias="from"),
+    to_date: datetime | None = Query(None, alias="to"),
+):
     """Geo footprint for the map: Strava route polylines + start points, and
     Instagram tagged-place pins. Reads the collector DB."""
     analyzer = get_analyzer_pool()
@@ -81,58 +85,122 @@ async def entity_geo(entity_id: str):
         )
     strava_ids = [l["platform_id"] for l in links if l["source"] == "strava" and l["platform_id"]]
     ig_ids = [l["platform_id"] for l in links if l["source"] == "instagram" and l["platform_id"]]
+    telegram_ids = [l["platform_id"] for l in links if l["source"] == "telegram" and l["platform_id"]]
 
     routes: list[dict] = []
     points: list[dict] = []
     ig_place_names: list[str] = []
     async with collector.acquire() as cc:
         if strava_ids:
+            strava_filters = ["ath.platform_athlete_id::text = ANY($1::text[])"]
+            strava_params: list = [strava_ids]
+            if from_date:
+                strava_filters.append(f"a.start_date >= ${len(strava_params) + 1}")
+                strava_params.append(from_date)
+            if to_date:
+                strava_filters.append(f"a.start_date <= ${len(strava_params) + 1}")
+                strava_params.append(to_date)
             # Prefer full-res gps_streams.latlng; fall back to the (now
             # backfilled) summary_polyline so activities with only the overview
             # line still render.
-            acts = await cc.fetch("""
+            acts = await cc.fetch(f"""
                 SELECT a.name, a.start_date, a.type, a.start_latlng, a.summary_polyline,
                        s.latlng::text AS latlng
                 FROM strava_activities a
                 JOIN strava_athletes ath ON ath.id = a.athlete_id
                 LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
-                WHERE ath.platform_athlete_id::text = ANY($1::text[])
+                WHERE {' AND '.join(strava_filters)}
                   AND (s.latlng IS NOT NULL
                        OR (a.summary_polyline IS NOT NULL AND a.summary_polyline <> ''))
                 ORDER BY a.start_date DESC NULLS LAST LIMIT 100
-            """, strava_ids)
+            """, *strava_params)
             for r in acts:
                 track = _as_latlng_list(r["latlng"]) if r["latlng"] else _decode_polyline(r["summary_polyline"] or "")
                 pts = _downsample(track)
                 if len(pts) >= 2:
                     routes.append({"name": r["name"], "type": r["type"],
                                    "date": r["start_date"].isoformat() if r["start_date"] else None,
+                                   "source": "strava",
                                    "points": pts})
                 sp = _parse_latlng(r["start_latlng"])
                 if sp:
-                    points.append({"lat": sp[0], "lng": sp[1], "label": r["name"], "source": "strava"})
+                    points.append({
+                        "lat": sp[0],
+                        "lng": sp[1],
+                        "label": r["name"],
+                        "source": "strava",
+                        "occurred_at": r["start_date"].isoformat() if r["start_date"] else None,
+                    })
         if ig_ids:
-            posts = await cc.fetch("""
-                SELECT p.location_name, p.location_lat, p.location_lng
+            ig_filters = ["pr.platform_user_id::text = ANY($1::text[])", "p.location_lat IS NOT NULL"]
+            ig_params: list = [ig_ids]
+            if from_date:
+                ig_filters.append(f"p.platform_created_at >= ${len(ig_params) + 1}")
+                ig_params.append(from_date)
+            if to_date:
+                ig_filters.append(f"p.platform_created_at <= ${len(ig_params) + 1}")
+                ig_params.append(to_date)
+            posts = await cc.fetch(f"""
+                SELECT p.location_name, p.location_lat, p.location_lng, p.platform_created_at
                 FROM instagram_posts p
                 JOIN instagram_profiles pr ON pr.id = p.profile_id
-                WHERE pr.platform_user_id::text = ANY($1::text[]) AND p.location_lat IS NOT NULL
+                WHERE {' AND '.join(ig_filters)}
                 ORDER BY p.platform_created_at DESC NULLS LAST LIMIT 300
-            """, ig_ids)
+            """, *ig_params)
             for p in posts:
-                points.append({"lat": float(p["location_lat"]), "lng": float(p["location_lng"]),
-                               "label": p["location_name"], "source": "instagram"})
+                points.append({
+                    "lat": float(p["location_lat"]),
+                    "lng": float(p["location_lng"]),
+                    "label": p["location_name"],
+                    "source": "instagram",
+                    "occurred_at": p["platform_created_at"].isoformat() if p["platform_created_at"] else None,
+                })
             # IG stores only place NAMES (no coords); collect them to resolve via
             # the geocode cache below.
-            named = await cc.fetch("""
+            named_filters = ["pr.platform_user_id::text = ANY($1::text[])", "p.location_name IS NOT NULL", "p.location_name <> ''"]
+            named_params: list = [ig_ids]
+            if from_date:
+                named_filters.append(f"p.platform_created_at >= ${len(named_params) + 1}")
+                named_params.append(from_date)
+            if to_date:
+                named_filters.append(f"p.platform_created_at <= ${len(named_params) + 1}")
+                named_params.append(to_date)
+            named = await cc.fetch(f"""
                 SELECT DISTINCT p.location_name
                 FROM instagram_posts p
                 JOIN instagram_profiles pr ON pr.id = p.profile_id
-                WHERE pr.platform_user_id::text = ANY($1::text[])
-                  AND p.location_name IS NOT NULL AND p.location_name <> ''
+                WHERE {' AND '.join(named_filters)}
                 LIMIT 500
-            """, ig_ids)
+            """, *named_params)
             ig_place_names = [r["location_name"] for r in named]
+        if telegram_ids:
+            tg_filters = ["u.platform_user_id = ANY($1::text[])"]
+            tg_params: list = [telegram_ids]
+            if from_date:
+                tg_filters.append(f"m.platform_created_at >= ${len(tg_params) + 1}")
+                tg_params.append(from_date)
+            if to_date:
+                tg_filters.append(f"m.platform_created_at <= ${len(tg_params) + 1}")
+                tg_params.append(to_date)
+            loc_rows = await cc.fetch(f"""
+                SELECT l.latitude, l.longitude,
+                       COALESCE(NULLIF(l.venue_title, ''), NULLIF(l.venue_address, ''), LEFT(COALESCE(m.text, m.caption, ''), 120)) AS label,
+                       m.platform_created_at
+                FROM telegram_message_locations l
+                JOIN telegram_messages m ON m.platform_message_id = l.platform_message_id
+                JOIN telegram_users u ON u.id = m.sender_id
+                WHERE {' AND '.join(tg_filters)}
+                ORDER BY m.platform_created_at DESC NULLS LAST
+                LIMIT 200
+            """, *tg_params)
+            for row in loc_rows:
+                points.append({
+                    "lat": float(row["latitude"]),
+                    "lng": float(row["longitude"]),
+                    "label": row["label"],
+                    "source": "telegram",
+                    "occurred_at": row["platform_created_at"].isoformat() if row["platform_created_at"] else None,
+                })
 
     # Geocoded IG place-name pins (cache lives in the analyzer DB).
     if ig_place_names:
@@ -141,7 +209,7 @@ async def entity_geo(entity_id: str):
                 "SELECT place_name, lat, lng FROM geocode_cache "
                 "WHERE status = 'ok' AND place_name = ANY($1::text[])", ig_place_names)
         for g in geo:
-            points.append({"lat": g["lat"], "lng": g["lng"], "label": g["place_name"], "source": "instagram"})
+            points.append({"lat": g["lat"], "lng": g["lng"], "label": g["place_name"], "source": "instagram", "occurred_at": None})
 
     return {"routes": routes, "points": points,
             "counts": {"routes": len(routes), "points": len(points)}}

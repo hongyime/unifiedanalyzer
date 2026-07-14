@@ -469,12 +469,17 @@ export const api = {
     }>(`/entities/${entityId}/changelog`),
   markReviewed: (entityId: string) => post<{ ok: boolean }>(`/entities/${entityId}/mark-reviewed`),
 
-  getEntityGeo: (entityId: string) =>
-    get<{
-      routes: { name: string | null; type: string | null; date: string | null; points: [number, number][] }[]
-      points: { lat: number; lng: number; label: string | null; source: string }[]
+  getEntityGeo: (entityId: string, from?: string | null, to?: string | null) => {
+    const q = new URLSearchParams()
+    if (from) q.set('from', from)
+    if (to) q.set('to', to)
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return get<{
+      routes: { name: string | null; type: string | null; date: string | null; source: string; points: [number, number][] }[]
+      points: { lat: number; lng: number; label: string | null; source: string; occurred_at: string | null }[]
       counts: { routes: number; points: number }
-    }>(`/entities/${entityId}/geo`),
+    }>(`/entities/${entityId}/geo${suffix}`)
+  },
 
   getEntitySocialCircle: (entityId: string) =>
     get<{ associations: SocialCircleEntry[] }>(`/entities/${entityId}/social-circle`),
@@ -499,10 +504,12 @@ export const api = {
       total: number
     }>(`/entities/${entityId}/timeline-lanes`),
 
-  getTimeline: (entityId: string, page = 1, source = '', type = '') => {
+  getTimeline: (entityId: string, page = 1, source = '', type = '', from?: string | null, to?: string | null) => {
     let q = `/entities/${entityId}/timeline?page=${page}&per_page=50`
     if (source) q += `&source=${source}`
     if (type) q += `&type=${type}`
+    if (from) q += `&from=${encodeURIComponent(from)}`
+    if (to) q += `&to=${encodeURIComponent(to)}`
     return get<Paginated<TimelineEvent>>(q)
   },
 
@@ -558,8 +565,13 @@ export const api = {
   getRelationships: (entityId: string) =>
     get<{ data: Relationship[] }>(`/entities/${entityId}/relationships`),
 
-  getInteractions: (entityId: string) =>
-    get<{ data: InteractionPeer[] }>(`/entities/${entityId}/interactions`),
+  getInteractions: (entityId: string, from?: string | null, to?: string | null) => {
+    const q = new URLSearchParams()
+    if (from) q.set('from', from)
+    if (to) q.set('to', to)
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return get<{ data: InteractionPeer[] }>(`/entities/${entityId}/interactions${suffix}`)
+  },
 
   getGraphOverview: () => get<{
     total_relationships: number
