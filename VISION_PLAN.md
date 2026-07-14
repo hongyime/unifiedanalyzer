@@ -123,10 +123,17 @@ query` returning `record_id, occurred_at, title, entity_ref[, entity_ref2]`,
   `telegram_messages m ON m.id=message_id` to put target author + `emoji` +
   target `title` in `metadata`. `time_col`=`added_at`.
   *Accept:* `SELECT count(*) FROM timeline_events WHERE event_type='REACTION_GIVEN'` > 0; events show on reactor timelines. Notes 2026-07-14: filtered backfill runner completed with `REACTION_GIVEN=105082`, matching `telegram_reactions`.
-- [ ] **T1.2 Replies → `REPLIED`.** Source `telegram_messages` where
+- [x] **T1.2 Replies → `REPLIED`.** Source `telegram_messages` where
   `reply_to_message_id IS NOT NULL` (144,095): `entity_ref`=sender; self-join to
   the replied-to message for target author/preview in `metadata`.
-  *Accept:* reply events present; metadata carries the target.
+  *Accept:* reply events present; metadata carries the target. Notes 2026-07-15:
+  corrected the reply-parent join to use Telegram chat `platform_chat_id` plus the
+  bare `reply_to_message_id`, then repaired historical analyzer rows in place via
+  `dblink` from `unifiedcollector` -> `unifiedanalyzer`; live update touched
+  `133,679` rows. Post-repair counts:
+  `timeline_events.telegram/REPLIED total=133,767`, `with_target=93,184`,
+  `reply_repair_checked=108,767`, exact sample `1372604510:434` now carries
+  `target_platform_user_id=325199291`, `target_username=garethsome`.
 - [x] **T1.3 Comments → `COMMENT_POSTED`.** `instagram_comments`(6,567),
   `tiktok_comments`, `youtube_comments`, `strava_activity_comments`. `entity_ref`
   = comment author; post/owner in metadata.
@@ -148,6 +155,10 @@ query` returning `record_id, occurred_at, title, entity_ref[, entity_ref2]`,
   build (`docker exec unifiedanalyzer_analyzer python -m src.main full` or wait
   for scheduler); spot-check a rich entity's timeline is no longer Strava-only.
   *Accept:* `timeline_events` event_type variety ≥ 8 per active entity sample.
+  Notes 2026-07-15: live richest sample is currently `bryanseah234`
+  (`6c76d679-34d3-4da4-91f1-44e1c1a97b4e`) at `7` types:
+  `CODE_COMMIT, COMMENT_POSTED, FOLLOWED, MESSAGE_SENT, REACTION_GIVEN, REPLIED, STORY_POSTED`.
+  Box remains open.
 
 ## PHASE 2 — Directed interaction graph (the reciprocal vision)
 Goal: model "X did ACTION to Y", queryable both directions. `entity_relationships`

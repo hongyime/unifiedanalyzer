@@ -110,9 +110,9 @@ PLATFORM_QUERIES = [
                    )) AS metadata
             FROM telegram_messages m
             LEFT JOIN telegram_users actor ON actor.id = m.sender_id
+            LEFT JOIN telegram_chats chat ON chat.id = m.chat_id
             LEFT JOIN telegram_messages parent
-              ON parent.chat_id = m.chat_id
-             AND split_part(parent.platform_message_id, ':', 2) = m.reply_to_message_id
+              ON parent.platform_message_id = chat.platform_chat_id || ':' || m.reply_to_message_id
             LEFT JOIN telegram_users target ON target.id = parent.sender_id
             WHERE m.reply_to_message_id IS NOT NULL
               AND m.platform_created_at IS NOT NULL {where_clause}
@@ -663,3 +663,107 @@ def _jsonb_param(raw) -> str:
     if isinstance(raw, str):
         return raw
     return json.dumps(raw, default=str)
+
+
+async def repair_replied_metadata(batch_size: int = 2000, max_batches: int | None = None) -> dict:
+    analyzer = get_analyzer_pool()
+    collector = get_collector_pool()
+    stats = {"scanned": 0, "updated": 0, "resolved_targets": 0}
+    last_occurred_at = None
+    last_source_record_id = None
+    batches_run = 0
+
+    while True:
+        if max_batches is not None and batches_run >= max_batches:
+            break
+        async with analyzer.acquire() as aconn:
+            rows = await aconn.fetch(
+                """
+                SELECT source_record_id, occurred_at
+                FROM timeline_events
+                WHERE source = 'telegram'
+                  AND event_type = 'REPLIED'
+                  AND (
+                    $1::timestamptz IS NULL
+                    OR (occurred_at, source_record_id) < ($1::timestamptz, $2::text)
+                  )
+                ORDER BY occurred_at DESC, source_record_id DESC
+                LIMIT $3
+                """,
+                last_occurred_at,
+                last_source_record_id,
+                batch_size,
+                timeout=SOURCE_QUERY_TIMEOUT_SECONDS,
+            )
+        if not rows:
+            break
+
+        batch_ids = [row["source_record_id"] for row in rows]
+        updated, resolved = await _repair_replied_batch(batch_ids, collector, analyzer)
+        stats["scanned"] += len(batch_ids)
+        stats["updated"] += updated
+        stats["resolved_targets"] += resolved
+        last_occurred_at = rows[-1]["occurred_at"]
+        last_source_record_id = rows[-1]["source_record_id"]
+        batches_run += 1
+
+    logger.info("Replied metadata repair complete: %s", stats)
+    return stats
+
+
+async def _repair_replied_batch(
+    source_ids: list[str],
+    collector_pool,
+    analyzer_pool,
+) -> tuple[int, int]:
+    async with collector_pool.acquire() as cconn:
+        rows = await cconn.fetch(
+            """
+            SELECT m.platform_message_id,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'reply_to_message_id', m.reply_to_message_id,
+                       'target_platform_user_id', target.platform_user_id,
+                       'target_username', target.username,
+                       'target_preview', LEFT(COALESCE(parent.text, parent.caption, ''), 200),
+                       'reply_repair_checked', true,
+                       'reply_target_resolved', CASE
+                           WHEN target.platform_user_id IS NOT NULL OR target.username IS NOT NULL
+                           THEN true
+                           ELSE false
+                       END
+                   )) AS metadata,
+                   CASE WHEN target.platform_user_id IS NOT NULL OR target.username IS NOT NULL THEN 1 ELSE 0 END AS resolved
+            FROM telegram_messages m
+            LEFT JOIN telegram_chats chat ON chat.id = m.chat_id
+            LEFT JOIN telegram_messages parent
+              ON parent.platform_message_id = chat.platform_chat_id || ':' || m.reply_to_message_id
+            LEFT JOIN telegram_users target ON target.id = parent.sender_id
+            WHERE m.platform_message_id = ANY($1::text[])
+            """,
+            source_ids,
+            timeout=SOURCE_QUERY_TIMEOUT_SECONDS,
+        )
+    payloads = [(
+        row["platform_message_id"],
+        _jsonb_param(row["metadata"]),
+    ) for row in rows]
+    if not payloads:
+        return 0, 0
+    resolved = sum(int(row["resolved"] or 0) for row in rows)
+    async with analyzer_pool.acquire() as aconn:
+        result = await aconn.execute(
+            """
+            UPDATE timeline_events AS te
+            SET metadata = COALESCE(te.metadata, '{}'::jsonb) || payload.metadata
+            FROM unnest($1::text[], $2::jsonb[]) AS payload(source_record_id, metadata)
+            WHERE te.source = 'telegram'
+              AND te.event_type = 'REPLIED'
+              AND te.source_record_id = payload.source_record_id
+              AND te.metadata IS DISTINCT FROM (COALESCE(te.metadata, '{}'::jsonb) || payload.metadata)
+            """,
+            [row[0] for row in payloads],
+            [row[1] for row in payloads],
+            timeout=SOURCE_QUERY_TIMEOUT_SECONDS,
+        )
+    updated = int(result.split()[-1]) if result.startswith("UPDATE ") else 0
+    return updated, resolved

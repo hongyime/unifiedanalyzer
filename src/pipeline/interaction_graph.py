@@ -50,9 +50,9 @@ SOURCE_QUERIES = [
                    )) AS metadata
             FROM telegram_messages m
             LEFT JOIN telegram_users actor ON actor.id = m.sender_id
+            LEFT JOIN telegram_chats chat ON chat.id = m.chat_id
             LEFT JOIN telegram_messages parent
-              ON parent.chat_id = m.chat_id
-             AND split_part(parent.platform_message_id, ':', 2) = m.reply_to_message_id
+              ON parent.platform_message_id = chat.platform_chat_id || ':' || m.reply_to_message_id
             LEFT JOIN telegram_users target ON target.id = parent.sender_id
             WHERE m.reply_to_message_id IS NOT NULL
               AND m.platform_created_at IS NOT NULL {where_clause}
