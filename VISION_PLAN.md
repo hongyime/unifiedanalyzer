@@ -59,8 +59,56 @@ interactions.
 | Msg geo | `telegram_message_locations`(54)/`whatsapp_message_locations`(0) | thin | pipeline exists |
 | Strava GPS | `strava_activities` | 38,300 | on map ✅ |
 | Faces | facetracker + `mutual_social_face` rel | — | partial |
-| Stories | **not clearly separated** (`instagram_posts.media_type` = photo/carousel/video only) | ? | GAP — locate |
-| Likes | no table | 0 | GAP — assess collectability |
+| **Tagged photos** | `media_items` source=instagram `kind='tagged'` (entity_id, metadata.taken_at) | **33,806** (524 ents) | collected, NOT surfaced |
+| **Stories** | `media_items kind='story'` (metadata.taken_at) | **1,206** (373 ents) | collected, NOT in timeline |
+| **Highlights** | `media_items kind='highlight'` | **3,776** (47 ents) | collected, NOT in timeline |
+| IG posts (media) | `media_items kind='post'` | 80,749 | on media page |
+| Like COUNTS | `media_items.metadata->>'likes_count'` (per post/tagged/story) | present | aggregate only |
+| Individual likers | — (IG hides liker lists) | 0 | GAP — infeasible w/o auth |
+
+---
+
+## Execution sequence (recommended order for the coding agent)
+Dependency-ordered. Ship in this order; each step is independently
+verifiable/deployable. `→` = "unblocks".
+
+**START HERE ▶ Phase 1** (no new models, pure timeline blocks — same pattern as
+threads/x; delivers the biggest visible win from already-collected data).
+```
+P1 (saturate timeline)
+   T1.5 (IG geo metadata) ─────────────┐            (do early: also feeds T3.3)
+   T1.1 reactions · T1.2 replies ·      │
+   T1.3 comments · T1.4 follows ·       ├─→ T1.7 (full rebuild + verify)
+   T1.6 stories/highlights ─────────────┘
+        │
+        ▼
+P2 (directed interactions)              ← the reciprocal core
+   T2.1 entity_interactions model
+     → T2.2 builder (reactions/replies/comments/mentions/follows/tags/dms)
+        → T2.3 aggregate to relationships   → T2.4 API   → T2.5 frontend edges
+   (T4.2 tagged + T4.1 face-coappear FEED T2.2 — do them here, not later)
+        │
+        ▼
+P3 (unified scrubber)                   ← needs P1 data + P2 edges on screen
+   T3.1 master time-brush → T3.2 zoom → T3.3 fused map → T3.4 playback(opt)
+        │
+        ▼
+P5 (edge intelligence)                  ← ranks/weights what P2 produced
+   Quick wins first: T5.6 bio/link, T5.2 shared-route-origin, T5.4 group-size wt
+   Then: T5.1 co-presence, T5.3 chain-depth, T5.5 content-reuse,
+         T5.9 centrality, T5.10 explainable, T5.7 style, T5.8 silence
+Cross-cutting CC1/CC2/CC3 run alongside every phase.
+```
+**Rationale:** P1 is cheap + high-impact (unlocks 105k reactions + 144k replies +
+23k mentions + 34k tagged photos already on disk). P2 is the vision's heart but
+needs P1's normalized events. P3 is UX that needs P1+P2 data to be worth
+building. P5 is the intelligence layer that only makes sense once P2 edges exist.
+**T4.1/T4.2 are pulled UP into P2** (they are interaction sources, not an
+afterthought). **T4.3 is a no-op** (documented gap). Parallelizable: within P1
+all Txx are independent; P5 tasks are independent of each other.
+
+**Suggested milestones:** M1 = P1 done (timelines rich). M2 = P2 done (reciprocal
+interactions visible). M3 = P3 done (fused scrubber). M4 = P5 done (ranked edges).
 
 ---
 
@@ -90,11 +138,12 @@ query` returning `record_id, occurred_at, title, entity_ref[, entity_ref2]`,
   `location_lat` (4,512): ensure the existing IG post event puts
   `location_lat/lng/name` into `timeline_events.metadata` (needed by T3.3/geo).
   *Accept:* IG post events have geo in metadata.
-- [ ] **T1.6 Locate stories/highlights.** Extension captures stories/highlights
-  (per collector extension architecture). Find the table/flag (NOT obvious in
-  `instagram_posts.media_type`). If found → `STORY_POSTED` block. If not
-  collected → record as collection gap in the appendix.
-  *Accept:* written finding + event block if data exists.
+- [ ] **T1.6 Stories/highlights → `STORY_POSTED` / `HIGHLIGHT_POSTED`.**
+  RESOLVED: stories = `media_items` source=instagram `kind='story'` (1,206),
+  highlights `kind='highlight'` (3,776) — both fully entity-attributed
+  (`entity_id`), timestamp in `metadata->>'taken_at'` (unix). Add timeline blocks
+  keyed on `entity_id`; carry caption/likes_count in metadata.
+  *Accept:* story + highlight events on entity timelines.
 - [ ] **T1.7 Verify pipeline picks up new blocks.** After T1.1–1.6, run one full
   build (`docker exec unifiedanalyzer_analyzer python -m src.main full` or wait
   for scheduler); spot-check a rich entity's timeline is no longer Strava-only.
@@ -161,14 +210,21 @@ digital fused on the same axis.
   and a `PHOTO_COAPPEARANCE` timeline event on both entities, using media
   ownership (who posted) + face match. Confidence from face score.
   *Accept:* face-tag events on both entities' timelines.
-- [ ] **T4.2 Metadata @-tags/mentions → `tagged`/`mentioned`.** IG
-  `instagram_posts.mentions` (23,519) + any tagged-user metadata → resolve to
-  entities → interactions (feeds T2.2). Also caption `@handle` parse.
-  *Accept:* metadata-tag/mention edges present.
-- [ ] **T4.3 Likes feasibility.** No likes table. Assess per platform whether
-  likes are collectable (may be scrape/mobile-limited like lemon8 — see
-  `IDENTITY_KEYS.md`). Document; collect where viable (collector-side task).
-  *Accept:* written per-platform feasibility note.
+- [ ] **T4.2 Tagged photos + @-mentions → `tagged`/`mentioned` (both senses).**
+  (a) Metadata sense — RESOLVED: `media_items kind='tagged'` (**33,806**, 524
+  ents, `metadata.taken_at`) = photos an entity is tagged in by others → emit a
+  `TAGGED_IN` timeline event on the tagged entity AND a `tagged` interaction
+  (poster→tagged) once poster is resolvable from `source_url`/owner.
+  (b) `instagram_posts.mentions` (23,519) + caption `@handle` parse → `mentioned`
+  interactions (feeds T2.2).
+  *Accept:* tagged-photo events on timelines; tag/mention edges present.
+- [ ] **T4.3 Likes: counts yes, per-liker no.** RESOLVED: individual liker lists
+  are NOT collectable (IG hides them; scrape/mobile-limited like lemon8 — see
+  `IDENTITY_KEYS.md`). BUT `media_items.metadata->>'likes_count'` +
+  `comments_count`/`views_count` ARE present per post/tagged/story → use as an
+  **engagement metric** on the entity/media, not as like-edges. Document; no
+  per-liker collection task.
+  *Accept:* engagement counts surfaced on entity/media; gap documented.
 
 ## PHASE 5 — Edge & Relationship Intelligence (deepen the graph)
 Many of these already exist as `identity_signals`/`entity_relationships` but are
