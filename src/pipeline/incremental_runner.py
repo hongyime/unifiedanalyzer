@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from src.db.connection import get_analyzer_pool
 from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.beeper_bridge import bridge_beeper
+from src.pipeline.cross_source_signals import emit_cross_source_signals
 from src.pipeline.timeline_builder import build_timeline
 from src.pipeline.alert_engine import run_alerts
 from src.pipeline.behavioral_profiler import compute_behavioral_profiles
@@ -356,6 +357,10 @@ async def run_incremental() -> dict:
         beeper_stats = await bridge_beeper()
         stats["beeper_links"] = beeper_stats["totals"]["links_created"]
 
+        # SYNC #35: cross-source identity signals (tg<->wa phone, IG external_url).
+        xsrc_stats = await emit_cross_source_signals()
+        stats["xsrc_signals"] = xsrc_stats["rows"]
+
         timeline_stats = await build_timeline(since=since)
         stats["events"] = timeline_stats.get("inserted", 0)
 
@@ -453,6 +458,10 @@ async def run_full_resolution() -> dict:
         # full re-attribution rescan.
         beeper_stats = await bridge_beeper()
         stats["beeper_links"] = beeper_stats["totals"]["links_created"]
+
+        # SYNC #35: cross-source identity signals (tg<->wa phone, IG external_url).
+        xsrc_stats = await emit_cross_source_signals()
+        stats["xsrc_signals"] = xsrc_stats["rows"]
 
         # Full re-attribution rescan, but skip github: its ~7.3M commits are a
         # hard attribution ceiling (~6 tracked github entities) and dominate the
