@@ -250,6 +250,26 @@ CREATE TABLE IF NOT EXISTS entity_relationships (
 CREATE INDEX IF NOT EXISTS idx_relationships_a ON entity_relationships(entity_a_id);
 CREATE INDEX IF NOT EXISTS idx_relationships_b ON entity_relationships(entity_b_id);
 
+CREATE TABLE IF NOT EXISTS entity_interactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_entity_id UUID REFERENCES entities(id) ON DELETE CASCADE,
+    target_entity_id UUID REFERENCES entities(id) ON DELETE CASCADE,
+    interaction_type VARCHAR(50) NOT NULL,
+    source VARCHAR(30) NOT NULL,
+    source_record_id VARCHAR(255) NOT NULL,
+    occurred_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    weight INT NOT NULL DEFAULT 1,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (interaction_type, source, source_record_id)
+);
+CREATE INDEX IF NOT EXISTS idx_entity_interactions_actor_time
+    ON entity_interactions(actor_entity_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_entity_interactions_target_time
+    ON entity_interactions(target_entity_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_entity_interactions_type
+    ON entity_interactions(interaction_type, occurred_at DESC);
+
 -- Phase 6: media content analysis (see docs/media_analysis_plan.md).
 -- One row per (media_item_id, analysis_type). media_item_id references
 -- unifiedcollector.media_items.id by value (cross-database, no FK). For

@@ -7,6 +7,7 @@ import {
   EntityDetail,
   TimelineEvent,
   BehaviorProfile,
+  InteractionPeer,
   Relationship,
   IntelligenceReport,
   PlatformLink,
@@ -110,6 +111,7 @@ type TabKey =
   | 'timeline'
   | 'map'
   | 'behavior'
+  | 'interactions'
   | 'relationships'
   | 'social-circle'
   | 'intelligence'
@@ -131,6 +133,7 @@ export default function EntityDetailPage() {
   const [notes, setNotes] = useState('')
   const [mergeTarget, setMergeTarget] = useState('')
   const [relationships, setRelationships] = useState<Relationship[]>([])
+  const [interactions, setInteractions] = useState<InteractionPeer[]>([])
   const [actionMsg, setActionMsg] = useState('')
   const [cases, setCases] = useState<{ id: string; name: string }[]>([])
   const [pinCase, setPinCase] = useState('')
@@ -163,6 +166,11 @@ export default function EntityDetailPage() {
   useEffect(() => {
     if (!id || tab !== 'behavior') return
     api.getBehavior(id).then(setBehavior).catch(() => setBehavior(null))
+  }, [id, tab])
+
+  useEffect(() => {
+    if (!id || tab !== 'interactions') return
+    api.getInteractions(id).then(r => setInteractions(r.data)).catch(() => setInteractions([]))
   }, [id, tab])
 
   useEffect(() => {
@@ -386,6 +394,7 @@ export default function EntityDetailPage() {
     { key: 'timeline', label: 'Timeline' },
     { key: 'map', label: 'Map' },
     { key: 'behavior', label: 'Behavior' },
+    { key: 'interactions', label: 'Interactions' },
     { key: 'relationships', label: 'Relationships' },
     { key: 'social-circle', label: 'Social Circle' },
     { key: 'intelligence', label: 'Intelligence' },
@@ -915,6 +924,63 @@ export default function EntityDetailPage() {
             )}
           </div>
         )
+      )}
+
+      {/* ── Relationships ────────────────────────────────────────────── */}
+      {tab === 'interactions' && (
+        <div className="space-y-3">
+          {interactions.length === 0 ? (
+            <EmptyState
+              icon={<Users2 className="h-10 w-10" />}
+              title="No directed interactions yet"
+              description="Replies, reactions, follows, mentions, tags, and DMs will appear here once both sides resolve to tracked entities."
+            />
+          ) : (
+            <>
+              <Card>
+                <div className="mb-1 text-sm font-semibold">
+                  Directed interaction graph <span className="text-text-muted">(arrow = action direction)</span>
+                </div>
+                <NetworkGraph
+                  data={{
+                    center: { id: entity?.id || id || '', name: entity?.canonical_name || null, face: entity?.face_crop_url || null },
+                    nodes: interactions.map((item) => ({
+                      id: item.entity_id,
+                      name: item.name,
+                      face: item.face,
+                      weight: item.total,
+                      out: item.out,
+                      in: item.in,
+                    })),
+                  }}
+                />
+              </Card>
+              <Card title="Reciprocal summary">
+                <div className="space-y-2">
+                  {interactions.map((item) => (
+                    <div key={item.entity_id} className="flex items-start justify-between gap-3 rounded-lg border border-border px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <FaceAvatar url={item.face} name={item.name || item.entity_id} size={28} />
+                        <div>
+                          <Link to={`/entities/${item.entity_id}`} className="text-sm font-medium">
+                            {item.name || item.entity_id.slice(0, 8)}
+                          </Link>
+                          <div className="text-xs text-text-muted">
+                            out {item.out.total} | in {item.in.total}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="text-right text-xs text-text-muted">
+                        <div>out: {Object.entries(item.out.by_type).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}</div>
+                        <div>in: {Object.entries(item.in.by_type).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            </>
+          )}
+        </div>
       )}
 
       {/* ── Relationships ────────────────────────────────────────────── */}

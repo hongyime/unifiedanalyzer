@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Query
 
 from src.db.connection import get_analyzer_pool, get_collector_pool
@@ -317,6 +319,82 @@ async def get_relationships(entity_id: str):
             for r in rows
         ]
     }
+
+
+@router.get("/entities/{entity_id}/interactions")
+async def get_interactions(
+    entity_id: str,
+    from_date: datetime | None = Query(None, alias="from"),
+    to_date: datetime | None = Query(None, alias="to"),
+):
+    pool = get_analyzer_pool()
+    params: list = [entity_id]
+    conditions = []
+    idx = 2
+    if from_date:
+        conditions.append(f"occurred_at >= ${idx}")
+        params.append(from_date)
+        idx += 1
+    if to_date:
+        conditions.append(f"occurred_at <= ${idx}")
+        params.append(to_date)
+        idx += 1
+    where = ""
+    if conditions:
+        where = " AND " + " AND ".join(conditions)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            SELECT actor_entity_id::text AS actor_id,
+                   target_entity_id::text AS target_id,
+                   interaction_type,
+                   COUNT(*)::int AS n,
+                   MAX(occurred_at) AS last_ts
+            FROM entity_interactions
+            WHERE (actor_entity_id = $1::uuid OR target_entity_id = $1::uuid)
+              {where}
+            GROUP BY actor_entity_id, target_entity_id, interaction_type
+        """, *params)
+
+        peers: dict[str, dict] = {}
+        for row in rows:
+            is_out = row["actor_id"] == entity_id
+            peer_id = row["target_id"] if is_out else row["actor_id"]
+            peer = peers.setdefault(peer_id, {
+                "entity_id": peer_id,
+                "out": {"total": 0, "by_type": {}, "last_ts": None},
+                "in": {"total": 0, "by_type": {}, "last_ts": None},
+                "last_ts": None,
+            })
+            bucket = peer["out"] if is_out else peer["in"]
+            bucket["total"] += row["n"]
+            bucket["by_type"][row["interaction_type"]] = row["n"]
+            ts = row["last_ts"].isoformat() if row["last_ts"] else None
+            if ts and (bucket["last_ts"] is None or ts > bucket["last_ts"]):
+                bucket["last_ts"] = ts
+            if ts and (peer["last_ts"] is None or ts > peer["last_ts"]):
+                peer["last_ts"] = ts
+
+        ids = list(peers)
+        names = {}
+        if ids:
+            entity_rows = await conn.fetch(
+                "SELECT id::text AS id, canonical_name FROM entities WHERE id = ANY($1::uuid[])",
+                ids,
+            )
+            names = {row["id"]: row["canonical_name"] for row in entity_rows}
+            rep = await representative_faces(conn, ids)
+        else:
+            rep = {}
+
+    data = []
+    for peer_id, payload in peers.items():
+        payload["name"] = names.get(peer_id)
+        payload["face"] = face_crop_url(rep.get(peer_id))
+        payload["total"] = payload["out"]["total"] + payload["in"]["total"]
+        data.append(payload)
+    data.sort(key=lambda item: (-item["total"], item["name"] or item["entity_id"]))
+    return {"data": data}
 
 
 @router.get("/graph/overview")

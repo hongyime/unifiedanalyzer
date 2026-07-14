@@ -226,6 +226,24 @@ export interface Relationship {
   sources: Record<string, unknown>
 }
 
+export interface InteractionPeer {
+  entity_id: string
+  name: string | null
+  face: string | null
+  total: number
+  last_ts: string | null
+  out: {
+    total: number
+    by_type: Record<string, number>
+    last_ts: string | null
+  }
+  in: {
+    total: number
+    by_type: Record<string, number>
+    last_ts: string | null
+  }
+}
+
 export interface Community {
   community_id: string
   member_count: number
@@ -539,6 +557,9 @@ export const api = {
 
   getRelationships: (entityId: string) =>
     get<{ data: Relationship[] }>(`/entities/${entityId}/relationships`),
+
+  getInteractions: (entityId: string) =>
+    get<{ data: InteractionPeer[] }>(`/entities/${entityId}/interactions`),
 
   getGraphOverview: () => get<{
     total_relationships: number

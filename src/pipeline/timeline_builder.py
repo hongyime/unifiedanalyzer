@@ -7,6 +7,7 @@ from src.db.connection import get_analyzer_pool, get_collector_pool
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 5000
+SOURCE_QUERY_TIMEOUT_SECONDS = 1800
 
 # Bogus-timestamp floor. Source records occasionally carry epoch-0 (1970) or
 # clock-error dates (e.g. GitHub commits with a misconfigured author clock dated
@@ -109,7 +110,9 @@ PLATFORM_QUERIES = [
                    )) AS metadata
             FROM telegram_messages m
             LEFT JOIN telegram_users actor ON actor.id = m.sender_id
-            LEFT JOIN telegram_messages parent ON parent.platform_message_id = m.reply_to_message_id
+            LEFT JOIN telegram_messages parent
+              ON parent.chat_id = m.chat_id
+             AND split_part(parent.platform_message_id, ':', 2) = m.reply_to_message_id
             LEFT JOIN telegram_users target ON target.id = parent.sender_id
             WHERE m.reply_to_message_id IS NOT NULL
               AND m.platform_created_at IS NOT NULL {where_clause}
@@ -564,8 +567,7 @@ async def build_timeline(
         try:
             async with collector.acquire() as conn:
                 async with conn.transaction():
-                    stmt = await conn.prepare(query)
-                    cursor = stmt.cursor(*params)
+                    cursor = conn.cursor(query, *params, timeout=SOURCE_QUERY_TIMEOUT_SECONDS)
 
                     batch: list[tuple] = []
                     row_count = 0

@@ -9,6 +9,7 @@ from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.beeper_bridge import bridge_beeper
 from src.pipeline.cross_source_signals import emit_cross_source_signals
 from src.pipeline.timeline_builder import build_timeline
+from src.pipeline.interaction_graph import build_interaction_graph
 from src.pipeline.alert_engine import run_alerts
 from src.pipeline.behavioral_profiler import compute_behavioral_profiles
 from src.pipeline.group_graph import build_whatsapp_group_graph, build_telegram_group_graph
@@ -363,6 +364,8 @@ async def run_incremental() -> dict:
 
         timeline_stats = await build_timeline(since=since)
         stats["events"] = timeline_stats.get("inserted", 0)
+        interaction_stats = await build_interaction_graph(since=since)
+        stats["interactions"] = interaction_stats.get("inserted", 0)
 
         alert_stats = await run_alerts()
         stats["alerts"] = sum(alert_stats.values())
@@ -473,6 +476,8 @@ async def run_full_resolution() -> dict:
         skip_sources = {s.strip() for s in _skip.split(",") if s.strip()}
         timeline_stats = await build_timeline(since=None, skip_sources=skip_sources)
         stats["events"] = timeline_stats.get("inserted", 0)
+        interaction_stats = await build_interaction_graph(since=None)
+        stats["interactions"] = interaction_stats.get("inserted", 0)
 
         alert_stats = await run_alerts()
         stats["alerts"] = sum(alert_stats.values())
