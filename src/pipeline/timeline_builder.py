@@ -84,13 +84,18 @@ PLATFORM_QUERIES = [
         # phone_number is the fallback. Previously matched on u.name (display name),
         # which never matches a JID key — 0% of 50.7k whatsapp events were
         # attributed despite 637 whatsapp entities. (2026-07-10 attribution fix)
+        # @lid senders (group messages) have NULL phone_number -> the old
+        # phone||'@s.whatsapp.net' produced NULL and never attributed (~78% of wa
+        # msgs). Resolve @lid -> full phone JID via whatsapp_lid_map (lid=u.platform_user_id,
+        # phone_jid is already a full JID). COALESCE to the phone fallback. (SYNC #32)
         "query": """
             SELECT m.platform_message_id AS record_id, m.timestamp AS occurred_at,
                    LEFT(m.text, 200) AS title,
-                   (u.phone_number || '@s.whatsapp.net') AS entity_ref,
-                   u.phone_number AS entity_ref2
+                   COALESCE(lm.phone_jid, u.phone_number || '@s.whatsapp.net') AS entity_ref,
+                   COALESCE(split_part(lm.phone_jid, '@', 1), u.phone_number) AS entity_ref2
             FROM whatsapp_messages m
             LEFT JOIN whatsapp_users u ON m.sender_id = u.id
+            LEFT JOIN whatsapp_lid_map lm ON lm.lid = u.platform_user_id
             WHERE m.timestamp IS NOT NULL {where_clause}
             ORDER BY m.timestamp DESC
         """,
