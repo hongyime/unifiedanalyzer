@@ -176,7 +176,10 @@ async def load_platform_profiles() -> tuple[dict[str, list[PlatformProfile]], li
             ))
 
         for row in await conn.fetch(
-            "SELECT platform_user_id, username, first_name, last_name FROM telegram_users"
+            # SYNC #40: exclude bots — a shared bot contact is not identity
+            # evidence and can falsely merge unrelated people.
+            "SELECT platform_user_id, username, first_name, last_name FROM telegram_users "
+            "WHERE NOT COALESCE(is_bot, false)"
         ):
             name_parts = [row["first_name"] or "", row["last_name"] or ""]
             name = " ".join(p for p in name_parts if p).strip() or None

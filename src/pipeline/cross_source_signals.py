@@ -34,6 +34,26 @@ logger = logging.getLogger(__name__)
 EMITTER_TAG = "cross_source_signals_v1"
 PHONE_MATCH_CONFIDENCE = 45.0
 SHARED_WEBSITE_CONFIDENCE = 15.0
+WA_LINK_CONFIDENCE = 12.0
+
+# A link shared inside a 1:1 WhatsApp chat is only an IDENTITY signal if the
+# domain is an identity/social presence (self-disclosed linktree / handle) — a
+# news article shared in a chat is content, not identity, and must NOT become a
+# "this person's website" signal. Match by domain suffix.
+_IDENTITY_DOMAINS = (
+    "instagram.com", "threads.net", "linktr.ee", "linktree.com", "github.com",
+    "twitter.com", "x.com", "tiktok.com", "youtube.com", "youtu.be",
+    "facebook.com", "fb.com", "t.me", "telegram.me", "linkedin.com",
+    "beacons.ai", "snapchat.com", "onlyfans.com", "patreon.com",
+    "substack.com", "medium.com", "cash.app", "venmo.com", "paypal.me",
+)
+
+
+def _is_identity_domain(domain: str | None) -> bool:
+    if not domain:
+        return False
+    d = domain.lower().lstrip(".")
+    return any(d == id_ or d.endswith("." + id_) for id_ in _IDENTITY_DOMAINS)
 
 _DOMAIN_RE = re.compile(r"^(?:https?://)?(?:www\.)?([^/\s?#]+)", re.IGNORECASE)
 
@@ -64,7 +84,7 @@ async def emit_cross_source_signals() -> dict:
     #        source_column, source_record_id, target_platform, target_record_id,
     #        value, confidence)
     rows: list[tuple] = []
-    stats = {"phone_match": 0, "shared_website": 0}
+    stats = {"phone_match": 0, "shared_website": 0, "wa_link": 0}
 
     # ---- 1. telegram <-> whatsapp shared phone --------------------------------
     async with collector.acquire() as conn:
@@ -108,6 +128,32 @@ async def emit_cross_source_signals() -> dict:
                      "external_url", r["platform_user_id"], None, None,
                      dom or r["external_url"], SHARED_WEBSITE_CONFIDENCE))
         stats["shared_website"] += 1
+
+    # ---- 3. wa_discovered_links (1:1 person chat, identity domains only) ------
+    # message_id is unpopulated, so we attribute by the chat partner: a 1:1
+    # chat's platform_chat_id IS the other person's JID. Only real person JIDs
+    # (@s.whatsapp.net, not @newsletter/@g.us) and only identity domains, so
+    # news/content links never become identity signals.
+    async with collector.acquire() as conn:
+        wa_links = await conn.fetch(
+            """
+            SELECT DISTINCT c.platform_chat_id AS jid, l.domain
+            FROM wa_discovered_links l
+            JOIN whatsapp_chats c ON l.chat_id = c.id
+            WHERE c.platform_chat_id LIKE '%@s.whatsapp.net'
+              AND l.domain IS NOT NULL AND l.domain <> ''
+            """
+        )
+    for r in wa_links:
+        if not _is_identity_domain(r["domain"]):
+            continue
+        wa_e = links.get(("whatsapp", r["jid"]))
+        if not wa_e:
+            continue
+        rows.append((wa_e, "shared_website", "whatsapp", "wa_discovered_links",
+                     "domain", r["jid"], None, None, r["domain"].lower(),
+                     WA_LINK_CONFIDENCE))
+        stats["wa_link"] += 1
 
     # ---- persist (idempotent via EMITTER_TAG) --------------------------------
     async with analyzer.acquire() as conn:
