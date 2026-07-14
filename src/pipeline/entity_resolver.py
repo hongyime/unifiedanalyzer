@@ -268,6 +268,39 @@ async def load_platform_profiles() -> tuple[dict[str, list[PlatformProfile]], li
                 phone=phone,
             ))
 
+        # social_users is the broad cross-platform user index (usernames seen in
+        # comments / mentions / discovery, far beyond the primary profile tables).
+        # Feed only usernames that appear on >=2 DISTINCT platforms — that
+        # co-occurrence of the SAME handle is exactly the corroboration the
+        # resolver clusters on, extending SYNC #30 to the wider corpus (SYNC #33).
+        # platform_id follows each source's native key: threads/x key on the
+        # handle (like SYNC #30), everyone else on platform_user_id. Dedupes
+        # harmlessly with the primary loaders via clustering + link upsert.
+        _SU_SOURCES = {"instagram", "telegram", "youtube", "strava",
+                       "threads", "lemon8", "tiktok", "x"}
+        for row in await conn.fetch(
+            """
+            SELECT platform, platform_user_id, username, display_name
+            FROM social_users
+            WHERE username IS NOT NULL AND username <> ''
+              AND lower(username) IN (
+                SELECT lower(username) FROM social_users
+                WHERE username IS NOT NULL AND username <> ''
+                GROUP BY lower(username) HAVING count(DISTINCT platform) >= 2
+              )
+            """
+        ):
+            src = row["platform"]
+            if src not in _SU_SOURCES:
+                continue
+            pid = row["username"] if src in ("threads", "x") else row["platform_user_id"]
+            if not pid:
+                continue
+            profiles.append(PlatformProfile(
+                source=src, platform_id=str(pid),
+                username=row["username"], name=row["display_name"],
+            ))
+
     by_username: dict[str, list[PlatformProfile]] = {}
     no_username: list[PlatformProfile] = []
     for p in profiles:
@@ -801,10 +834,20 @@ async def resolve_entities() -> dict:
             """, insert_rows)
             stats["entities_created"] = len(insert_rows)
 
-        # Batch UPSERT all links in a single UNNEST query
+        # Batch UPSERT all links in a single UNNEST query. Dedupe by
+        # (source, platform_id): the same platform id can surface in >1 cluster
+        # (e.g. a social_users username variant, SYNC #33), and Postgres refuses
+        # an ON CONFLICT DO UPDATE that would hit the same target row twice in one
+        # command (CardinalityViolationError). Keep the first occurrence
+        # deterministically so a contested id lands on a single entity.
         eids, sources, pids, usernames, names, confs, confirmed = [], [], [], [], [], [], []
+        seen_link_keys: set[tuple[str, str]] = set()
         for candidate, eid, _, confidence, _, _, _, is_confirmed in resolved:
             for p in candidate.profiles:
+                key = (p.source, p.platform_id)
+                if key in seen_link_keys:
+                    continue
+                seen_link_keys.add(key)
                 eids.append(eid)
                 sources.append(p.source)
                 pids.append(p.platform_id)
