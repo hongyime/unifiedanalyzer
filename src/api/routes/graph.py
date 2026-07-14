@@ -8,6 +8,49 @@ from src.api.face_lookup import representative_faces, face_crop_url
 router = APIRouter(tags=["graph"])
 
 
+def _relationship_why(relationship_type: str, sources) -> str | None:
+    if isinstance(sources, str):
+        try:
+            import json as _json
+            sources = _json.loads(sources)
+        except Exception:
+            return None
+    if not isinstance(sources, dict):
+        return None
+
+    explicit = sources.get("why")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
+    if relationship_type == "interaction":
+        by_type = sources.get("by_type")
+        if isinstance(by_type, dict) and by_type:
+            pairs = sorted(by_type.items(), key=lambda item: (-int(item[1]), item[0]))
+            return "Directed interactions: " + ", ".join(f"{k} {v}" for k, v in pairs[:4])
+    if relationship_type == "social_graph_overlap":
+        shared = sources.get("shared")
+        jaccard = sources.get("jaccard")
+        if shared is not None and jaccard is not None:
+            return f"Shared-neighbour overlap: {shared} shared neighbours, jaccard {jaccard}."
+    if relationship_type in {"telegram_group_co_member", "whatsapp_group_co_member"}:
+        groups = sources.get("groups")
+        if isinstance(groups, list) and groups:
+            preview = ", ".join(str(g) for g in groups[:3])
+            more = "" if len(groups) <= 3 else f" (+{len(groups) - 3} more)"
+            return f"Shared group membership: {preview}{more}."
+    if relationship_type == "temporal_hour_similarity":
+        similarity = sources.get("similarity")
+        if similarity is not None:
+            return f"Hourly activity pattern similarity {similarity}."
+    if relationship_type == "same_person_probability":
+        score = sources.get("score")
+        signals = sources.get("contributing_signals")
+        if score is not None and isinstance(signals, list):
+            labels = [str(s.get("type")) for s in signals[:3] if isinstance(s, dict) and s.get("type")]
+            return f"Same-person probability {score} from {', '.join(labels) or 'multiple signals'}."
+    return None
+
+
 def _decode_polyline(s: str) -> list[list[float]]:
     """Decode a Google encoded polyline (strava summary_polyline) -> [[lat,lng]]."""
     points: list[list[float]] = []
@@ -326,7 +369,7 @@ async def entity_network(entity_id: str, limit: int = Query(30, ge=1, le=80)):
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT r.relationship_type, r.entity_a_id, r.entity_b_id, r.weight,
+            SELECT r.relationship_type, r.entity_a_id, r.entity_b_id, r.weight, r.sources,
                    ea.canonical_name AS name_a, eb.canonical_name AS name_b
             FROM entity_relationships r
             LEFT JOIN entities ea ON r.entity_a_id = ea.id
@@ -342,9 +385,12 @@ async def entity_network(entity_id: str, limit: int = Query(30, ge=1, le=80)):
                 oid, oname = str(r["entity_b_id"]), r["name_b"]
             else:
                 oid, oname = str(r["entity_a_id"]), r["name_a"]
-            n = neighbors.setdefault(oid, {"id": oid, "name": oname, "weight": 0, "types": set()})
+            n = neighbors.setdefault(oid, {"id": oid, "name": oname, "weight": 0, "types": set(), "why": None})
             n["weight"] = max(n["weight"], r["weight"] or 0)
             n["types"].add(r["relationship_type"])
+            why = _relationship_why(r["relationship_type"], r["sources"])
+            if why and (n["why"] is None or (r["weight"] or 0) >= n["weight"]):
+                n["why"] = why
 
         rep = await representative_faces(conn, list(neighbors) + [entity_id])
         center_name = await conn.fetchval("SELECT canonical_name FROM entities WHERE id=$1::uuid", entity_id)
@@ -353,7 +399,7 @@ async def entity_network(entity_id: str, limit: int = Query(30, ge=1, le=80)):
         "center": {"id": entity_id, "name": center_name, "face": face_crop_url(rep.get(entity_id))},
         "nodes": [
             {"id": n["id"], "name": n["name"], "weight": n["weight"],
-             "types": sorted(n["types"]), "face": face_crop_url(rep.get(n["id"]))}
+             "types": sorted(n["types"]), "face": face_crop_url(rep.get(n["id"])), "why": n["why"]}
             for n in sorted(neighbors.values(), key=lambda x: -x["weight"])
         ],
     }
@@ -383,6 +429,7 @@ async def get_relationships(entity_id: str):
                 "relationship_type": r["relationship_type"],
                 "weight": r["weight"],
                 "sources": r["sources"],
+                "why": _relationship_why(r["relationship_type"], r["sources"]),
             }
             for r in rows
         ]
@@ -475,28 +522,57 @@ async def graph_overview():
                    COUNT(*) FILTER (WHERE relationship_type = 'whatsapp_group_co_member') AS whatsapp_co_members
             FROM entity_relationships
         """)
+        type_counts = await conn.fetch("""
+            SELECT relationship_type, COUNT(*)::int AS n
+            FROM entity_relationships
+            GROUP BY relationship_type
+            ORDER BY n DESC, relationship_type
+        """)
 
         top = await conn.fetch("""
-            SELECT r.entity_a_id, r.entity_b_id, r.weight, r.relationship_type,
+            SELECT r.entity_a_id, r.entity_b_id, r.weight, r.relationship_type, r.sources,
                    ea.canonical_name AS name_a, eb.canonical_name AS name_b
             FROM entity_relationships r
             LEFT JOIN entities ea ON r.entity_a_id = ea.id
             LEFT JOIN entities eb ON r.entity_b_id = eb.id
             ORDER BY r.weight DESC LIMIT 20
         """)
+        bridges = await conn.fetch("""
+            SELECT bp.entity_id::text AS entity_id,
+                   e.canonical_name,
+                   COALESCE((bp.metadata->'graph_analytics'->>'betweenness')::double precision, 0) AS betweenness,
+                   COALESCE((bp.metadata->'graph_analytics'->>'degree')::int, 0) AS degree,
+                   COALESCE((bp.metadata->'graph_analytics'->>'strength')::int, 0) AS strength
+            FROM behavioral_profiles bp
+            JOIN entities e ON e.id = bp.entity_id
+            WHERE bp.metadata->'graph_analytics' IS NOT NULL
+            ORDER BY betweenness DESC, strength DESC, degree DESC
+            LIMIT 20
+        """)
 
     return {
         "total_relationships": stats["total_relationships"],
         "entities_in_graph": stats["entities_in_graph"],
         "whatsapp_co_members": stats["whatsapp_co_members"],
+        "relationship_type_counts": {r["relationship_type"]: r["n"] for r in type_counts},
         "top_connections": [
             {
                 "entity_a": {"id": str(r["entity_a_id"]), "name": r["name_a"]},
                 "entity_b": {"id": str(r["entity_b_id"]), "name": r["name_b"]},
                 "weight": r["weight"],
                 "type": r["relationship_type"],
+                "why": _relationship_why(r["relationship_type"], r["sources"]),
             }
             for r in top
+        ],
+        "top_bridges": [
+            {
+                "entity": {"id": r["entity_id"], "name": r["canonical_name"]},
+                "betweenness": r["betweenness"],
+                "degree": r["degree"],
+                "strength": r["strength"],
+            }
+            for r in bridges
         ],
     }
 

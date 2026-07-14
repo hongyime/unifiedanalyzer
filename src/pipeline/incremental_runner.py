@@ -25,6 +25,7 @@ from src.pipeline.content_fingerprint import fingerprint_content
 from src.pipeline.temporal_correlation import correlate_activity
 from src.pipeline.contact_extraction import extract_contacts
 from src.pipeline.route_similarity import analyze_route_similarity
+from src.pipeline.relationship_intelligence import refresh_relationship_intelligence
 from src.pipeline.media_analysis import (
     MEDIA_EXIF_BATCH_SIZE,
     MEDIA_PDF_IMAGE_BATCH_SIZE,
@@ -223,7 +224,6 @@ def _secondary_phases() -> list[tuple[str, object]]:
         # list) so the shared_life_context signal is visible to the scorer.
         ("entity_enrichment", enrich_entities_with_ner),
         ("shared_life_context", emit_shared_life_context_signals),
-        ("graph_analytics", compute_graph_analytics),
         ("graph_overlap", compute_graph_overlap),
         ("bio_mention", detect_bio_mentions),
         ("location_inference", infer_locations),
@@ -231,6 +231,8 @@ def _secondary_phases() -> list[tuple[str, object]]:
         ("temporal_correlation", correlate_activity),
         ("contact_extraction", extract_contacts),
         ("route_similarity", analyze_route_similarity),
+        ("relationship_intelligence", refresh_relationship_intelligence),
+        ("graph_analytics", compute_graph_analytics),
         ("media_pdf_text", lambda: analyze_media_pdf_text(limit=MEDIA_PDF_TEXT_BATCH_SIZE)),
         ("media_pdf_images", lambda: extract_pdf_images(limit=MEDIA_PDF_IMAGE_BATCH_SIZE)),
         ("media_video_frames", extract_video_frames),

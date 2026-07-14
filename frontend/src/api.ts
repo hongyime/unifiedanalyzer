@@ -224,6 +224,7 @@ export interface Relationship {
   relationship_type: string
   weight: number
   sources: Record<string, unknown>
+  why?: string | null
 }
 
 export interface InteractionPeer {
@@ -492,7 +493,7 @@ export const api = {
   getEntityNetwork: (entityId: string) =>
     get<{
       center: { id: string; name: string | null; face: string | null }
-      nodes: { id: string; name: string | null; weight: number; types: string[]; face: string | null }[]
+      nodes: { id: string; name: string | null; weight: number; types: string[]; face: string | null; why?: string | null }[]
     }>(`/entities/${entityId}/network`),
 
   getTimelineLanes: (entityId: string) =>
@@ -577,11 +578,19 @@ export const api = {
     total_relationships: number
     entities_in_graph: number
     whatsapp_co_members: number
+    relationship_type_counts: Record<string, number>
     top_connections: {
       entity_a: { id: string; name: string | null }
       entity_b: { id: string; name: string | null }
       weight: number
       type: string
+      why?: string | null
+    }[]
+    top_bridges: {
+      entity: { id: string; name: string | null }
+      betweenness: number
+      degree: number
+      strength: number
     }[]
   }>('/graph/overview'),
 

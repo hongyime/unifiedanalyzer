@@ -25,10 +25,12 @@ export function TimelineLanes({
   data,
   selectedRange,
   onRangeChange,
+  highlightedTimes,
 }: {
   data: Data
   selectedRange?: Range | null
   onRangeChange?: (range: Range | null) => void
+  highlightedTimes?: number[]
 }) {
   const { lanes, alerts, min_t, max_t } = data
   if (!min_t || !max_t || lanes.length === 0) {
@@ -85,6 +87,18 @@ export function TimelineLanes({
           <line key={i} x1={x(a.t)} y1={padT - 2} x2={x(a.t)} y2={H} stroke="#e0564a" strokeWidth={1} opacity={0.45}>
             <title>{a.type}</title>
           </line>
+        ))}
+        {(highlightedTimes || []).map((t, i) => (
+          <line
+            key={`hl-${i}-${t}`}
+            x1={x(t)}
+            y1={padT - 2}
+            x2={x(t)}
+            y2={H}
+            stroke="#22c55e"
+            strokeWidth={2}
+            opacity={0.65}
+          />
         ))}
         {lanes.map((lane, li) => {
           const y = padT + li * rowH + rowH / 2

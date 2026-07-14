@@ -19,14 +19,18 @@ import { LABELS } from '../lib/labels'
  */
 export default function CommunitiesPage() {
   const [communities, setCommunities] = useState<Community[]>([])
+  const [overview, setOverview] = useState<Awaited<ReturnType<typeof api.getGraphOverview>> | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   const load = () => {
     setLoading(true)
     setError('')
-    api.getCommunities()
-      .then(r => setCommunities(r.data))
+    Promise.all([api.getCommunities(), api.getGraphOverview()])
+      .then(([communityRes, overviewRes]) => {
+        setCommunities(communityRes.data)
+        setOverview(overviewRes)
+      })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
   }
@@ -58,6 +62,81 @@ export default function CommunitiesPage() {
         />
       ) : (
         <div className="space-y-3">
+          {overview && (
+            <>
+              <div className="grid gap-3 md:grid-cols-3">
+                <Card>
+                  <div className="text-xs text-text-muted">Relationships in graph</div>
+                  <div className="mt-1 text-2xl font-semibold">{overview.total_relationships.toLocaleString()}</div>
+                </Card>
+                <Card>
+                  <div className="text-xs text-text-muted">People connected</div>
+                  <div className="mt-1 text-2xl font-semibold">{overview.entities_in_graph.toLocaleString()}</div>
+                </Card>
+                <Card>
+                  <div className="text-xs text-text-muted">Top relationship type</div>
+                  <div className="mt-1 text-sm font-semibold">
+                    {Object.entries(overview.relationship_type_counts)[0]?.[0] || '—'}
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    {Object.entries(overview.relationship_type_counts)[0]?.[1]?.toLocaleString() || 0} edges
+                  </div>
+                </Card>
+              </div>
+
+              {overview.top_bridges.length > 0 && (
+                <Card>
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-sm font-semibold">Top bridge entities</span>
+                    <span className="text-xs text-text-muted">Highest betweenness centrality</span>
+                  </div>
+                  <div className="space-y-2">
+                    {overview.top_bridges.slice(0, 8).map((b, i) => (
+                      <div key={b.entity.id} className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2">
+                        <div>
+                          <div className="text-xs text-text-muted">#{i + 1}</div>
+                          <Link to={`/entities/${b.entity.id}`} className="text-sm font-medium">
+                            {b.entity.name || b.entity.id.slice(0, 8)}
+                          </Link>
+                        </div>
+                        <div className="text-right text-xs text-text-muted">
+                          <div>betweenness {b.betweenness.toFixed(4)}</div>
+                          <div>degree {b.degree} · strength {b.strength}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+              )}
+
+              {overview.top_connections.length > 0 && (
+                <Card>
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-sm font-semibold">Top explained edges</span>
+                    <span className="text-xs text-text-muted">Strongest relationships with reasons</span>
+                  </div>
+                  <div className="space-y-2">
+                    {overview.top_connections.slice(0, 8).map((edge, i) => (
+                      <div key={`${edge.entity_a.id}:${edge.entity_b.id}:${edge.type}:${i}`} className="rounded-lg border border-border px-3 py-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium">
+                            <Link to={`/entities/${edge.entity_a.id}`}>{edge.entity_a.name || edge.entity_a.id.slice(0, 8)}</Link>
+                            {' '}↔{' '}
+                            <Link to={`/entities/${edge.entity_b.id}`}>{edge.entity_b.name || edge.entity_b.id.slice(0, 8)}</Link>
+                          </div>
+                          <div className="text-xs text-text-muted">
+                            {edge.type} · {edge.weight}
+                          </div>
+                        </div>
+                        {edge.why && <div className="mt-1 text-xs text-text-muted">{edge.why}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+              )}
+            </>
+          )}
+
           {communities.map((c, i) => (
             <Card key={c.community_id}>
               <div className="mb-2 flex items-center justify-between">

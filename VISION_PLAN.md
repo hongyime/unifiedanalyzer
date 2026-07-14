@@ -232,7 +232,11 @@ digital fused on the same axis.
 - [ ] **T3.3 Fused map layer.** `GeoMap.tsx` renders Strava routes + IG geo-posts
   (4,512) + message-locations on one map, color-coded by source, time-filtered by
   the brush; clicking a pin cross-highlights the timeline event.
-  *Accept:* multi-source, time-filtered map with cross-highlight.
+  *Accept:* multi-source, time-filtered map with cross-highlight. Notes
+  2026-07-15: `/geo` now serves time-filtered Strava, Instagram, and Telegram
+  message-location points, and the map tab now wires point/route clicks back into
+  `TimelineLanes` as a highlighted timestamp. Frontend builds clean; box stays
+  open until that cross-highlight path is manually verified in-browser.
 - [ ] **T3.4 "Now-line" playback (optional).** A play button that sweeps the
   brush and animates map pins + graph edges appearing in temporal order.
   *Accept:* playback animates movement + interactions.
@@ -275,7 +279,10 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
 - [ ] **T5.2 Shared route origin → strong edge.** `route_similarity.py` /
   `shared_route_origin` signal currently ~0 rows. Compute Strava route
   start-coordinate clustering across entities → `shared_home_or_gym` edge (very
-  strong tie). *Accept:* edges where two entities share a start locus.
+  strong tie). *Accept:* edges where two entities share a start locus. Notes
+  2026-07-15: `relationship_intelligence.py` now promotes
+  `identity_signals.shared_route_origin` into `shared_home_or_gym` edges, but the
+  live analyzer currently has `shared_route_origin=0`, so no edges yet.
 - [ ] **T5.3 Reply/mention chain depth & reciprocity.** From `entity_interactions`
   (T2), weight edges by back-and-forth depth + reciprocity ratio + recency, not
   raw count. *Accept:* edge weight reflects conversation depth, not volume.
@@ -283,26 +290,48 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   `{telegram,whatsapp}_group_co_member` (96k rows) inversely by group size — 5
   shared small groups ≫ 1 giant broadcast. Add participant_count join.
   *Accept:* small-group co-members rank above big-group ones.
-- [ ] **T5.5 Content-fingerprint reuse → coordination edge.** Surface
+- [x] **T5.5 Content-fingerprint reuse → coordination edge.** Surface
   `content_similarity` (191) + same image sha256 / identical caption / shared
   link across entities as `content_reuse` edges (coordination or same-person).
-  *Accept:* content-reuse edges present + explainable.
-- [ ] **T5.6 Bio/link cross-refs → self-declared edge.** Surface `shared_website`
+  *Accept:* content-reuse edges present + explainable. Notes 2026-07-15:
+  `relationship_intelligence.py` now promotes `identity_signals.content_similarity`
+  into `entity_relationships.relationship_type='content_reuse'`; live refresh
+  produced `191` rows. Example live edge: `whatsapp:6588091286@s.whatsapp.net`
+  ↔ `whatsapp:6596357375@s.whatsapp.net`, weight `90`, sources explain
+  `"Their content fingerprints align across posts..."` with example
+  `cosine:1.000`.
+- [x] **T5.6 Bio/link cross-refs → self-declared edge.** Surface `shared_website`
   / `cross_platform_link` / `bio_mention` as explicit `self_declared_link` edges
-  in the graph (strong, human-authored). *Accept:* bio/link edges shown.
+  in the graph (strong, human-authored). *Accept:* bio/link edges shown. Notes
+  2026-07-15: `relationship_intelligence.py` now promotes these signals into
+  `entity_relationships.relationship_type='self_declared_link'`; live refresh
+  produced `12` rows. Example live edge: `bryanseah234` ↔
+  `SMU Foundations of Cybersecurity`, weight `35`, reason
+  `"Human-authored cross-reference in a bio, link, or personal website."`
 - [ ] **T5.7 Style/emoji/language fingerprint → soft same-person.** Per-entity
   writing-style vector (emoji freq, n-gram, avg length, language) → similarity
   edge as a soft same-person / affinity signal. *Accept:* style-similarity edges.
 - [ ] **T5.8 Silence correlation.** Entities whose active/quiet windows move
   together (same travel/timezone shifts) → `co_absence` edge. *Accept:* edges
   from correlated silence.
-- [ ] **T5.9 Bridge/centrality scoring.** `graph_analytics.py` — compute
+- [x] **T5.9 Bridge/centrality scoring.** `graph_analytics.py` — compute
   betweenness/degree; flag entities bridging separate clusters as key targets;
   expose on entity page + `/graph/overview`. *Accept:* centrality scores stored +
-  surfaced; bridges highlighted.
-- [ ] **T5.10 Explainable edge weights.** Every edge carries a human-readable
+  surfaced; bridges highlighted. Notes 2026-07-15: `behavioral_profiles`
+  currently has `metadata.graph_analytics` on `1761` rows and `community_id` on
+  the same set. `/api/graph/overview` now returns `top_bridges`; live top bridge
+  sample is `@fullofsarahtonin` with `betweenness=0.000493`, `degree=20`,
+  `strength=27`. Entity pages already surface degree/strength/betweenness.
+- [x] **T5.10 Explainable edge weights.** Every edge carries a human-readable
   "why" (which signals + counts) in `sources` jsonb, shown on hover.
-  *Accept:* hovering any edge explains its basis.
+  *Accept:* hovering any edge explains its basis. Notes 2026-07-15:
+  `/entities/{id}/relationships`, `/entities/{id}/network`, and
+  `/graph/overview` now emit `why` strings derived from `sources` for
+  interactions, social-graph overlap, temporal similarity, same-person
+  probability, group co-membership, self-declared-link, and content-reuse edges.
+  Live example from `/api/entities/0ca8cece-1a64-4112-bcee-2cf1b4a5a00f/relationships`:
+  `telegram_group_co_member` now explains
+  `"Shared group membership: IS KEBAB JIEJIE OPEN??, SMU .Hack Members 👾, SMU_IS (+5 more)."`
 
 ## Cross-cutting
 - [ ] **CC1 Sparse-entity UX.** Every entity (sparse→rich) renders gracefully;

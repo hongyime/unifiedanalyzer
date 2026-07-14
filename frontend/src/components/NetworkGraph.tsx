@@ -14,6 +14,7 @@ type Net = {
     weight?: number
     types?: string[]
     face: string | null
+    why?: string | null
     out?: { total: number; by_type: Record<string, number>; last_ts: string | null }
     in?: { total: number; by_type: Record<string, number>; last_ts: string | null }
   }[]
@@ -45,10 +46,12 @@ export function NetworkGraph({ data }: { data: Net }) {
     Object.entries(counts || {}).sort((a, b) => b[1] - a[1])[0]?.[0] || 'interaction'
   const edgeColor = (kind?: string) => TYPE_COLORS[kind || 'interaction'] || 'var(--color-border, #2a2a33)'
   const tooltip = (n: Net['nodes'][number]) => {
-    if (!n.out && !n.in) return `${n.name || n.id}\n${(n.types || []).join(', ')}`
+    if (!n.out && !n.in) {
+      return `${n.name || n.id}\n${(n.types || []).join(', ')}${n.why ? `\n${n.why}` : ''}`
+    }
     const outText = Object.entries(n.out?.by_type || {}).map(([k, v]) => `${k}:${v}`).join(', ') || 'none'
     const inText = Object.entries(n.in?.by_type || {}).map(([k, v]) => `${k}:${v}`).join(', ') || 'none'
-    return `${n.name || n.id}\nout: ${outText}\nin: ${inText}`
+    return `${n.name || n.id}\nout: ${outText}\nin: ${inText}${n.why ? `\n${n.why}` : ''}`
   }
   const offsetLine = (x1: number, y1: number, x2: number, y2: number, delta: number) => {
     const dx = x2 - x1

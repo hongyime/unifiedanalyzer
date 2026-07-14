@@ -142,8 +142,10 @@ export default function EntityDetailPage() {
   const [cases, setCases] = useState<{ id: string; name: string }[]>([])
   const [pinCase, setPinCase] = useState('')
   const [brushRange, setBrushRange] = useState<[number, number] | null>(null)
+  const [selectedGeoEvent, setSelectedGeoEvent] = useState<{ label: string | null; source: string; occurred_at: string | null } | null>(null)
   useEffect(() => { api.getCases().then(d => setCases(d.cases)).catch(() => {}) }, [])
   useEffect(() => { setBrushRange(null) }, [id])
+  useEffect(() => { setSelectedGeoEvent(null) }, [id, tab])
 
   useEffect(() => {
     if (!id) return
@@ -393,12 +395,13 @@ export default function EntityDetailPage() {
       cell: ({ row }) => <span className="font-mono tabular-nums text-sm">{row.original.weight}</span>,
     },
     {
-      id: 'details',
-      header: 'Details',
+      id: 'why',
+      header: 'Why',
       cell: ({ row }) => {
         const s = row.original.sources
         const groups = s && typeof s === 'object' && 'groups' in s ? (s as { groups: string[] }).groups : []
-        return <span className="text-xs text-text-muted">{groups.join(', ')}</span>
+        const text = row.original.why || groups.join(', ') || '—'
+        return <span className="block max-w-[360px] text-xs text-text-muted">{text}</span>
       },
     },
   ], [])
@@ -713,7 +716,12 @@ export default function EntityDetailPage() {
                 <div className="text-sm font-semibold">Activity across platforms</div>
                 <div className="text-xs text-text-muted">{lanes.total.toLocaleString()} events</div>
               </div>
-              <TimelineLanes data={lanes} selectedRange={brushRange} onRangeChange={setBrushRange} />
+              <TimelineLanes
+                data={lanes}
+                selectedRange={brushRange}
+                onRangeChange={setBrushRange}
+                highlightedTimes={selectedGeoEvent?.occurred_at ? [new Date(selectedGeoEvent.occurred_at).getTime() / 1000] : undefined}
+              />
             </Card>
           )}
           {events.length === 0 ? (
@@ -776,10 +784,25 @@ export default function EntityDetailPage() {
             </div>
             {lanes && lanes.total > 0 && (
               <div className="mb-3">
-                <TimelineLanes data={lanes} selectedRange={brushRange} onRangeChange={setBrushRange} />
+                <TimelineLanes
+                  data={lanes}
+                  selectedRange={brushRange}
+                  onRangeChange={setBrushRange}
+                  highlightedTimes={selectedGeoEvent?.occurred_at ? [new Date(selectedGeoEvent.occurred_at).getTime() / 1000] : undefined}
+                />
               </div>
             )}
-            <GeoMap data={geo} />
+            <GeoMap data={geo} onEventSelect={setSelectedGeoEvent} />
+            {selectedGeoEvent && (
+              <div className="mt-3 rounded-lg border border-border bg-hover px-3 py-2 text-sm">
+                <div className="font-medium">Selected map event</div>
+                <div className="text-text-muted">
+                  {selectedGeoEvent.source}
+                  {selectedGeoEvent.label ? ` · ${selectedGeoEvent.label}` : ''}
+                  {selectedGeoEvent.occurred_at ? ` · ${formatDate(selectedGeoEvent.occurred_at)}` : ''}
+                </div>
+              </div>
+            )}
           </Card>
         ) : (
           <EmptyState
