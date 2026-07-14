@@ -172,7 +172,9 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
 
     from src.face.engine.detector import FaceDetector
     from src.face.storage.database import Image as FtImage, Face as FtFace
-    from src.pipeline.media_common import resolve_media_path
+    from src.pipeline.media_common import (
+        resolve_media_path, _MEDIA_CONFINEMENT_ROOT, MEDIA_DERIVED_PATH,
+    )
 
     stats = {"scanned": 0, "images_indexed": 0, "faces": 0, "linked": 0, "skipped": 0}
 
@@ -223,6 +225,32 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
     detector = None
     Session = sessionmaker(bind=analyzer_engine)
 
+    # #36: tombstone genuinely-missing/unreadable files so they aren't re-scanned
+    # every tick (e.g. the ~150 lemon8 images lost when Z was reformatted retried
+    # forever). We only tombstone when the media ROOT is mounted — if the whole
+    # root is absent the drive is merely offline and the files may return, so we
+    # skip without tombstoning ("graceful offline"). Checked once per call, not
+    # per-file, to avoid stat spam.
+    media_root_online = _MEDIA_CONFINEMENT_ROOT.exists()
+    derived_root_online = MEDIA_DERIVED_PATH.exists()
+    stats["tombstoned"] = 0
+
+    def _tombstone(file_path: str, file_hash: str, reason: str) -> None:
+        s = Session()
+        try:
+            s.add(FtImage(
+                file_path=file_path, file_hash=file_hash, file_size=0,
+                file_mtime=0.0, width=0, height=0, status="missing",
+                is_video=False, face_count=0,
+            ))
+            s.commit()
+            stats["tombstoned"] += 1
+        except Exception:
+            s.rollback()  # already tombstoned/indexed — fine
+        finally:
+            s.close()
+        done.add(file_path)
+
     for r in rows:
         if stats["images_indexed"] >= limit:
             break
@@ -232,10 +260,16 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
         disk = resolve_media_path(r.file_path)
         if disk is None:
             stats["skipped"] += 1
+            # Root mounted but file absent => genuinely gone: tombstone. Root
+            # missing => drive offline: skip, retry when it returns.
+            root_online = derived_root_online if "media_derived" in r.file_path else media_root_online
+            if root_online:
+                _tombstone(r.file_path, r.id, "file_gone")
             continue
         img = cv2.imread(str(disk))
         if img is None:
             stats["skipped"] += 1
+            _tombstone(r.file_path, r.id, "unreadable")  # drive present, file corrupt
             continue
 
         # Lazy-init detector (downloads model on first use; keep off the path
