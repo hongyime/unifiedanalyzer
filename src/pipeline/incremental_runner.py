@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from src.db.connection import get_analyzer_pool
 from src.pipeline.entity_resolver import resolve_entities
+from src.pipeline.beeper_bridge import bridge_beeper
 from src.pipeline.timeline_builder import build_timeline
 from src.pipeline.alert_engine import run_alerts
 from src.pipeline.behavioral_profiler import compute_behavioral_profiles
@@ -350,6 +351,11 @@ async def run_incremental() -> dict:
         stats["entities"] = resolver_stats.get("entities", 0)
         stats["signals"] = resolver_stats.get("signals", 0)
 
+        # SYNC #31: bridge beeper native ids into native-source links BEFORE
+        # timeline attribution so beeper messages attribute to those entities.
+        beeper_stats = await bridge_beeper()
+        stats["beeper_links"] = beeper_stats["totals"]["links_created"]
+
         timeline_stats = await build_timeline(since=since)
         stats["events"] = timeline_stats.get("inserted", 0)
 
@@ -442,6 +448,11 @@ async def run_full_resolution() -> dict:
         resolver_stats = await resolve_entities()
         stats["entities"] = resolver_stats.get("entities", 0)
         stats["signals"] = resolver_stats.get("signals", 0)
+
+        # SYNC #31: bridge beeper native ids into native-source links before the
+        # full re-attribution rescan.
+        beeper_stats = await bridge_beeper()
+        stats["beeper_links"] = beeper_stats["totals"]["links_created"]
 
         # Full re-attribution rescan, but skip github: its ~7.3M commits are a
         # hard attribution ceiling (~6 tracked github entities) and dominate the
