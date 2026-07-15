@@ -53,11 +53,25 @@
 (of 1,421 GPS athletes), entity_faces 52. The GAP-4 pattern (create entities for
 sources with substantive collected content) applied to **strava GPS athletes** and
 broader **face→entity attribution** would auto-light both. Plus:
-- [ ] **IG `profile_id` NULL backfill (broad)** — GAP-4 repaired 4,202 geo posts;
-  **~19,317 non-geo IG posts still have NULL `profile_id`** → invisible in IG
-  timelines. Same `platform_post_id` split repairs them (safe/idempotent). ROOT:
-  the IG collector inserts NULL `profile_id` — fix collector-side too.
-- [ ] **Broaden strava/face entity resolution** to unblock T5.2 + T4.1.
+- [x] **IG `profile_id` NULL backfill (broad)** — DONE (gap-round-2, collector
+  commit `scripts/backfill_instagram_post_profile_id.py`). Repaired **17,245** of
+  the 19,317 NULL posts; NULL dropped **19,317 → 2,072**. The 2,072 remaining are
+  genuinely unrecoverable (1,370 bare media ids with no embedded uid, 702 uids
+  whose author profile was never collected). Attributed IG posts rose to 21,483
+  across 629 profiles. ROOT fixed collector-side too: `src/bridges/ig_ingest.py`
+  (primary path, 22,149/23,555 posts) omitted `profile_id` entirely →
+  resolve/create profile from embedded uid + set FK at insert; and
+  `src/collectors/instagram/__init__.py::_upsert_post` now stubs the profile when
+  missing. New posts land with non-null `profile_id` (verified in-container).
+- [x] **Broaden strava entity resolution** to unblock T5.2 — DONE (gap-round-2,
+  analyzer `src/pipeline/strava_athlete_resolver.py`). New "create-entity-if-
+  content" resolver mirrors ig_geo: mints an entity+link for every strava_athlete
+  with ≥1 collected activity. strava `entity_platform_links` **72 → 2,102**;
+  `route_similarity` entities_with_gps **12 → 1,424**, shared_route_origin
+  **0 → 117**; relationship_intelligence `shared_home_or_gym` **0 → 117 edges**.
+  Verified a real shared-locus pair (athletes 57893490 & 65381812 both start >10
+  activities from the same ~111m cell 1.336,103.672). (face T4.1 still upstream-
+  starved — separate track, untouched here.)
 
 ## Goal
 Turn `unifiedanalyzer` into a targeted-OSINT subject profiler: pick ANY entity
@@ -372,19 +386,17 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   in `sources`. Live rerun produced `co_presence=136`. Example top row carries
   `weight=135`, `coincident_events=35`, `copresence_days=8`, and reason
   `"Repeated activity within a sub-minute window suggests tight co-presence."`
-- [ ] **T5.2 Shared route origin → strong edge.** `route_similarity.py` /
-  `shared_route_origin` signal currently ~0 rows. Compute Strava route
-  start-coordinate clustering across entities → `shared_home_or_gym` edge (very
-  strong tie). *Accept:* edges where two entities share a start locus. Notes
-  2026-07-15: `relationship_intelligence.py` now promotes
-  `identity_signals.shared_route_origin` into `shared_home_or_gym` edges, but the
-  live analyzer currently has `shared_route_origin=0`, so no edges yet. Latest
-  rerun still reports `entities_with_gps=12` and `shared_route_origin_signals=0`.
-  Follow-up audit using a broader 250m recurring-cluster model over
-  `start_latlng` still found `pair_hits<=1km = 0`, and the collector has
-  `start_latlng_full = 0` for all Strava activities, so there is no stronger
-  in-repo coordinate source available today to manufacture real shared-origin
-  edges without inventing noise.
+- [x] **T5.2 Shared route origin → strong edge.** RESOLVED (gap-round-2). The
+  pipeline was already correct; the blocker was thin strava entity-resolution
+  COVERAGE (only 72 of 1,424 GPS athletes linked). `strava_athlete_resolver.py`
+  now mints entities for all athletes with collected activities, so
+  `route_similarity.py` sees the full GPS corpus: entities_with_gps **12 → 1,424**,
+  shared_route_origin signals **0 → 117**, and `relationship_intelligence.py`
+  promoted them into **117 `shared_home_or_gym` edges** (was 0). Proven with real
+  (non-synthetic) data: athletes 57893490 & 65381812 both recurrently start from
+  the same ~111m cell (1.336,103.672) — 11 and 42 starts respectively — passing
+  the public-location fan-out guard. *Accept met:* edges where two entities share
+  a start locus now exist and are verifiable end-to-end.
 - [x] **T5.3 Reply/mention chain depth & reciprocity.** From `entity_interactions`
   (T2), weight edges by back-and-forth depth + reciprocity ratio + recency, not
   raw count. *Accept:* edge weight reflects conversation depth, not volume.
