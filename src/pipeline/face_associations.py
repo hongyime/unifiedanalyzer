@@ -53,6 +53,16 @@ _MAX_MEDIA = int(os.getenv("FACE_ASSOCIATIONS_MAX_MEDIA", "2000"))
 # successful pass. Mirrors face_clustering._last_face_count.
 _last_face_count = -1
 
+# Media-ownership attribution methods that count as "entity A owns this media".
+# `media_attribution` is the inline ingest path (face_worker line ~317);
+# `media_attribution_relink` is the bulk backfill path (face_worker line ~708).
+# Both mean the same thing — a media_item owned by the entity whose faces were
+# linked — so BOTH must be honoured here, otherwise the builder silently drops
+# every relinked (backfilled) attribution and starves social_face_link. The
+# earlier `= 'media_attribution'` filter excluded the relink rows, which are the
+# bulk of the corpus today.
+_ATTRIBUTION_METHODS = ("media_attribution", "media_attribution_relink")
+
 
 def _normalize_embedding(emb_text: str) -> "np.ndarray | None":
     """Parse a pgvector-text embedding into a unit-norm float32 vector.
@@ -68,8 +78,9 @@ async def _resolve_primary_faces() -> dict[str, tuple[int, "np.ndarray"]]:
     """Resolve each entity's primary_face_id and persist to entities. Returns
     {entity_id_text: (face_id, normalized_embedding)}.
 
-    Priority 1: face bridged via entity_faces (method='media_attribution') from
-    a media_items where content_type='profile_photo', highest quality first.
+    Priority 1: face bridged via entity_faces (method in media_attribution /
+    media_attribution_relink) from a media_items where
+    content_type='profile_photo', highest quality first.
     Fallback: highest-quality face in the entity's LARGEST bridged cluster.
     """
     analyzer = get_analyzer_pool()
@@ -96,11 +107,11 @@ async def _resolve_primary_faces() -> dict[str, tuple[int, "np.ndarray"]]:
                        f.embedding_vec::text AS emb
                 FROM public.entity_faces ef
                 JOIN facetracker.faces f ON f.id = ef.face_id
-                WHERE ef.method = 'media_attribution'
+                WHERE ef.method = ANY($2::text[])
                   AND ef.media_item_id = ANY($1::text[])
                   AND f.embedding_vec IS NOT NULL
                 ORDER BY ef.entity_id, f.quality_score DESC NULLS LAST
-            """, profile_photo_ids)
+            """, profile_photo_ids, list(_ATTRIBUTION_METHODS))
             for r in rows:
                 primary[r["entity_id"]] = (int(r["face_id"]), r["emb"])
 
@@ -171,8 +182,8 @@ async def _resolve_primary_faces() -> dict[str, tuple[int, "np.ndarray"]]:
 async def _fetch_owned_multiface_media(
     entity_ids: list[str],
 ) -> list[dict]:
-    """Owned collector media (via method='media_attribution') where the source
-    image has face_count >= 2. Distinct (entity_id, media_item_id, image_id)
+    """Owned collector media (via media_attribution / media_attribution_relink)
+    where the source image has face_count >= 2. Distinct (entity_id, media_item_id, image_id)
     triples — one entity typically owns one media, but the query tolerates the
     edge case of multiple bridged entities per media (each processed once).
     Bounded by _MAX_MEDIA; the next pass picks up the rest."""
@@ -186,12 +197,12 @@ async def _fetch_owned_multiface_media(
             FROM public.entity_faces ef
             JOIN facetracker.faces f  ON f.id = ef.face_id
             JOIN facetracker.images i ON i.id = f.image_id
-            WHERE ef.method = 'media_attribution'
+            WHERE ef.method = ANY($3::text[])
               AND ef.entity_id = ANY($1::uuid[])
               AND ef.media_item_id IS NOT NULL
               AND i.face_count >= 2
             LIMIT $2
-        """, entity_ids, _MAX_MEDIA)
+        """, entity_ids, _MAX_MEDIA, list(_ATTRIBUTION_METHODS))
     return [dict(r) for r in rows]
 
 
