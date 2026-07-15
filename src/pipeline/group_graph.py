@@ -9,10 +9,31 @@ logger = logging.getLogger(__name__)
 
 def _group_weight(member_count: int) -> float:
     """Small groups should dominate the score; giant rooms should contribute
-    little. 2 members = 1.0, 10 members = 0.1, capped away from zero."""
+    little. 2 members = 1.0, 10 members = 0.1, capped away from zero.
+
+    GAP-3 (T5.4): `member_count` here is the group's BEST-KNOWN true size —
+    `_effective_group_size()` prefers the collector's real participant/members
+    count and only falls back to the count of members we actually collected.
+    Weighting by the collected count alone made a 12k-person broadcast channel
+    where we happened to sample 7 senders look like a tight 7-person group
+    (weight 1/6) and hugely over-reward that co-membership; the true-size join
+    correctly collapses it to ~1/12500."""
     if member_count <= 1:
         return 0.0
     return 1.0 / (member_count - 1)
+
+
+def _effective_group_size(true_size: int | None, tracked_count: int) -> int:
+    """Best-available group size for weighting. Prefer the collector's real
+    participant/members count (`telegram_chats.members_count` /
+    `whatsapp_chats.participant_count`) when it is present and non-zero AND at
+    least as large as what we collected; otherwise fall back to the count of
+    members we actually observed. Guarding on `>= tracked_count` protects
+    against a stale/under-reported true count that would paradoxically inflate
+    a group's weight below its known membership."""
+    if true_size and true_size >= tracked_count:
+        return true_size
+    return tracked_count
 
 
 async def build_whatsapp_group_graph() -> dict:
@@ -22,6 +43,7 @@ async def build_whatsapp_group_graph() -> dict:
     async with collector.acquire() as conn:
         rows = await conn.fetch("""
             SELECT c.id AS chat_id, c.name AS chat_name,
+                   c.participant_count AS true_size,
                    m.sender_id, u.platform_user_id, u.name AS user_name
             FROM whatsapp_messages m
             JOIN whatsapp_chats c ON m.chat_id = c.id
@@ -38,6 +60,7 @@ async def build_whatsapp_group_graph() -> dict:
 
     groups: dict[str, set[str]] = defaultdict(set)
     group_names: dict[str, str] = {}
+    group_true_size: dict[str, int | None] = {}
 
     for r in rows:
         chat_id = str(r["chat_id"])
@@ -46,6 +69,7 @@ async def build_whatsapp_group_graph() -> dict:
             puid = lid_map.get(puid, puid)
         groups[chat_id].add(puid)
         group_names[chat_id] = r["chat_name"] or chat_id
+        group_true_size[chat_id] = r["true_size"]
 
     entity_lookup: dict[str, str] = {}
     async with analyzer.acquire() as conn:
@@ -58,7 +82,11 @@ async def build_whatsapp_group_graph() -> dict:
     pair_weights: dict[tuple[str, str], list[dict]] = {}
     for chat_id, members in groups.items():
         entity_members = sorted({entity_lookup[p] for p in members if p in entity_lookup})
-        group_size = len(members)
+        # GAP-3: weight by the group's BEST-KNOWN true size, not the count of
+        # members we happened to collect. `len(members)` under-counts large
+        # broadcast rooms (we only sample active senders), which used to
+        # over-reward co-membership there; prefer participant_count when present.
+        group_size = _effective_group_size(group_true_size.get(chat_id), len(members))
         for i, a in enumerate(entity_members):
             for b in entity_members[i + 1:]:
                 pair = (a, b)
@@ -105,7 +133,7 @@ async def build_whatsapp_group_graph() -> dict:
                 "group_sizes": {group["name"]: group["size"] for group in shared_groups},
                 "weighted_total": round(weighted, 4),
                 "shared_group_count": len(shared_groups),
-                "why": "Shared smaller groups contribute more weight than large groups.",
+                "why": "Shared smaller groups contribute more weight than large groups (weighted by true group size).",
             }))
             stats["relationships"] += 1
 
@@ -141,7 +169,8 @@ async def build_telegram_group_graph() -> dict:
 
     async with collector.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT m.chat_id, c.title AS chat_title, u.platform_user_id
+            SELECT m.chat_id, c.title AS chat_title,
+                   c.members_count AS true_size, u.platform_user_id
             FROM telegram_chat_members m
             JOIN telegram_chats c ON m.chat_id = c.id
             JOIN telegram_users u ON m.user_id = u.id
@@ -150,11 +179,13 @@ async def build_telegram_group_graph() -> dict:
 
     groups: dict[str, set[str]] = defaultdict(set)
     group_names: dict[str, str] = {}
+    group_true_size: dict[str, int | None] = {}
 
     for r in rows:
         chat_id = str(r["chat_id"])
         groups[chat_id].add(r["platform_user_id"])
         group_names[chat_id] = r["chat_title"] or chat_id
+        group_true_size[chat_id] = r["true_size"]
 
     entity_lookup: dict[str, str] = {}
     async with analyzer.acquire() as conn:
@@ -167,7 +198,12 @@ async def build_telegram_group_graph() -> dict:
     pair_weights: dict[tuple[str, str], list[dict]] = {}
     for chat_id, members in groups.items():
         entity_members = sorted({entity_lookup[p] for p in members if p in entity_lookup})
-        group_size = len(members)
+        # GAP-3: prefer the group's real members_count over the collected count.
+        # telegram_chat_members is a real membership table, but for large groups
+        # we still only capture a fraction of members — members_count (present
+        # for 731 groups, up to 22k) collapses giant-broadcast co-membership to
+        # near-zero weight where the collected count would over-reward it.
+        group_size = _effective_group_size(group_true_size.get(chat_id), len(members))
         for i, a in enumerate(entity_members):
             for b in entity_members[i + 1:]:
                 pair = (a, b)
@@ -213,7 +249,7 @@ async def build_telegram_group_graph() -> dict:
                 "group_sizes": {group["name"]: group["size"] for group in shared_groups},
                 "weighted_total": round(weighted, 4),
                 "shared_group_count": len(shared_groups),
-                "why": "Shared smaller groups contribute more weight than large groups.",
+                "why": "Shared smaller groups contribute more weight than large groups (weighted by true group size).",
             }))
             stats["relationships"] += 1
 
