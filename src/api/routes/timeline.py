@@ -17,7 +17,7 @@ async def timeline_lanes(entity_id: str, max_events: int = Query(2500, ge=1, le=
             SELECT source, event_type, extract(epoch FROM occurred_at) AS ts
             FROM timeline_events
             WHERE entity_id = $1::uuid AND occurred_at > '2010-01-01'
-            ORDER BY occurred_at
+            ORDER BY occurred_at DESC
             LIMIT $2
         """, entity_id, max_events)
         alert_rows = await conn.fetch("""
@@ -28,7 +28,7 @@ async def timeline_lanes(entity_id: str, max_events: int = Query(2500, ge=1, le=
         """, entity_id)
 
     lanes: dict[str, list] = {}
-    for r in rows:
+    for r in reversed(rows):
         lanes.setdefault(r["source"], []).append({"t": float(r["ts"]), "type": r["event_type"]})
     all_ts = [e["t"] for evs in lanes.values() for e in evs]
     return {

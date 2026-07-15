@@ -384,8 +384,10 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   *Accept:* rich-entity page < 2s. Notes 2026-07-15: timeline pages remain
   paginated, interaction + geo endpoints are brush-windowed, and the timeline UI
   now buckets dense lanes client-side. This box stays open because a fresh live
-  API timing pass for a rich entity still timed out on `timeline-lanes`, so the
-  "< 2s" acceptance target is not met yet.
+  API timing pass for a rich entity still shows `timeline-lanes ~= 31.98s`
+  (`interactions ~= 2.33s`, `geo ~= 2.74s`) even after flipping the route to the
+  `(entity_id, occurred_at DESC)` index path, so the "< 2s" acceptance target is
+  not met yet.
 - [ ] **CC3 Backfill after each phase.** Run full resolution + timeline rebuild;
   verify counts move. *Accept:* per-phase before/after metrics recorded here.
 
