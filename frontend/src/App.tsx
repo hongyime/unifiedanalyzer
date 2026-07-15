@@ -1,19 +1,21 @@
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { Routes, Route } from 'react-router-dom'
-import { useEffect, useState } from 'react'
-import TriagePage from './pages/Triage'
-import CasesPage from './pages/Cases'
-import AlertsPage from './pages/Alerts'
-import ReviewPage from './pages/Review'
-import EntitiesPage from './pages/Entities'
-import EntityDetailPage from './pages/EntityDetail'
-import RunsPage from './pages/Runs'
-import CommunitiesPage from './pages/Communities'
-import MediaPage from './pages/Media'
-import FacesPage from './pages/Faces'
-import HelpPage from './pages/Help'
 import { openHealthSocket, LiveHealth } from './api'
 import { CommandPalette } from './components/CommandPalette'
 import { AppShell } from './components/AppShell'
+import { LoadingSpinner } from './components/ui/LoadingSpinner'
+
+const TriagePage = lazy(() => import('./pages/Triage'))
+const CasesPage = lazy(() => import('./pages/Cases'))
+const AlertsPage = lazy(() => import('./pages/Alerts'))
+const ReviewPage = lazy(() => import('./pages/Review'))
+const EntitiesPage = lazy(() => import('./pages/Entities'))
+const EntityDetailPage = lazy(() => import('./pages/EntityDetail'))
+const RunsPage = lazy(() => import('./pages/Runs'))
+const CommunitiesPage = lazy(() => import('./pages/Communities'))
+const MediaPage = lazy(() => import('./pages/Media'))
+const FacesPage = lazy(() => import('./pages/Faces'))
+const HelpPage = lazy(() => import('./pages/Help'))
 
 /** Subscribe to /ws/health, auto-reconnecting on drop. */
 function useLiveHealth(): LiveHealth | null {
@@ -44,19 +46,21 @@ function App() {
   return (
     <AppShell health={health}>
       <CommandPalette />
-      <Routes>
-        <Route path="/" element={<TriagePage />} />
-        <Route path="/review" element={<ReviewPage />} />
-        <Route path="/alerts" element={<AlertsPage />} />
-        <Route path="/entities" element={<EntitiesPage />} />
-        <Route path="/entities/:id" element={<EntityDetailPage />} />
-        <Route path="/communities" element={<CommunitiesPage />} />
-        <Route path="/media" element={<MediaPage />} />
-        <Route path="/faces" element={<FacesPage />} />
-        <Route path="/cases" element={<CasesPage />} />
-        <Route path="/runs" element={<RunsPage />} />
-        <Route path="/help" element={<HelpPage />} />
-      </Routes>
+      <Suspense fallback={<LoadingSpinner className="min-h-[50vh]" />}>
+        <Routes>
+          <Route path="/" element={<TriagePage />} />
+          <Route path="/review" element={<ReviewPage />} />
+          <Route path="/alerts" element={<AlertsPage />} />
+          <Route path="/entities" element={<EntitiesPage />} />
+          <Route path="/entities/:id" element={<EntityDetailPage />} />
+          <Route path="/communities" element={<CommunitiesPage />} />
+          <Route path="/media" element={<MediaPage />} />
+          <Route path="/faces" element={<FacesPage />} />
+          <Route path="/cases" element={<CasesPage />} />
+          <Route path="/runs" element={<RunsPage />} />
+          <Route path="/help" element={<HelpPage />} />
+        </Routes>
+      </Suspense>
     </AppShell>
   )
 }

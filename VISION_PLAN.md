@@ -194,7 +194,11 @@ is undirected (a/b) → build a NEW directed layer.
   showed both are safe no-ops today (`instagram_dm=0`,
   `face_coappear_interactions=0`). Current raw-source gaps:
   `instagram_dm=0`, `strava_activity_comments=0`, `face_associations=0`;
-  `youtube/commented` resolves to no tracked cross-entity pairs today.
+  `youtube/commented` resolves to no tracked cross-entity pairs today. The
+  collector-side Instagram DM worker is still scaffold-only
+  (`src/collectors/instagram_dm/auth.py` intentionally unimplemented, compose
+  profile default-disabled), so there is no in-repo path to generate real `dm`
+  rows without an external collector activation + new source data.
 - [x] **T2.3 Aggregate directed edges into `entity_relationships`.** Roll up
   `entity_interactions` into a directed-aware `relationship_type='interaction'`
   (or keep separate) with per-type counts + `last_seen_at` in `sources` jsonb, so
@@ -271,7 +275,11 @@ digital fused on the same axis.
   analyzer now has explicit no-op-safe code paths for both
   `facetracker/face_coappear` interactions and `PHOTO_COAPPEARANCE` timeline
   events; a targeted restart/backfill verified `face_coappear_interactions=0`
-  and `PHOTO_COAPPEARANCE=0` with no skipped tables.
+  and `PHOTO_COAPPEARANCE=0` with no skipped tables. A broader ownership audit
+  also confirmed the live corpus still has no promotable examples:
+  `facetracker.images face_count>=2 = 294`, `entities.primary_face_id = 23`,
+  but `collector.media_items.entity_id` joined to those multi-face image hashes
+  yields `owned_multiface_media = 0`.
 - [x] **T4.2 Tagged photos + @-mentions → `tagged`/`mentioned` (both senses).**
   (a) Metadata sense — RESOLVED: `media_items kind='tagged'` (**33,806**, 524
   ents, `metadata.taken_at`) = photos an entity is tagged in by others → emit a
@@ -320,6 +328,11 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   `identity_signals.shared_route_origin` into `shared_home_or_gym` edges, but the
   live analyzer currently has `shared_route_origin=0`, so no edges yet. Latest
   rerun still reports `entities_with_gps=12` and `shared_route_origin_signals=0`.
+  Follow-up audit using a broader 250m recurring-cluster model over
+  `start_latlng` still found `pair_hits<=1km = 0`, and the collector has
+  `start_latlng_full = 0` for all Strava activities, so there is no stronger
+  in-repo coordinate source available today to manufacture real shared-origin
+  edges without inventing noise.
 - [x] **T5.3 Reply/mention chain depth & reciprocity.** From `entity_interactions`
   (T2), weight edges by back-and-forth depth + reciprocity ratio + recency, not
   raw count. *Accept:* edge weight reflects conversation depth, not volume.
@@ -412,12 +425,18 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   full-table scan into two indexed branches, and the Strava geo path now uses
   bigint athlete ids instead of a text cast, letting the DB use
   `unique_platform_athlete_strava` plus `idx_strava_activities_athlete`.
-  Cold live API calls for the rich sample now land under target
-  (`/timeline ~0.76s`, `/timeline-lanes?max_events=2000 ~1.58s`,
-  `/interactions ~0.78s`, `/geo ~0.59s`; warm calls drop to
-  `~0.05s/~0.21s/~0.17s/~0.03s`). The dev-server browser path is still slower
-  than 2s on first navigation/tab-open, so the user-facing "< 2s page" bar is
-  not yet stable enough to close.
+  A new covering index
+  `idx_timeline_entity_time_lane_cover(entity_id, occurred_at DESC) INCLUDE (source, event_type)`
+  dropped the worst rich-sample partition scan from ~`2.5s` to ~`42ms`, and the
+  cold live API path now lands under target
+  (`/timeline ~0.80s`, `/timeline-lanes?max_events=2000 ~0.51s`,
+  `/interactions ~0.57s`, `/geo ~0.69s`). Frontend route-level lazy loading
+  also cut the initial JS bundle from ~`588kB` to ~`285kB` plus a dedicated
+  `EntityDetail` chunk (~`196kB`). Even so, production-preview browser timings
+  for the real entity page remain above the strict user-facing bar on first hit
+  (`rich initial ~4.47s`, `timeline tab ~2.76s`, `interactions tab ~4.24s`,
+  `geo initial ~2.47s`, `map tab ~1.19s`), so the "< 2s page" acceptance line
+  is still not stable enough to close.
 - [x] **CC3 Backfill after each phase.** Run full resolution + timeline rebuild;
   verify counts move. *Accept:* per-phase before/after metrics recorded here.
   Notes 2026-07-15: P1 counts are recorded inline per event type
