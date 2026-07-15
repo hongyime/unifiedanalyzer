@@ -8,6 +8,7 @@ from src.db.connection import get_analyzer_pool
 from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.beeper_bridge import bridge_beeper
 from src.pipeline.ig_geo_resolver import resolve_ig_geo_entities
+from src.pipeline.strava_athlete_resolver import resolve_strava_athlete_entities
 from src.pipeline.cross_source_signals import emit_cross_source_signals
 from src.pipeline.timeline_builder import build_timeline
 from src.pipeline.interaction_graph import build_interaction_graph
@@ -370,6 +371,16 @@ async def run_incremental() -> dict:
         except Exception:
             logger.warning("resolve_ig_geo_entities failed (non-fatal)", exc_info=True)
 
+        # gap-round-2: mint entities for every Strava athlete with collected
+        # activities (unblocks T5.2 shared-route-origin). Same "create-entity-if-
+        # content" pattern as ig_geo; runs BEFORE build_timeline so Strava blocks
+        # + route_similarity see the fresh links.
+        try:
+            strava_stats = await resolve_strava_athlete_entities()
+            stats["strava_links"] = strava_stats["links_created"]
+        except Exception:
+            logger.warning("resolve_strava_athlete_entities failed (non-fatal)", exc_info=True)
+
         # SYNC #35: cross-source identity signals (tg<->wa phone, IG external_url).
         xsrc_stats = await emit_cross_source_signals()
         stats["xsrc_signals"] = xsrc_stats["rows"]
@@ -482,6 +493,16 @@ async def run_full_resolution() -> dict:
             stats["ig_geo_links"] = ig_geo_stats["links_created"]
         except Exception:
             logger.warning("resolve_ig_geo_entities failed (non-fatal)", exc_info=True)
+
+        # gap-round-2: mint entities for every Strava athlete with collected
+        # activities (unblocks T5.2 shared-route-origin). Same "create-entity-if-
+        # content" pattern as ig_geo; runs BEFORE the full timeline re-attribution
+        # so Strava blocks + route_similarity see the fresh links.
+        try:
+            strava_stats = await resolve_strava_athlete_entities()
+            stats["strava_links"] = strava_stats["links_created"]
+        except Exception:
+            logger.warning("resolve_strava_athlete_entities failed (non-fatal)", exc_info=True)
 
         # SYNC #35: cross-source identity signals (tg<->wa phone, IG external_url).
         xsrc_stats = await emit_cross_source_signals()
