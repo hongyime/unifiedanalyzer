@@ -1,9 +1,42 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Query, HTTPException
 
 from src.db.connection import get_analyzer_pool
 
 router = APIRouter(tags=["timeline"])
+
+
+def _partition_names_desc(start: datetime | None = None, floor_year: int = 2010) -> list[str]:
+    cursor = start or datetime.now(timezone.utc)
+    year = cursor.year
+    month = cursor.month
+    names: list[str] = []
+    while year > floor_year or (year == floor_year and month >= 1):
+        names.append(f"timeline_events_{year:04d}_{month:02d}")
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+    return names
+
+
+async def _fetch_recent_timeline_rows(conn, entity_id: str, limit: int) -> list:
+    rows = []
+    remaining = limit
+    for partition_name in _partition_names_desc():
+        if remaining <= 0:
+            break
+        partition_rows = await conn.fetch(f"""
+            SELECT id, source, event_type, source_record_id, occurred_at, title, metadata
+            FROM {partition_name}
+            WHERE entity_id = $1::uuid
+            ORDER BY occurred_at DESC
+            LIMIT $2
+        """, entity_id, remaining)
+        if partition_rows:
+            rows.extend(partition_rows)
+            remaining -= len(partition_rows)
+    return rows
 
 
 @router.get("/entities/{entity_id}/timeline-lanes")
@@ -13,13 +46,21 @@ async def timeline_lanes(entity_id: str, max_events: int = Query(2500, ge=1, le=
     small and let the client lay out the x-axis without date parsing per point."""
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT source, event_type, extract(epoch FROM occurred_at) AS ts
-            FROM timeline_events
-            WHERE entity_id = $1::uuid AND occurred_at > '2010-01-01'
-            ORDER BY occurred_at DESC
-            LIMIT $2
-        """, entity_id, max_events)
+        rows = []
+        remaining = max_events
+        for partition_name in _partition_names_desc():
+            if remaining <= 0:
+                break
+            partition_rows = await conn.fetch(f"""
+                SELECT source, event_type, extract(epoch FROM occurred_at) AS ts
+                FROM {partition_name}
+                WHERE entity_id = $1::uuid
+                ORDER BY occurred_at DESC
+                LIMIT $2
+            """, entity_id, remaining)
+            if partition_rows:
+                rows.extend(partition_rows)
+                remaining -= len(partition_rows)
         alert_rows = await conn.fetch("""
             SELECT alert_type, extract(epoch FROM detected_at) AS ts
             FROM alerts
@@ -78,6 +119,7 @@ async def get_entity_timeline(
         idx += 1
 
     where = "WHERE " + " AND ".join(conditions)
+    use_fast_path = not source and not event_type and not from_date and not to_date
 
     async with pool.acquire() as conn:
         # Verify entity exists
@@ -87,19 +129,33 @@ async def get_entity_timeline(
         if not exists:
             raise HTTPException(404, "Entity not found")
 
-        total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM timeline_events t {where}", *params
-        )
+        if use_fast_path:
+            total = await conn.fetchval(
+                "SELECT total_events FROM behavioral_profiles WHERE entity_id = $1::uuid",
+                entity_id,
+            )
+            if total is None:
+                total = await conn.fetchval(
+                    "SELECT COUNT(*) FROM timeline_events WHERE entity_id = $1::uuid",
+                    entity_id,
+                )
+            rows = await _fetch_recent_timeline_rows(conn, entity_id, offset + per_page)
+            rows = rows[offset: offset + per_page]
+            total = max(int(total or 0), offset + len(rows))
+        else:
+            total = await conn.fetchval(
+                f"SELECT COUNT(*) FROM timeline_events t {where}", *params
+            )
 
-        params.extend([per_page, offset])
-        rows = await conn.fetch(f"""
-            SELECT t.id, t.source, t.event_type, t.source_record_id,
-                   t.occurred_at, t.title, t.metadata
-            FROM timeline_events t
-            {where}
-            ORDER BY t.occurred_at DESC
-            LIMIT ${idx} OFFSET ${idx + 1}
-        """, *params)
+            params.extend([per_page, offset])
+            rows = await conn.fetch(f"""
+                SELECT t.id, t.source, t.event_type, t.source_record_id,
+                       t.occurred_at, t.title, t.metadata
+                FROM timeline_events t
+                {where}
+                ORDER BY t.occurred_at DESC
+                LIMIT ${idx} OFFSET ${idx + 1}
+            """, *params)
 
     return {
         "data": [

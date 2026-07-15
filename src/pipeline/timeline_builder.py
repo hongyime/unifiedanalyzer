@@ -139,6 +139,26 @@ PLATFORM_QUERIES = [
         "time_col": "m.platform_created_at",
     },
     {
+        "source": "telegram",
+        "event_type": "FORWARDED_MESSAGE",
+        "query": """
+            SELECT m.platform_message_id AS record_id, m.platform_created_at AS occurred_at,
+                   LEFT(COALESCE(m.text, m.caption, ''), 200) AS title,
+                   actor.platform_user_id AS entity_ref, actor.username AS entity_ref2,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'forward_from_chat_id', m.forward_from_chat_id,
+                       'forward_from_message_id', m.forward_from_message_id,
+                       'message_preview', LEFT(COALESCE(m.text, m.caption, ''), 200)
+                   )) AS metadata
+            FROM telegram_messages m
+            LEFT JOIN telegram_users actor ON actor.id = m.sender_id
+            WHERE (m.forward_from_chat_id IS NOT NULL OR m.forward_from_message_id IS NOT NULL)
+              AND m.platform_created_at IS NOT NULL {where_clause}
+            ORDER BY m.platform_created_at DESC
+        """,
+        "time_col": "m.platform_created_at",
+    },
+    {
         "source": "whatsapp",
         "event_type": "MESSAGE_SENT",
         # entity_ref = reconstructed JID (phone_number || '@s.whatsapp.net'), which

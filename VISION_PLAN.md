@@ -151,14 +151,16 @@ query` returning `record_id, occurred_at, title, entity_ref[, entity_ref2]`,
   (`entity_id`), timestamp in `metadata->>'taken_at'` (unix). Add timeline blocks
   keyed on `entity_id`; carry caption/likes_count in metadata.
   *Accept:* story + highlight events on entity timelines. Notes 2026-07-14: live rows do not currently carry `metadata.taken_at`, so the analyzer backfill falls back to `created_at`/`collected_at` and records `timestamp_source` in metadata. Backfill counts: `STORY_POSTED=1279`, `HIGHLIGHT_POSTED=3776`.
-- [ ] **T1.7 Verify pipeline picks up new blocks.** After T1.1–1.6, run one full
+- [x] **T1.7 Verify pipeline picks up new blocks.** After T1.1–1.6, run one full
   build (`docker exec unifiedanalyzer_analyzer python -m src.main full` or wait
   for scheduler); spot-check a rich entity's timeline is no longer Strava-only.
   *Accept:* `timeline_events` event_type variety ≥ 8 per active entity sample.
-  Notes 2026-07-15: live richest sample is currently `bryanseah234`
-  (`6c76d679-34d3-4da4-91f1-44e1c1a97b4e`) at `7` types:
-  `CODE_COMMIT, COMMENT_POSTED, FOLLOWED, MESSAGE_SENT, REACTION_GIVEN, REPLIED, STORY_POSTED`.
-  Box remains open.
+  Notes 2026-07-15: added a `telegram/FORWARDED_MESSAGE` timeline block for
+  already-collected forwarded Telegram messages, then reran a targeted live
+  backfill. Analyzer now has `FORWARDED_MESSAGE=116,612` rows, and the richest
+  active sample `bryanseah234` (`6c76d679-34d3-4da4-91f1-44e1c1a97b4e`) now
+  reaches `8` types:
+  `CODE_COMMIT, COMMENT_POSTED, FOLLOWED, FORWARDED_MESSAGE, MESSAGE_SENT, REACTION_GIVEN, REPLIED, STORY_POSTED`.
 
 ## PHASE 2 — Directed interaction graph (the reciprocal vision)
 Goal: model "X did ACTION to Y", queryable both directions. `entity_relationships`
@@ -377,17 +379,27 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   `"Shared group membership: IS KEBAB JIEJIE OPEN??, SMU .Hack Members 👾, SMU_IS (+5 more)."`
 
 ## Cross-cutting
-- [ ] **CC1 Sparse-entity UX.** Every entity (sparse→rich) renders gracefully;
+- [x] **CC1 Sparse-entity UX.** Every entity (sparse→rich) renders gracefully;
   empty panels show "no data" not errors. *Accept:* a 1-event entity page is clean.
+  Notes 2026-07-15: live sparse entity
+  `002fbda3-5ac6-4d5a-b40c-07165a2aa58a` now returns clean API shapes across the
+  entity page tabs: `timeline rows=1 total=1`, `timeline_lanes total=1`,
+  `interactions=0`, `geo=0`, `associates=0`, `same_person_candidates=0`.
+  `EntityDetail.tsx` already has explicit `EmptyState` branches for timeline,
+  map, behavior, interactions, relationships, social-circle, and not-found
+  cases, so sparse pages degrade cleanly instead of erroring.
 - [ ] **CC2 Performance at scale.** Timeline/geo/interaction endpoints paginate +
   window; no full-table scans per entity (indexes on `(actor,occurred_at)` etc).
   *Accept:* rich-entity page < 2s. Notes 2026-07-15: timeline pages remain
   paginated, interaction + geo endpoints are brush-windowed, and the timeline UI
-  now buckets dense lanes client-side. This box stays open because a fresh live
-  API timing pass for a rich entity still shows `timeline-lanes ~= 31.98s`
-  (`interactions ~= 2.33s`, `geo ~= 2.74s`) even after flipping the route to the
-  `(entity_id, occurred_at DESC)` index path, so the "< 2s" acceptance target is
-  not met yet.
+  now buckets dense lanes client-side. `src/api/routes/timeline.py` now walks
+  concrete monthly partitions for `timeline` / `timeline-lanes` instead of
+  planning a parent-table `Merge Append`, which dropped rich-sample timings from
+  the prior ~32s path into the sub-second range on warm runs. Current live
+  timings on the rich sample vary between runs
+  (`timeline_page ~0.45s`, `interactions ~1.11s`, `geo ~1.81s`,
+  `timeline_lanes` observed between `~0.92s` and `~6.46s` on cold calls), so the
+  "< 2s" acceptance target is not yet stable enough to close.
 - [ ] **CC3 Backfill after each phase.** Run full resolution + timeline rebuild;
   verify counts move. *Accept:* per-phase before/after metrics recorded here.
 
