@@ -126,7 +126,14 @@ async def entity_geo(
         links = await conn.fetch(
             "SELECT source, platform_id FROM entity_platform_links WHERE entity_id = $1::uuid", entity_id
         )
-    strava_ids = [l["platform_id"] for l in links if l["source"] == "strava" and l["platform_id"]]
+    strava_ids = []
+    for link in links:
+        if link["source"] != "strava" or not link["platform_id"]:
+            continue
+        try:
+            strava_ids.append(int(link["platform_id"]))
+        except (TypeError, ValueError):
+            continue
     ig_ids = [l["platform_id"] for l in links if l["source"] == "instagram" and l["platform_id"]]
     telegram_ids = [l["platform_id"] for l in links if l["source"] == "telegram" and l["platform_id"]]
 
@@ -135,7 +142,7 @@ async def entity_geo(
     ig_place_names: list[str] = []
     async with collector.acquire() as cc:
         if strava_ids:
-            strava_filters = ["ath.platform_athlete_id::text = ANY($1::text[])"]
+            strava_filters = ["a.athlete_id = ANY(SELECT id FROM target_athletes)"]
             strava_params: list = [strava_ids]
             if from_date:
                 strava_filters.append(f"a.start_date >= ${len(strava_params) + 1}")
@@ -147,10 +154,14 @@ async def entity_geo(
             # backfilled) summary_polyline so activities with only the overview
             # line still render.
             acts = await cc.fetch(f"""
+                WITH target_athletes AS (
+                    SELECT id
+                    FROM strava_athletes
+                    WHERE platform_athlete_id = ANY($1::bigint[])
+                )
                 SELECT a.name, a.start_date, a.type, a.start_latlng, a.summary_polyline,
                        s.latlng::text AS latlng
                 FROM strava_activities a
-                JOIN strava_athletes ath ON ath.id = a.athlete_id
                 LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
                 WHERE {' AND '.join(strava_filters)}
                   AND (s.latlng IS NOT NULL
@@ -460,14 +471,21 @@ async def get_interactions(
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(f"""
+            WITH relevant AS (
+                SELECT actor_entity_id, target_entity_id, interaction_type, occurred_at
+                FROM entity_interactions
+                WHERE actor_entity_id = $1::uuid {where}
+                UNION ALL
+                SELECT actor_entity_id, target_entity_id, interaction_type, occurred_at
+                FROM entity_interactions
+                WHERE target_entity_id = $1::uuid {where}
+            )
             SELECT actor_entity_id::text AS actor_id,
                    target_entity_id::text AS target_id,
                    interaction_type,
                    COUNT(*)::int AS n,
                    MAX(occurred_at) AS last_ts
-            FROM entity_interactions
-            WHERE (actor_entity_id = $1::uuid OR target_entity_id = $1::uuid)
-              {where}
+            FROM relevant
             GROUP BY actor_entity_id, target_entity_id, interaction_type
         """, *params)
 

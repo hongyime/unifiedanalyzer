@@ -408,11 +408,16 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   concrete monthly partitions for `timeline` / `timeline-lanes` instead of
   planning a parent-table `Merge Append`, and the frontend now lazy-loads lanes
   only on `timeline`/`map`/`interactions` while shrinking the default request
-  from `8000` to `2000`. Warm runs improved materially, but cold live calls
-  after restart still exceeded the target on the rich sample
-  (`/timeline ~2.73s`, `/timeline-lanes?max_events=2000 ~8.34s`,
-  `/interactions ~3.25s`, `/geo ~6.07s`), so the "< 2s" acceptance target is
-  still not stable enough to close.
+  from `8000` to `2000`. `/interactions` was rewritten from an `actor OR target`
+  full-table scan into two indexed branches, and the Strava geo path now uses
+  bigint athlete ids instead of a text cast, letting the DB use
+  `unique_platform_athlete_strava` plus `idx_strava_activities_athlete`.
+  Cold live API calls for the rich sample now land under target
+  (`/timeline ~0.76s`, `/timeline-lanes?max_events=2000 ~1.58s`,
+  `/interactions ~0.78s`, `/geo ~0.59s`; warm calls drop to
+  `~0.05s/~0.21s/~0.17s/~0.03s`). The dev-server browser path is still slower
+  than 2s on first navigation/tab-open, so the user-facing "< 2s page" bar is
+  not yet stable enough to close.
 - [x] **CC3 Backfill after each phase.** Run full resolution + timeline rebuild;
   verify counts move. *Accept:* per-phase before/after metrics recorded here.
   Notes 2026-07-15: P1 counts are recorded inline per event type
