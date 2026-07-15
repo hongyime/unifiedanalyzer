@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from src.db.connection import get_analyzer_pool
 from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.beeper_bridge import bridge_beeper
+from src.pipeline.ig_geo_resolver import resolve_ig_geo_entities
 from src.pipeline.cross_source_signals import emit_cross_source_signals
 from src.pipeline.timeline_builder import build_timeline
 from src.pipeline.interaction_graph import build_interaction_graph
@@ -360,6 +361,15 @@ async def run_incremental() -> dict:
         beeper_stats = await bridge_beeper()
         stats["beeper_links"] = beeper_stats["totals"]["links_created"]
 
+        # GAP-4: repair NULL profile_id on IG geo posts + mint entities for every
+        # IG profile with substantive collected content, BEFORE timeline attribution
+        # so the IG post/geo blocks (which join on profile_id + links) surface them.
+        try:
+            ig_geo_stats = await resolve_ig_geo_entities()
+            stats["ig_geo_links"] = ig_geo_stats["links_created"]
+        except Exception:
+            logger.warning("resolve_ig_geo_entities failed (non-fatal)", exc_info=True)
+
         # SYNC #35: cross-source identity signals (tg<->wa phone, IG external_url).
         xsrc_stats = await emit_cross_source_signals()
         stats["xsrc_signals"] = xsrc_stats["rows"]
@@ -463,6 +473,15 @@ async def run_full_resolution() -> dict:
         # full re-attribution rescan.
         beeper_stats = await bridge_beeper()
         stats["beeper_links"] = beeper_stats["totals"]["links_created"]
+
+        # GAP-4: repair NULL profile_id on IG geo posts + mint entities for every
+        # IG profile with substantive collected content, BEFORE the full timeline
+        # re-attribution so the IG post/geo blocks surface them.
+        try:
+            ig_geo_stats = await resolve_ig_geo_entities()
+            stats["ig_geo_links"] = ig_geo_stats["links_created"]
+        except Exception:
+            logger.warning("resolve_ig_geo_entities failed (non-fatal)", exc_info=True)
 
         # SYNC #35: cross-source identity signals (tg<->wa phone, IG external_url).
         xsrc_stats = await emit_cross_source_signals()
