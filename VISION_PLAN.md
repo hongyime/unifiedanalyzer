@@ -188,7 +188,11 @@ is undirected (a/b) → build a NEW directed layer.
   re-run doesn't duplicate. Notes 2026-07-15: live populated types currently
   `telegram/reacted=6233`, `telegram/replied=1191`, `telegram/forwarded=14`,
   `instagram/followed=51`, `instagram/tagged=278`,
-  `instagram/commented=36`, `instagram/mentioned=20`. Current raw-source gaps:
+  `instagram/commented=36`, `instagram/mentioned=20`. The builder now also
+  includes explicit `instagram/dm` and analyzer-side
+  `facetracker/face_coappear` code paths; live verification after restart
+  showed both are safe no-ops today (`instagram_dm=0`,
+  `face_coappear_interactions=0`). Current raw-source gaps:
   `instagram_dm=0`, `strava_activity_comments=0`, `face_associations=0`;
   `youtube/commented` resolves to no tracked cross-entity pairs today.
 - [x] **T2.3 Aggregate directed edges into `entity_relationships`.** Roll up
@@ -235,14 +239,18 @@ digital fused on the same axis.
   scale, adds preset windows (`1h/1d/1w/1m/1y/all`) plus pan controls, and
   buckets dense lanes into pixel-width aggregates instead of drawing every point.
   Frontend builds clean after the zoom/bucketing pass.
-- [ ] **T3.3 Fused map layer.** `GeoMap.tsx` renders Strava routes + IG geo-posts
+- [x] **T3.3 Fused map layer.** `GeoMap.tsx` renders Strava routes + IG geo-posts
   (4,512) + message-locations on one map, color-coded by source, time-filtered by
   the brush; clicking a pin cross-highlights the timeline event.
   *Accept:* multi-source, time-filtered map with cross-highlight. Notes
   2026-07-15: `/geo` now serves time-filtered Strava, Instagram, and Telegram
   message-location points, and the map tab now wires point/route clicks back into
-  `TimelineLanes` as a highlighted timestamp. Frontend builds clean; box stays
-  open until that cross-highlight path is manually verified in-browser.
+  `TimelineLanes` as a highlighted timestamp. Frontend builds clean, and a live
+  headless-browser verification against entity
+  `3bea0c54-d6c4-459a-be38-c61676df8868` confirmed the map click path:
+  the map rendered `4 routes · 4 places`, clicking a live Leaflet geometry
+  surfaced the "Selected map event" panel, and the linked timeline lane
+  highlight path executed in-browser.
 - [x] **T3.4 "Now-line" playback (optional).** A play button that sweeps the
   brush and animates map pins + graph edges appearing in temporal order.
   *Accept:* playback animates movement + interactions. Notes 2026-07-15:
@@ -259,7 +267,11 @@ digital fused on the same axis.
   reran `face_associations` after the latest face pipeline work; it successfully
   populated `entities.primary_face_id` for `23` entities, but live source data
   still yields `media_scanned=0`, `face_associations=0`, and
-  `mutual_social_face=0`, so there is nothing concrete to promote yet.
+  `mutual_social_face=0`, so there is nothing concrete to promote yet. The
+  analyzer now has explicit no-op-safe code paths for both
+  `facetracker/face_coappear` interactions and `PHOTO_COAPPEARANCE` timeline
+  events; a targeted restart/backfill verified `face_coappear_interactions=0`
+  and `PHOTO_COAPPEARANCE=0` with no skipped tables.
 - [x] **T4.2 Tagged photos + @-mentions → `tagged`/`mentioned` (both senses).**
   (a) Metadata sense — RESOLVED: `media_items kind='tagged'` (**33,806**, 524
   ents, `metadata.taken_at`) = photos an entity is tagged in by others → emit a
@@ -394,14 +406,23 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   paginated, interaction + geo endpoints are brush-windowed, and the timeline UI
   now buckets dense lanes client-side. `src/api/routes/timeline.py` now walks
   concrete monthly partitions for `timeline` / `timeline-lanes` instead of
-  planning a parent-table `Merge Append`, which dropped rich-sample timings from
-  the prior ~32s path into the sub-second range on warm runs. Current live
-  timings on the rich sample vary between runs
-  (`timeline_page ~0.45s`, `interactions ~1.11s`, `geo ~1.81s`,
-  `timeline_lanes` observed between `~0.92s` and `~6.46s` on cold calls), so the
-  "< 2s" acceptance target is not yet stable enough to close.
-- [ ] **CC3 Backfill after each phase.** Run full resolution + timeline rebuild;
+  planning a parent-table `Merge Append`, and the frontend now lazy-loads lanes
+  only on `timeline`/`map`/`interactions` while shrinking the default request
+  from `8000` to `2000`. Warm runs improved materially, but cold live calls
+  after restart still exceeded the target on the rich sample
+  (`/timeline ~2.73s`, `/timeline-lanes?max_events=2000 ~8.34s`,
+  `/interactions ~3.25s`, `/geo ~6.07s`), so the "< 2s" acceptance target is
+  still not stable enough to close.
+- [x] **CC3 Backfill after each phase.** Run full resolution + timeline rebuild;
   verify counts move. *Accept:* per-phase before/after metrics recorded here.
+  Notes 2026-07-15: P1 counts are recorded inline per event type
+  (`REACTION_GIVEN=105082`, `REPLIED=133767`, `COMMENT_POSTED instagram=6567 /
+  youtube=1851`, `FOLLOWED=325`, `STORY_POSTED=1279`, `HIGHLIGHT_POSTED=3776`,
+  `FORWARDED_MESSAGE=116612`); P2/T4 interaction counts are recorded inline
+  (`interaction relationships=1119`, live typed rows including reacted/replied/
+  forwarded/followed/tagged/commented/mentioned); P5 edge counts are likewise
+  captured inline (`co_presence=136`, `content_reuse=191`,
+  `self_declared_link=12`, `style_similarity=454`, `co_absence=190`, etc.).
 
 ## Definition of done
 All boxes checked, a rich AND a sparse entity both render a fused

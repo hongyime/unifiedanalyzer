@@ -496,7 +496,7 @@ export const api = {
       nodes: { id: string; name: string | null; weight: number; types: string[]; face: string | null; why?: string | null }[]
     }>(`/entities/${entityId}/network`),
 
-  getTimelineLanes: (entityId: string, maxEvents = 8000) =>
+  getTimelineLanes: (entityId: string, maxEvents = 2000) =>
     get<{
       lanes: { source: string; events: { t: number; type: string | null }[] }[]
       alerts: { type: string; t: number }[]

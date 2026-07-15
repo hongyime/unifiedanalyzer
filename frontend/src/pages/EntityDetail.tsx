@@ -137,6 +137,8 @@ type TabKey =
   | 'intelligence'
   | 'settings'
 
+const TIMELINE_TABS = new Set<TabKey>(['timeline', 'map', 'interactions'])
+
 export default function EntityDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -158,9 +160,13 @@ export default function EntityDetailPage() {
   const [cases, setCases] = useState<{ id: string; name: string }[]>([])
   const [pinCase, setPinCase] = useState('')
   const [brushRange, setBrushRange] = useState<[number, number] | null>(null)
+  const [lanes, setLanes] = useState<Awaited<ReturnType<typeof api.getTimelineLanes>> | null>(null)
   const [selectedGeoEvent, setSelectedGeoEvent] = useState<{ label: string | null; source: string; occurred_at: string | null } | null>(null)
   useEffect(() => { api.getCases().then(d => setCases(d.cases)).catch(() => {}) }, [])
-  useEffect(() => { setBrushRange(null) }, [id])
+  useEffect(() => {
+    setBrushRange(null)
+    setLanes(null)
+  }, [id])
   useEffect(() => { setSelectedGeoEvent(null) }, [id, tab])
 
   useEffect(() => {
@@ -187,15 +193,13 @@ export default function EntityDetailPage() {
       setEventsTotal(r.total)
     })
   }, [id, tab, eventsPage, brushRange])
-
-  const [lanes, setLanes] = useState<Awaited<ReturnType<typeof api.getTimelineLanes>> | null>(null)
   useEffect(() => {
-    if (!id) return
-    api.getTimelineLanes(id, 8000).then((data) => {
+    if (!id || !TIMELINE_TABS.has(tab)) return
+    api.getTimelineLanes(id, 2000).then((data) => {
       setLanes(data)
       setBrushRange((current) => current ?? (data.min_t != null && data.max_t != null ? [data.min_t, data.max_t] : null))
     }).catch(() => setLanes(null))
-  }, [id])
+  }, [id, tab])
 
   useEffect(() => {
     if (!id || tab !== 'behavior') return

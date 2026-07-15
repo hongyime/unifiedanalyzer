@@ -247,6 +247,41 @@ SOURCE_QUERIES = [
         """,
         "time_col": "timestamp",
     },
+    {
+        "source": "facetracker",
+        "interaction_type": "face_coappear",
+        "db": "analyzer",
+        "entity_ids_direct": True,
+        "query": """
+            SELECT CONCAT(er.id::text, ':a2b') AS record_id,
+                   COALESCE(er.last_seen_at, er.created_at) AS occurred_at,
+                   er.entity_a_id::text AS actor_ref,
+                   er.entity_b_id::text AS target_ref,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'relationship_id', er.id,
+                       'weight', er.weight,
+                       'why', er.sources->>'why'
+                   )) AS metadata
+            FROM entity_relationships er
+            WHERE er.relationship_type = 'mutual_social_face'
+              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {where_clause}
+            UNION ALL
+            SELECT CONCAT(er.id::text, ':b2a') AS record_id,
+                   COALESCE(er.last_seen_at, er.created_at) AS occurred_at,
+                   er.entity_b_id::text AS actor_ref,
+                   er.entity_a_id::text AS target_ref,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'relationship_id', er.id,
+                       'weight', er.weight,
+                       'why', er.sources->>'why'
+                   )) AS metadata
+            FROM entity_relationships er
+            WHERE er.relationship_type = 'mutual_social_face'
+              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {where_clause}
+            ORDER BY occurred_at DESC
+        """,
+        "time_col": "COALESCE(er.last_seen_at, er.created_at)",
+    },
 ]
 
 
@@ -454,7 +489,8 @@ async def build_interaction_graph(
 
         processed = inserted = resolved = skipped_unresolved = skipped_self = 0
         batch: list[tuple] = []
-        async with collector.acquire() as conn:
+        pool = get_analyzer_pool() if spec.get("db") == "analyzer" else collector
+        async with pool.acquire() as conn:
             async with conn.transaction():
                 cursor = conn.cursor(query, *params, timeout=SOURCE_QUERY_TIMEOUT_SECONDS)
                 async for row in cursor:
@@ -464,18 +500,22 @@ async def build_interaction_graph(
                         occurred_at = occurred_at.replace(tzinfo=timezone.utc)
                     if occurred_at is None:
                         continue
-                    actor_id = _resolve_entity(
-                        lookup,
-                        spec["source"],
-                        row.get("actor_ref"),
-                        row.get("actor_ref2"),
-                    )
-                    target_id = _resolve_entity(
-                        lookup,
-                        spec["source"],
-                        row.get("target_ref"),
-                        row.get("target_ref2"),
-                    )
+                    if spec.get("entity_ids_direct"):
+                        actor_id = str(row.get("actor_ref")) if row.get("actor_ref") else None
+                        target_id = str(row.get("target_ref")) if row.get("target_ref") else None
+                    else:
+                        actor_id = _resolve_entity(
+                            lookup,
+                            spec["source"],
+                            row.get("actor_ref"),
+                            row.get("actor_ref2"),
+                        )
+                        target_id = _resolve_entity(
+                            lookup,
+                            spec["source"],
+                            row.get("target_ref"),
+                            row.get("target_ref2"),
+                        )
                     if not actor_id or not target_id:
                         skipped_unresolved += 1
                         continue

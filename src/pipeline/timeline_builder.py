@@ -516,6 +516,47 @@ PLATFORM_QUERIES = [
         """,
         "time_col": "COALESCE(m.created_at, m.collected_at)",
     },
+    {
+        "source": "facetracker",
+        "event_type": "PHOTO_COAPPEARANCE",
+        "db": "analyzer",
+        "entity_ids_direct": True,
+        "query": """
+            SELECT CONCAT(er.id::text, ':a') AS record_id,
+                   COALESCE(er.last_seen_at, er.created_at) AS occurred_at,
+                   CONCAT('Co-appeared in a photo with ', COALESCE(other_e.canonical_name, er.entity_b_id::text)) AS title,
+                   er.entity_a_id::text AS entity_ref,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'relationship_id', er.id,
+                       'other_entity_id', er.entity_b_id,
+                       'other_entity_name', other_e.canonical_name,
+                       'confidence', er.weight,
+                       'why', er.sources->>'why'
+                   )) AS metadata
+            FROM entity_relationships er
+            LEFT JOIN entities other_e ON other_e.id = er.entity_b_id
+            WHERE er.relationship_type = 'mutual_social_face'
+              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {where_clause}
+            UNION ALL
+            SELECT CONCAT(er.id::text, ':b') AS record_id,
+                   COALESCE(er.last_seen_at, er.created_at) AS occurred_at,
+                   CONCAT('Co-appeared in a photo with ', COALESCE(other_e.canonical_name, er.entity_a_id::text)) AS title,
+                   er.entity_b_id::text AS entity_ref,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'relationship_id', er.id,
+                       'other_entity_id', er.entity_a_id,
+                       'other_entity_name', other_e.canonical_name,
+                       'confidence', er.weight,
+                       'why', er.sources->>'why'
+                   )) AS metadata
+            FROM entity_relationships er
+            LEFT JOIN entities other_e ON other_e.id = er.entity_a_id
+            WHERE er.relationship_type = 'mutual_social_face'
+              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {where_clause}
+            ORDER BY occurred_at DESC
+        """,
+        "time_col": "COALESCE(er.last_seen_at, er.created_at)",
+    },
 ]
 
 
@@ -621,7 +662,8 @@ async def build_timeline(
         source_name = f"{pq['source']}/{pq['event_type']}"
 
         try:
-            async with collector.acquire() as conn:
+            pool = analyzer if pq.get("db") == "analyzer" else collector
+            async with pool.acquire() as conn:
                 async with conn.transaction():
                     cursor = conn.cursor(query, *params, timeout=SOURCE_QUERY_TIMEOUT_SECONDS)
 
@@ -634,15 +676,19 @@ async def build_timeline(
                         # keep a handle/username as a secondary key (see the
                         # per-source query comments). First ref that resolves wins.
                         entity_id = None
-                        for _ref_col in ("entity_ref", "entity_ref2"):
-                            entity_ref = row.get(_ref_col)
-                            if not entity_ref:
-                                continue
-                            entity_ref = str(entity_ref)
-                            entity_id = entity_lookup.get((pq["source"], entity_ref.lower())) \
-                                or entity_lookup.get((pq["source"], entity_ref))
-                            if entity_id:
-                                break
+                        if pq.get("entity_ids_direct"):
+                            entity_ref = row.get("entity_ref")
+                            entity_id = str(entity_ref) if entity_ref else None
+                        else:
+                            for _ref_col in ("entity_ref", "entity_ref2"):
+                                entity_ref = row.get(_ref_col)
+                                if not entity_ref:
+                                    continue
+                                entity_ref = str(entity_ref)
+                                entity_id = entity_lookup.get((pq["source"], entity_ref.lower())) \
+                                    or entity_lookup.get((pq["source"], entity_ref))
+                                if entity_id:
+                                    break
 
                         occurred_at = row["occurred_at"]
                         if occurred_at and not occurred_at.tzinfo:
