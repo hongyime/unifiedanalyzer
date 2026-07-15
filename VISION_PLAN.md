@@ -7,6 +7,38 @@
 > `docker compose -f C:\unifiedanalyzer\docker\docker-compose.yml restart scheduler analyzer`
 > (NO rebuild — src is volume-mounted, shared Docker vhdx must not grow).
 
+## Review verification (2026-07-15) — independent audit of Codex's work
+**VERIFIED WORKING (data confirmed in DB + live API):**
+- **Phase 1 timeline saturation:** REPLIED 144,490 (all distinct source_record_id —
+  no fan-out), FORWARDED_MESSAGE 116,770, REACTION_GIVEN 105,082, TAGGED_IN 33,806,
+  COMMENT_POSTED 8,421, HIGHLIGHT_POSTED 3,776, STORY_POSTED 1,452, FOLLOWED 325.
+- **Phase 2 directed interactions:** `entity_interactions` (7,837 rows, unique key
+  holds = idempotent), `/interactions` API returns directed/typed/windowed edges;
+  rel type `interaction` (1,129).
+- **Phase 3 scrubber + fused geo:** `/geo` multi-source (strava+telegram+IG),
+  time-brush wired; frontend builds clean (`tsc`+`vite`).
+- **Phase 5 edge intelligence LIVE:** co_presence(137), co_absence(190),
+  content_reuse(191), style_similarity(454), self_declared_link(12),
+  temporal_hour_similarity(1,283).
+- **Migration safety:** `entity_interactions` added via idempotent `schema.sql`
+  (no new migration file → no drift-bomb). Scheduler healthy; a `full_resolution`
+  run is in progress (heartbeating). Prior "failed" runs are benign
+  restart-orphan cleanups.
+- **Review fixes pushed:** frontend timeline `event_type` param; TimelineLanes
+  hooks-order crash. (commits 8c47170, d708225)
+
+**REMAINING GAPS (wired but NOT producing data — for the next agent):**
+- [ ] **T4.1 face co-appearance** — 0 `PHOTO_COAPPEARANCE` events / 0
+  `face_coappear` interactions despite the wiring commit. Check the
+  `mutual_social_face` → media-owner join / whether face data is populated.
+- [ ] **T5.2 shared route origin** — no route-origin edges produced
+  (`route_similarity` yields ~0). Needs the Strava start-coordinate clustering.
+- [ ] **T5.4 group-size weighting** — verify co-membership weights are size-adjusted.
+- [ ] **IG-geo profile resolution** — the 4,512 IG geo-posts' profiles are NOT in
+  `entity_platform_links`, so IG map points rarely surface (the `/geo` code is
+  correct; the data isn't linked). Resolve those IG profiles to entities — ties
+  directly to the "all entities we come across" goal.
+
 ## Goal
 Turn `unifiedanalyzer` into a targeted-OSINT subject profiler: pick ANY entity
 (sparse or rich) → replay everything they did across every platform on one
