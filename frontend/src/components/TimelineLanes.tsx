@@ -103,9 +103,12 @@ export function TimelineLanes({
 }) {
   const { lanes, alerts, min_t, max_t } = data
   const [playing, setPlaying] = useState(false)
-  if (!min_t || !max_t || lanes.length === 0) {
-    return <div className="text-sm text-muted">No timeline events.</div>
-  }
+  // NOTE: hooks (useState above, useEffect below) must run on every render —
+  // the "no timeline events" early-return lives AFTER all hooks (see below) so
+  // the hook count stays stable when `data` changes between renders. Derive the
+  // range with safe fallbacks so these values are defined even when empty.
+  const safeMin = min_t ?? 0
+  const safeMax = max_t ?? 0
 
   const W = 1000
   const rowH = 26
@@ -113,20 +116,20 @@ export function TimelineLanes({
   const padR = 24
   const padT = 22
   const padB = 6
-  const H = padT + lanes.length * rowH + padB
-  const totalSpan = Math.max(1, max_t - min_t)
+  const H = padT + Math.max(1, lanes.length) * rowH + padB
+  const totalSpan = Math.max(1, safeMax - safeMin)
   const clampedRange: Range = selectedRange
-    ? clampRange(selectedRange, min_t, max_t)
-    : [min_t, max_t]
+    ? clampRange(selectedRange, safeMin, safeMax)
+    : [safeMin, safeMax]
   const [rangeStart, rangeEnd] = clampedRange
   const span = Math.max(1, rangeEnd - rangeStart)
-  const hasCustomRange = rangeStart > min_t || rangeEnd < max_t
+  const hasCustomRange = rangeStart > safeMin || rangeEnd < safeMax
   const ticks = buildTicks(rangeStart, rangeEnd)
   const x = (t: number) => padL + ((t - rangeStart) / span) * (W - padL - padR)
 
   const applyRange = (next: Range | null) => {
     if (!onRangeChange) return
-    onRangeChange(next ? clampRange(next, min_t, max_t) : null)
+    onRangeChange(next ? clampRange(next, safeMin, safeMax) : null)
   }
 
   const applyPreset = (seconds: number | null) => {
@@ -135,25 +138,25 @@ export function TimelineLanes({
       applyRange(null)
       return
     }
-    const nextStart = Math.max(min_t, rangeEnd - seconds)
-    applyRange([nextStart, Math.min(max_t, nextStart + seconds)])
+    const nextStart = Math.max(safeMin, rangeEnd - seconds)
+    applyRange([nextStart, Math.min(safeMax, nextStart + seconds)])
   }
 
   const stepWindow = (direction: -1 | 1) => {
     if (!onRangeChange) return
     const width = hasCustomRange ? span : Math.min(totalSpan, 60 * 60 * 24 * 7)
     const step = Math.max(1, Math.round(width * 0.7))
-    const baseStart = hasCustomRange ? rangeStart : min_t
-    const baseEnd = hasCustomRange ? rangeEnd : min_t + width
+    const baseStart = hasCustomRange ? rangeStart : safeMin
+    const baseEnd = hasCustomRange ? rangeEnd : safeMin + width
     let nextStart = baseStart + direction * step
     let nextEnd = baseEnd + direction * step
-    if (nextStart < min_t) {
-      nextStart = min_t
-      nextEnd = min_t + width
+    if (nextStart < safeMin) {
+      nextStart = safeMin
+      nextEnd = safeMin + width
     }
-    if (nextEnd > max_t) {
-      nextEnd = max_t
-      nextStart = Math.max(min_t, max_t - width)
+    if (nextEnd > safeMax) {
+      nextEnd = safeMax
+      nextStart = Math.max(safeMin, safeMax - width)
     }
     applyRange([nextStart, nextEnd])
   }
@@ -162,7 +165,7 @@ export function TimelineLanes({
     if (!playing || !onRangeChange) return
     if (!hasCustomRange) {
       const seed = Math.min(totalSpan, 60 * 60 * 24 * 7)
-      applyRange([min_t, Math.min(max_t, min_t + seed)])
+      applyRange([safeMin, Math.min(safeMax, safeMin + seed)])
       return
     }
     const width = Math.max(1, span)
@@ -170,15 +173,20 @@ export function TimelineLanes({
       const step = Math.max(1, Math.round(width * 0.18))
       let nextStart = rangeStart + step
       let nextEnd = rangeEnd + step
-      if (nextEnd >= max_t) {
-        nextEnd = max_t
-        nextStart = Math.max(min_t, max_t - width)
+      if (nextEnd >= safeMax) {
+        nextEnd = safeMax
+        nextStart = Math.max(safeMin, safeMax - width)
         setPlaying(false)
       }
       applyRange([nextStart, nextEnd])
     }, 450)
     return () => window.clearInterval(timer)
-  }, [playing, onRangeChange, hasCustomRange, rangeStart, rangeEnd, span, min_t, max_t, totalSpan])
+  }, [playing, onRangeChange, hasCustomRange, rangeStart, rangeEnd, span, safeMin, safeMax, totalSpan])
+
+  // Early-return AFTER all hooks so the hook order stays stable across renders.
+  if (!min_t || !max_t || lanes.length === 0) {
+    return <div className="text-sm text-muted">No timeline events.</div>
+  }
 
   return (
     <div>
