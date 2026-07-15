@@ -508,7 +508,7 @@ export const api = {
   getTimeline: (entityId: string, page = 1, source = '', type = '', from?: string | null, to?: string | null) => {
     let q = `/entities/${entityId}/timeline?page=${page}&per_page=50`
     if (source) q += `&source=${source}`
-    if (type) q += `&type=${type}`
+    if (type) q += `&event_type=${type}`
     if (from) q += `&from=${encodeURIComponent(from)}`
     if (to) q += `&to=${encodeURIComponent(to)}`
     return get<Paginated<TimelineEvent>>(q)
