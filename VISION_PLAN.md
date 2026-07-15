@@ -27,17 +27,37 @@
 - **Review fixes pushed:** frontend timeline `event_type` param; TimelineLanes
   hooks-order crash. (commits 8c47170, d708225)
 
-**REMAINING GAPS (wired but NOT producing data — for the next agent):**
-- [ ] **T4.1 face co-appearance** — 0 `PHOTO_COAPPEARANCE` events / 0
-  `face_coappear` interactions despite the wiring commit. Check the
-  `mutual_social_face` → media-owner join / whether face data is populated.
-- [ ] **T5.2 shared route origin** — no route-origin edges produced
-  (`route_similarity` yields ~0). Needs the Strava start-coordinate clustering.
-- [ ] **T5.4 group-size weighting** — verify co-membership weights are size-adjusted.
-- [ ] **IG-geo profile resolution** — the 4,512 IG geo-posts' profiles are NOT in
-  `entity_platform_links`, so IG map points rarely surface (the `/geo` code is
-  correct; the data isn't linked). Resolve those IG profiles to entities — ties
-  directly to the "all entities we come across" goal.
+**GAP CLOSURE ROUND (2026-07-15) — all 4 addressed:**
+- [x] **GAP-4 IG-geo resolution** — DONE (commit d6aa815, `ig_geo_resolver.py`).
+  Found a systemic NULL-FK bug: `instagram_posts.profile_id` NULL on ~23.5k posts.
+  Recovered author uid from `platform_post_id`; IG `entity_platform_links`
+  432→**1,070**; `db_archigrammer` `/geo` 0→**186 IG points**. Idempotent.
+- [x] **T5.4 group-size weighting** — DONE (commit d60c241). Weight by TRUE group
+  size (`telegram_chats.members_count` / `whatsapp_chats.participant_count`), not
+  collected sender count. 12,502-member group weight dropped 2,083×; small groups
+  stay 1.0.
+- [x] **T4.1 face co-appearance — PIPELINE FIXED** (commit cbac46f), data-starved.
+  Real bug fixed: `face_associations` only honoured `method='media_attribution'`,
+  dropping the newer `media_attribution_relink` attributions. Consumers
+  (PHOTO_COAPPEARANCE, face_coappear) are wired and will auto-fire. BLOCKED
+  upstream: only **52 entity_faces / 27 entities**; no image has 2 distinct
+  entities → nothing to co-locate yet.
+- [x] **T5.2 shared route origin — PIPELINE FIXED + PROVEN** (commit 55fc541).
+  Real bugs fixed: required *exactly* 2 entities per start cell (now 2..N with a
+  >6 public-location guard) + now weighted. Proven end-to-end with synthetic data
+  (→ 1 `shared_home_or_gym` edge). BLOCKED upstream: only **72 of 1,421** GPS
+  strava athletes are resolved to entities → no shared start locus among them.
+
+**THE UNIFYING BOTTLENECK (highest-leverage next work):** faces (T4.1) and routes
+(T5.2) both produce 0 because **entity-resolution COVERAGE is thin** — strava 72
+(of 1,421 GPS athletes), entity_faces 52. The GAP-4 pattern (create entities for
+sources with substantive collected content) applied to **strava GPS athletes** and
+broader **face→entity attribution** would auto-light both. Plus:
+- [ ] **IG `profile_id` NULL backfill (broad)** — GAP-4 repaired 4,202 geo posts;
+  **~19,317 non-geo IG posts still have NULL `profile_id`** → invisible in IG
+  timelines. Same `platform_post_id` split repairs them (safe/idempotent). ROOT:
+  the IG collector inserts NULL `profile_id` — fix collector-side too.
+- [ ] **Broaden strava/face entity resolution** to unblock T5.2 + T4.1.
 
 ## Goal
 Turn `unifiedanalyzer` into a targeted-OSINT subject profiler: pick ANY entity
