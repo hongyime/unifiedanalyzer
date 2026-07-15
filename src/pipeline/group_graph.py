@@ -7,6 +7,14 @@ from src.db.connection import get_analyzer_pool, get_collector_pool
 logger = logging.getLogger(__name__)
 
 
+def _group_weight(member_count: int) -> float:
+    """Small groups should dominate the score; giant rooms should contribute
+    little. 2 members = 1.0, 10 members = 0.1, capped away from zero."""
+    if member_count <= 1:
+        return 0.0
+    return 1.0 / (member_count - 1)
+
+
 async def build_whatsapp_group_graph() -> dict:
     collector = get_collector_pool()
     analyzer = get_analyzer_pool()
@@ -47,15 +55,20 @@ async def build_whatsapp_group_graph() -> dict:
         for l in links:
             entity_lookup[l["platform_id"]] = l["entity_id"]
 
-    pair_weights: dict[tuple[str, str], list[str]] = {}
+    pair_weights: dict[tuple[str, str], list[dict]] = {}
     for chat_id, members in groups.items():
         entity_members = sorted({entity_lookup[p] for p in members if p in entity_lookup})
+        group_size = len(members)
         for i, a in enumerate(entity_members):
             for b in entity_members[i + 1:]:
                 pair = (a, b)
                 if pair not in pair_weights:
                     pair_weights[pair] = []
-                pair_weights[pair].append(group_names[chat_id])
+                pair_weights[pair].append({
+                    "name": group_names[chat_id],
+                    "size": group_size,
+                    "weight": round(_group_weight(group_size), 6),
+                })
 
     stats = {"relationships": 0, "groups_processed": len(groups), "group_cooccurrence_signals": 0}
 
@@ -81,11 +94,19 @@ async def build_whatsapp_group_graph() -> dict:
             "DELETE FROM entity_relationships WHERE relationship_type = 'whatsapp_group_co_member'"
         )
         for (a, b), shared_groups in pair_weights.items():
+            weighted = sum(group["weight"] for group in shared_groups)
+            weight = max(1, round(weighted * 100))
             await conn.execute("""
                 INSERT INTO entity_relationships
                     (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
                 VALUES ($1::uuid, $2::uuid, 'whatsapp_group_co_member', $3, false, $4::jsonb)
-            """, a, b, len(shared_groups), json.dumps({"groups": shared_groups}))
+            """, a, b, weight, json.dumps({
+                "groups": [group["name"] for group in shared_groups],
+                "group_sizes": {group["name"]: group["size"] for group in shared_groups},
+                "weighted_total": round(weighted, 4),
+                "shared_group_count": len(shared_groups),
+                "why": "Shared smaller groups contribute more weight than large groups.",
+            }))
             stats["relationships"] += 1
 
         await conn.execute(
@@ -143,15 +164,20 @@ async def build_telegram_group_graph() -> dict:
         for l in links:
             entity_lookup[l["platform_id"]] = l["entity_id"]
 
-    pair_weights: dict[tuple[str, str], list[str]] = {}
+    pair_weights: dict[tuple[str, str], list[dict]] = {}
     for chat_id, members in groups.items():
         entity_members = sorted({entity_lookup[p] for p in members if p in entity_lookup})
+        group_size = len(members)
         for i, a in enumerate(entity_members):
             for b in entity_members[i + 1:]:
                 pair = (a, b)
                 if pair not in pair_weights:
                     pair_weights[pair] = []
-                pair_weights[pair].append(group_names[chat_id])
+                pair_weights[pair].append({
+                    "name": group_names[chat_id],
+                    "size": group_size,
+                    "weight": round(_group_weight(group_size), 6),
+                })
 
     stats = {"relationships": 0, "groups_processed": len(groups), "group_cooccurrence_signals": 0}
 
@@ -176,11 +202,19 @@ async def build_telegram_group_graph() -> dict:
             "DELETE FROM entity_relationships WHERE relationship_type = 'telegram_group_co_member'"
         )
         for (a, b), shared_groups in pair_weights.items():
+            weighted = sum(group["weight"] for group in shared_groups)
+            weight = max(1, round(weighted * 100))
             await conn.execute("""
                 INSERT INTO entity_relationships
                     (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
                 VALUES ($1::uuid, $2::uuid, 'telegram_group_co_member', $3, false, $4::jsonb)
-            """, a, b, len(shared_groups), json.dumps({"groups": shared_groups}))
+            """, a, b, weight, json.dumps({
+                "groups": [group["name"] for group in shared_groups],
+                "group_sizes": {group["name"]: group["size"] for group in shared_groups},
+                "weighted_total": round(weighted, 4),
+                "shared_group_count": len(shared_groups),
+                "why": "Shared smaller groups contribute more weight than large groups.",
+            }))
             stats["relationships"] += 1
 
         await conn.execute(

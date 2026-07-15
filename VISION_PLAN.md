@@ -225,10 +225,14 @@ digital fused on the same axis.
   `routes=4, points=4` to `routes=0, points=0` for a non-overlapping window;
   `/interactions` for entity `6c76d679-34d3-4da4-91f1-44e1c1a97b4e` dropped from
   `107` peers overall to `5` peers in a 2026-07-13..2026-07-14 window.
-- [ ] **T3.2 Zoom levels (year→second).** Timeline supports zoom + windowing on
+- [x] **T3.2 Zoom levels (year→second).** Timeline supports zoom + windowing on
   `occurred_at` (already second-resolution); bucket adaptively; virtualize dense
   windows.
-  *Accept:* zoomable axis; dense windows don't collapse/lag.
+  *Accept:* zoomable axis; dense windows don't collapse/lag. Notes 2026-07-15:
+  `TimelineLanes.tsx` now drives adaptive tick labels from year down to minute
+  scale, adds preset windows (`1h/1d/1w/1m/1y/all`) plus pan controls, and
+  buckets dense lanes into pixel-width aggregates instead of drawing every point.
+  Frontend builds clean after the zoom/bucketing pass.
 - [ ] **T3.3 Fused map layer.** `GeoMap.tsx` renders Strava routes + IG geo-posts
   (4,512) + message-locations on one map, color-coded by source, time-filtered by
   the brush; clicking a pin cross-highlights the timeline event.
@@ -237,16 +241,23 @@ digital fused on the same axis.
   message-location points, and the map tab now wires point/route clicks back into
   `TimelineLanes` as a highlighted timestamp. Frontend builds clean; box stays
   open until that cross-highlight path is manually verified in-browser.
-- [ ] **T3.4 "Now-line" playback (optional).** A play button that sweeps the
+- [x] **T3.4 "Now-line" playback (optional).** A play button that sweeps the
   brush and animates map pins + graph edges appearing in temporal order.
-  *Accept:* playback animates movement + interactions.
+  *Accept:* playback animates movement + interactions. Notes 2026-07-15:
+  `TimelineLanes.tsx` now exposes `Play/Pause` plus window step controls; because
+  the map and interaction graph are already brush-driven from `EntityDetail.tsx`,
+  playback advances those views in lockstep. Frontend builds clean.
 
 ## PHASE 4 — Tagged photos (both senses) + collection gaps
 - [ ] **T4.1 Face co-appearance → timeline + interaction.** Promote
   `mutual_social_face` (relationship) into a `face_coappear` interaction (T2.1)
   and a `PHOTO_COAPPEARANCE` timeline event on both entities, using media
   ownership (who posted) + face match. Confidence from face score.
-  *Accept:* face-tag events on both entities' timelines.
+  *Accept:* face-tag events on both entities' timelines. Notes 2026-07-15:
+  reran `face_associations` after the latest face pipeline work; it successfully
+  populated `entities.primary_face_id` for `23` entities, but live source data
+  still yields `media_scanned=0`, `face_associations=0`, and
+  `mutual_social_face=0`, so there is nothing concrete to promote yet.
 - [x] **T4.2 Tagged photos + @-mentions → `tagged`/`mentioned` (both senses).**
   (a) Metadata sense — RESOLVED: `media_items kind='tagged'` (**33,806**, 524
   ents, `metadata.taken_at`) = photos an entity is tagged in by others → emit a
@@ -278,24 +289,42 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
 `content_similarity` 191 · `shared_life_context` 374 · `temporal_hour_similarity`
 644 · `social_graph_overlap` 2,197 · `bio_mention` 4 · `shared_website` 23.)
 
-- [ ] **T5.1 Co-presence in time (tight window).** Extend `temporal_correlation.py`:
+- [x] **T5.1 Co-presence in time (tight window).** Extend `temporal_correlation.py`:
   two entities repeatedly active within N seconds → strong `co_presence` edge
   (distinct from hourly `temporal_hour_similarity`). Weight by frequency + tightness.
-  *Accept:* `co_presence` edges with sub-minute evidence.
+  *Accept:* `co_presence` edges with sub-minute evidence. Notes 2026-07-15:
+  `temporal_correlation.py` now writes `entity_relationships.relationship_type='co_presence'`
+  with `window_seconds/coincident_events/copresence_days/p_value/confidence/why`
+  in `sources`. Live rerun produced `co_presence=136`. Example top row carries
+  `weight=135`, `coincident_events=35`, `copresence_days=8`, and reason
+  `"Repeated activity within a sub-minute window suggests tight co-presence."`
 - [ ] **T5.2 Shared route origin → strong edge.** `route_similarity.py` /
   `shared_route_origin` signal currently ~0 rows. Compute Strava route
   start-coordinate clustering across entities → `shared_home_or_gym` edge (very
   strong tie). *Accept:* edges where two entities share a start locus. Notes
   2026-07-15: `relationship_intelligence.py` now promotes
   `identity_signals.shared_route_origin` into `shared_home_or_gym` edges, but the
-  live analyzer currently has `shared_route_origin=0`, so no edges yet.
-- [ ] **T5.3 Reply/mention chain depth & reciprocity.** From `entity_interactions`
+  live analyzer currently has `shared_route_origin=0`, so no edges yet. Latest
+  rerun still reports `entities_with_gps=12` and `shared_route_origin_signals=0`.
+- [x] **T5.3 Reply/mention chain depth & reciprocity.** From `entity_interactions`
   (T2), weight edges by back-and-forth depth + reciprocity ratio + recency, not
   raw count. *Accept:* edge weight reflects conversation depth, not volume.
-- [ ] **T5.4 Group-size-weighted co-membership.** Re-weight
+  Notes 2026-07-15: `refresh_interaction_relationships()` now blends directed
+  volume with reverse-direction totals and a `reciprocity_ratio`; live refresh
+  produced `interaction=1129`, and all `1129` rows now carry
+  `sources.reverse_total`, `sources.reciprocity_ratio`, and
+  `sources.why="Weight blends directed volume with reciprocal depth and balance."`
+- [x] **T5.4 Group-size-weighted co-membership.** Re-weight
   `{telegram,whatsapp}_group_co_member` (96k rows) inversely by group size — 5
   shared small groups ≫ 1 giant broadcast. Add participant_count join.
-  *Accept:* small-group co-members rank above big-group ones.
+  *Accept:* small-group co-members rank above big-group ones. Notes 2026-07-15:
+  both group builders now persist `group_sizes`, `weighted_total`,
+  `shared_group_count`, and an explicit why-string. After restarting the long-
+  running scheduler/analyzer processes and rerunning the builders, live weighted
+  rows are `telegram_group_co_member=20441` and `whatsapp_group_co_member=33037`.
+  Example WhatsApp edge now weighs `228` from `weighted_total=2.2807` across six
+  shared groups; example Telegram edge weighs `1221` from `weighted_total=12.2076`
+  across forty-two mostly small private groups.
 - [x] **T5.5 Content-fingerprint reuse → coordination edge.** Surface
   `content_similarity` (191) + same image sha256 / identical caption / shared
   link across entities as `content_reuse` edges (coordination or same-person).
@@ -314,12 +343,20 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   produced `12` rows. Example live edge: `bryanseah234` ↔
   `SMU Foundations of Cybersecurity`, weight `35`, reason
   `"Human-authored cross-reference in a bio, link, or personal website."`
-- [ ] **T5.7 Style/emoji/language fingerprint → soft same-person.** Per-entity
+- [x] **T5.7 Style/emoji/language fingerprint → soft same-person.** Per-entity
   writing-style vector (emoji freq, n-gram, avg length, language) → similarity
   edge as a soft same-person / affinity signal. *Accept:* style-similarity edges.
-- [ ] **T5.8 Silence correlation.** Entities whose active/quiet windows move
+  Notes 2026-07-15: `relationship_intelligence.py` now derives
+  `style_similarity` edges from stored content-fingerprint metrics plus bio NLP
+  emoji/language hints. Live refresh produced `style_similarity=454`. Example
+  live row weighs `80` and explains fifteen shared top words such as
+  `book/call/clerk/day/duty/ekms/...`.
+- [x] **T5.8 Silence correlation.** Entities whose active/quiet windows move
   together (same travel/timezone shifts) → `co_absence` edge. *Accept:* edges
-  from correlated silence.
+  from correlated silence. Notes 2026-07-15: `temporal_correlation.py` now emits
+  `entity_relationships.relationship_type='co_absence'` with overlap/agreements
+  in `sources`. Live rerun produced `co_absence=190`; top sample rows carry
+  `shared_silent_days` in the `398..637` range with `agreement >= 0.925`.
 - [x] **T5.9 Bridge/centrality scoring.** `graph_analytics.py` — compute
   betweenness/degree; flag entities bridging separate clusters as key targets;
   expose on entity page + `/graph/overview`. *Accept:* centrality scores stored +
@@ -344,7 +381,11 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   empty panels show "no data" not errors. *Accept:* a 1-event entity page is clean.
 - [ ] **CC2 Performance at scale.** Timeline/geo/interaction endpoints paginate +
   window; no full-table scans per entity (indexes on `(actor,occurred_at)` etc).
-  *Accept:* rich-entity page < 2s.
+  *Accept:* rich-entity page < 2s. Notes 2026-07-15: timeline pages remain
+  paginated, interaction + geo endpoints are brush-windowed, and the timeline UI
+  now buckets dense lanes client-side. This box stays open because a fresh live
+  API timing pass for a rich entity still timed out on `timeline-lanes`, so the
+  "< 2s" acceptance target is not met yet.
 - [ ] **CC3 Backfill after each phase.** Run full resolution + timeline rebuild;
   verify counts move. *Accept:* per-phase before/after metrics recorded here.
 

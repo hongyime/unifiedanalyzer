@@ -496,14 +496,14 @@ export const api = {
       nodes: { id: string; name: string | null; weight: number; types: string[]; face: string | null; why?: string | null }[]
     }>(`/entities/${entityId}/network`),
 
-  getTimelineLanes: (entityId: string) =>
+  getTimelineLanes: (entityId: string, maxEvents = 8000) =>
     get<{
       lanes: { source: string; events: { t: number; type: string | null }[] }[]
       alerts: { type: string; t: number }[]
       min_t: number | null
       max_t: number | null
       total: number
-    }>(`/entities/${entityId}/timeline-lanes`),
+    }>(`/entities/${entityId}/timeline-lanes?max_events=${maxEvents}`),
 
   getTimeline: (entityId: string, page = 1, source = '', type = '', from?: string | null, to?: string | null) => {
     let q = `/entities/${entityId}/timeline?page=${page}&per_page=50`

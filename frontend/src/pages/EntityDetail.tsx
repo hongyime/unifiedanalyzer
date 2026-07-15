@@ -191,7 +191,7 @@ export default function EntityDetailPage() {
   const [lanes, setLanes] = useState<Awaited<ReturnType<typeof api.getTimelineLanes>> | null>(null)
   useEffect(() => {
     if (!id) return
-    api.getTimelineLanes(id).then((data) => {
+    api.getTimelineLanes(id, 8000).then((data) => {
       setLanes(data)
       setBrushRange((current) => current ?? (data.min_t != null && data.max_t != null ? [data.min_t, data.max_t] : null))
     }).catch(() => setLanes(null))

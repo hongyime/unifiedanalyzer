@@ -14,7 +14,7 @@ import json
 import logging
 import os
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from math import sqrt, exp, log10
 
 from scipy.stats import poisson
@@ -29,6 +29,14 @@ _COPOST_WINDOW_MIN = 60      # minutes: co-post window
 _COPOST_MIN_DAYS = 3         # minimum co-post days to flag
 _COPOST_MIN_EVENTS = 3       # minimum co-post coincidence events to consider
 _COPOST_CONFIDENCE = 0.70    # base confidence for temporal_copost signal
+_COPRESENCE_WINDOW_SEC = 60  # sub-minute/one-minute tight co-presence window
+_COPRESENCE_MIN_EVENTS = 3
+_COPRESENCE_MIN_DAYS = 2
+_COABSENCE_MIN_OVERLAP_DAYS = 21
+_COABSENCE_MIN_SHARED_SILENT_DAYS = 7
+_COABSENCE_MIN_SHARED_ACTIVE_DAYS = 3
+_COABSENCE_MIN_AGREEMENT = 0.82
+_COABSENCE_MIN_SILENCE_JACCARD = 0.72
 # Significance gate: a pair is only flagged when the observed number of co-post
 # coincidences is unlikely under independence. Correlated posting times happen
 # by chance (timezone overlap, both active evenings) — a raw count flags those.
@@ -57,6 +65,10 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if mag_a == 0 or mag_b == 0:
         return 0.0
     return dot / (mag_a * mag_b)
+
+
+def _date_span(start: date, end: date) -> int:
+    return (end - start).days + 1
 
 
 async def correlate_activity() -> dict:
@@ -109,8 +121,14 @@ async def correlate_activity() -> dict:
 
     # For pairs with enough data, compute co-post coincidences + significance.
     active_entities = [eid for eid, evts in entity_events.items() if len(evts) >= _MIN_EVENTS]
+    active_days_by_entity = {
+        eid: sorted({ts.date() for ts in entity_events[eid]})
+        for eid in active_entities
+    }
     # (a, b, copost_days, k_coincidences, p_value, confidence)
     copost_pairs: list[tuple[str, str, int, int, float, float]] = []
+    copresence_pairs: list[tuple[str, str, int, int, float, float]] = []
+    coabsence_pairs: list[tuple[str, str, int, int, int, float, float, float]] = []
 
     window = timedelta(minutes=_COPOST_WINDOW_MIN)
     # Bonferroni: we evaluate up to C(n,2) pairs; divide the per-test alpha by
@@ -165,10 +183,74 @@ async def correlate_activity() -> dict:
             conf = min(0.90, _COPOST_CONFIDENCE + min(0.20, -log10(max(pval, 1e-30)) * 0.02))
             copost_pairs.append((eid_a, eid_b, len(copost_days), k, pval, round(conf, 3)))
 
+            tight_window = timedelta(seconds=_COPRESENCE_WINDOW_SEC)
+            k_tight = 0
+            copresence_days: set[str] = set()
+            j_tight = 0
+            for ts in a_ov:
+                while j_tight < len(b_ov) and b_ov[j_tight] < ts - tight_window:
+                    j_tight += 1
+                if j_tight < len(b_ov) and b_ov[j_tight] <= ts + tight_window:
+                    k_tight += 1
+                    copresence_days.add(ts.strftime("%Y-%m-%d"))
+            if k_tight >= _COPRESENCE_MIN_EVENTS and len(copresence_days) >= _COPRESENCE_MIN_DAYS:
+                rate_b_tight = len(b_ov) / (span_min * 60.0)
+                p_hit_tight = 1.0 - exp(-rate_b_tight * 2.0 * _COPRESENCE_WINDOW_SEC)
+                lam_tight = len(a_ov) * p_hit_tight
+                pval_tight = float(poisson.sf(k_tight - 1, lam_tight)) if lam_tight > 0 else 0.0
+                if pval_tight <= pval_threshold:
+                    conf_tight = min(0.95, 0.75 + min(0.20, -log10(max(pval_tight, 1e-30)) * 0.025))
+                    copresence_pairs.append((eid_a, eid_b, len(copresence_days), k_tight, pval_tight, round(conf_tight, 3)))
+
+            days_a = active_days_by_entity.get(eid_a) or []
+            days_b = active_days_by_entity.get(eid_b) or []
+            if not days_a or not days_b:
+                continue
+            overlap_start = max(days_a[0], days_b[0])
+            overlap_end = min(days_a[-1], days_b[-1])
+            overlap_days = _date_span(overlap_start, overlap_end)
+            if overlap_days < _COABSENCE_MIN_OVERLAP_DAYS:
+                continue
+            set_a = {day for day in days_a if overlap_start <= day <= overlap_end}
+            set_b = {day for day in days_b if overlap_start <= day <= overlap_end}
+            active_union = len(set_a | set_b)
+            active_intersection = len(set_a & set_b)
+            silent_intersection = overlap_days - active_union
+            if active_intersection < _COABSENCE_MIN_SHARED_ACTIVE_DAYS:
+                continue
+            if silent_intersection < _COABSENCE_MIN_SHARED_SILENT_DAYS:
+                continue
+            silent_union = overlap_days - active_intersection
+            if silent_union <= 0:
+                continue
+            agreement = (active_intersection + silent_intersection) / overlap_days
+            silence_jaccard = silent_intersection / silent_union
+            if agreement < _COABSENCE_MIN_AGREEMENT or silence_jaccard < _COABSENCE_MIN_SILENCE_JACCARD:
+                continue
+            conf_abs = min(
+                0.92,
+                0.68
+                + min(0.12, max(0.0, agreement - _COABSENCE_MIN_AGREEMENT) * 0.7)
+                + min(0.12, max(0.0, silence_jaccard - _COABSENCE_MIN_SILENCE_JACCARD) * 0.6)
+                + min(0.05, active_intersection * 0.01),
+            )
+            coabsence_pairs.append((
+                eid_a,
+                eid_b,
+                overlap_days,
+                active_intersection,
+                silent_intersection,
+                round(silence_jaccard, 3),
+                round(agreement, 3),
+                round(conf_abs, 3),
+            ))
+
     stats = {
         "entities_analyzed": len(hour_dists),
         "tier1_similar_pairs": len(tier1_pairs),
         "tier2_copost_pairs": len(copost_pairs),
+        "copresence_pairs": len(copresence_pairs),
+        "coabsence_pairs": len(coabsence_pairs),
     }
 
     # --- Persist results ---
@@ -176,6 +258,12 @@ async def correlate_activity() -> dict:
         # Tier 1: store in entity_relationships
         await conn.execute(
             "DELETE FROM entity_relationships WHERE relationship_type = 'temporal_hour_similarity'"
+        )
+        await conn.execute(
+            "DELETE FROM entity_relationships WHERE relationship_type = 'co_presence'"
+        )
+        await conn.execute(
+            "DELETE FROM entity_relationships WHERE relationship_type = 'co_absence'"
         )
         for eid_a, eid_b, sim in tier1_pairs:
             a, b = (eid_a, eid_b) if eid_a < eid_b else (eid_b, eid_a)
@@ -188,6 +276,47 @@ async def correlate_activity() -> dict:
                 """, a, b, round(sim * 100), json.dumps({"similarity": round(sim, 4)}))
             except Exception:
                 logger.debug("Tier1 insert failed for %s/%s", a, b, exc_info=True)
+
+        for eid_a, eid_b, days, k, pval, conf in copresence_pairs:
+            a, b = (eid_a, eid_b) if eid_a < eid_b else (eid_b, eid_a)
+            weight = max(1, round(conf * 100) + min(40, k * 3 + days * 2))
+            try:
+                await conn.execute("""
+                    INSERT INTO entity_relationships
+                        (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
+                    VALUES ($1::uuid, $2::uuid, 'co_presence', $3, true, $4::jsonb)
+                    ON CONFLICT DO NOTHING
+                """, a, b, weight, json.dumps({
+                    "window_seconds": _COPRESENCE_WINDOW_SEC,
+                    "coincident_events": k,
+                    "copresence_days": days,
+                    "p_value": float(f"{pval:.3e}"),
+                    "confidence": conf,
+                    "why": "Repeated activity within a sub-minute window suggests tight co-presence.",
+                }))
+            except Exception:
+                logger.debug("co_presence insert failed for %s/%s", a, b, exc_info=True)
+
+        for eid_a, eid_b, overlap_days, shared_active_days, shared_silent_days, silence_jaccard, agreement, conf in coabsence_pairs:
+            a, b = (eid_a, eid_b) if eid_a < eid_b else (eid_b, eid_a)
+            weight = max(1, round(conf * 100) + min(35, shared_silent_days * 2 + shared_active_days * 3))
+            try:
+                await conn.execute("""
+                    INSERT INTO entity_relationships
+                        (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
+                    VALUES ($1::uuid, $2::uuid, 'co_absence', $3, true, $4::jsonb)
+                    ON CONFLICT DO NOTHING
+                """, a, b, weight, json.dumps({
+                    "overlap_days": overlap_days,
+                    "shared_active_days": shared_active_days,
+                    "shared_silent_days": shared_silent_days,
+                    "silence_jaccard": silence_jaccard,
+                    "agreement": agreement,
+                    "confidence": conf,
+                    "why": "Their active and quiet windows move together over time, including matched silence periods.",
+                }))
+            except Exception:
+                logger.debug("co_absence insert failed for %s/%s", a, b, exc_info=True)
 
         # Tier 2: store as identity signals (temporal_copost) — preserve across runs
         await conn.execute(

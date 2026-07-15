@@ -350,6 +350,23 @@ async def refresh_interaction_relationships() -> dict:
                 FROM entity_interactions
                 GROUP BY actor_entity_id, target_entity_id
             ),
+            reciprocity AS (
+                SELECT a.actor_entity_id,
+                       a.target_entity_id,
+                       COALESCE(b.total_weight, 0)::int AS reverse_total,
+                       CASE
+                           WHEN GREATEST(a.total_weight, COALESCE(b.total_weight, 0)) = 0 THEN 0
+                           ELSE ROUND(
+                               LEAST(a.total_weight, COALESCE(b.total_weight, 0))::numeric
+                               / GREATEST(a.total_weight, COALESCE(b.total_weight, 0)),
+                               4
+                           )
+                       END AS reciprocity_ratio
+                FROM agg a
+                LEFT JOIN agg b
+                  ON b.actor_entity_id = a.target_entity_id
+                 AND b.target_entity_id = a.actor_entity_id
+            ),
             type_json AS (
                 SELECT actor_entity_id, target_entity_id,
                        jsonb_object_agg(interaction_type, cnt ORDER BY interaction_type) AS by_type,
@@ -368,16 +385,29 @@ async def refresh_interaction_relationships() -> dict:
             SELECT a.actor_entity_id,
                    a.target_entity_id,
                    'interaction',
-                   a.total_weight,
+                   GREATEST(
+                       1,
+                       ROUND(
+                           a.total_weight
+                           + (COALESCE(r.reverse_total, 0) * 0.35)
+                           + (a.total_weight * COALESCE(r.reciprocity_ratio, 0) * 0.65)
+                       )::int
+                   ),
                    a.cross_platform,
                    jsonb_build_object(
                        'total', a.total_weight,
+                       'reverse_total', COALESCE(r.reverse_total, 0),
+                       'reciprocity_ratio', COALESCE(r.reciprocity_ratio, 0),
                        'by_type', COALESCE(t.by_type, '{}'::jsonb),
                        'by_source', COALESCE(s.by_source, '{}'::jsonb),
-                       'type_last_seen', COALESCE(t.type_last_seen, '{}'::jsonb)
+                       'type_last_seen', COALESCE(t.type_last_seen, '{}'::jsonb),
+                       'why', 'Weight blends directed volume with reciprocal depth and balance.'
                    ),
                    a.last_seen
             FROM agg a
+            LEFT JOIN reciprocity r
+              ON r.actor_entity_id = a.actor_entity_id
+             AND r.target_entity_id = a.target_entity_id
             LEFT JOIN type_json t
               ON t.actor_entity_id = a.actor_entity_id
              AND t.target_entity_id = a.target_entity_id
