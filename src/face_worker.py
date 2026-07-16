@@ -670,6 +670,7 @@ def relink_entity_faces(limit: int | None = None) -> dict:
                 "SELECT f.id AS face_id, i.file_hash AS mid, f.quality_score AS q "
                 "FROM faces f JOIN images i ON i.id = f.image_id "
                 "WHERE i.file_hash ~* '^[0-9a-f-]{36}$' "
+                "AND NOT COALESCE(f.is_junk, false) "
                 "AND NOT EXISTS (SELECT 1 FROM public.entity_faces ef WHERE ef.face_id = f.id)"
             )
             if limit:
