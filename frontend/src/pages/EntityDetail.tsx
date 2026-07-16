@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Trash2, Bell, MapPin, Users2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { ArrowLeft, Trash2, Bell, MapPin, ChevronLeft, ChevronRight } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 import {
   api,
@@ -16,7 +16,7 @@ import {
 } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { TimelineLanes } from '../components/TimelineLanes'
-import { NetworkGraph } from '../components/NetworkGraph'
+import { ConnectionsPanel } from '../components/ConnectionsPanel'
 import { IdentitySummary } from '../components/IdentitySummary'
 import { GeoMap } from '../components/GeoMap'
 import { PageHeader } from '../components/ui/PageHeader'
@@ -131,13 +131,13 @@ type TabKey =
   | 'timeline'
   | 'map'
   | 'behavior'
-  | 'interactions'
-  | 'relationships'
-  | 'social-circle'
+  | 'connections'
   | 'intelligence'
   | 'settings'
 
-const TIMELINE_TABS = new Set<TabKey>(['timeline', 'map', 'interactions'])
+// Tabs that share the timeline brush (lanes + time-window filtering). The
+// consolidated Connections tab keeps interactions windowable, so it is included.
+const TIMELINE_TABS = new Set<TabKey>(['timeline', 'map', 'connections'])
 
 export default function EntityDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -206,8 +206,11 @@ export default function EntityDetailPage() {
     api.getBehavior(id).then(setBehavior).catch(() => setBehavior(null))
   }, [id, tab])
 
+  // Interactions are windowable — reload when the time brush moves. The rest of
+  // the Connections data (relationships, network, associates, social circle) is
+  // window-independent and loaded once per entity when the tab opens.
   useEffect(() => {
-    if (!id || tab !== 'interactions') return
+    if (!id || tab !== 'connections') return
     api.getInteractions(
       id,
       isoFromEpoch(brushRange?.[0] ?? null),
@@ -215,17 +218,14 @@ export default function EntityDetailPage() {
     ).then(r => setInteractions(r.data)).catch(() => setInteractions([]))
   }, [id, tab, brushRange])
 
-  useEffect(() => {
-    if (!id || tab !== 'relationships') return
-    api.getRelationships(id).then(r => setRelationships(r.data)).catch(() => setRelationships([]))
-  }, [id, tab])
-
   const [network, setNetwork] = useState<Awaited<ReturnType<typeof api.getEntityNetwork>> | null>(null)
   const [associates, setAssociates] = useState<Awaited<ReturnType<typeof api.getEntityAssociates>> | null>(null)
   useEffect(() => {
-    if (!id || tab !== 'relationships') return
+    if (!id || tab !== 'connections') return
+    api.getRelationships(id).then(r => setRelationships(r.data)).catch(() => setRelationships([]))
     api.getEntityNetwork(id).then(setNetwork).catch(() => setNetwork(null))
     api.getEntityAssociates(id).then(setAssociates).catch(() => setAssociates(null))
+    api.getEntitySocialCircle(id).then(d => setSocialCircle(d.associations)).catch(() => setSocialCircle([]))
   }, [id, tab])
 
   const [geo, setGeo] = useState<Awaited<ReturnType<typeof api.getEntityGeo>> | null>(null)
@@ -239,10 +239,6 @@ export default function EntityDetailPage() {
   }, [id, tab, brushRange])
 
   const [socialCircle, setSocialCircle] = useState<SocialCircleEntry[] | null>(null)
-  useEffect(() => {
-    if (!id || tab !== 'social-circle') return
-    api.getEntitySocialCircle(id).then(d => setSocialCircle(d.associations)).catch(() => setSocialCircle([]))
-  }, [id, tab])
 
   const [changelog, setChangelog] = useState<Awaited<ReturnType<typeof api.getChangelog>> | null>(null)
   const loadChangelog = () => { if (id) api.getChangelog(id).then(setChangelog).catch(() => setChangelog(null)) }
@@ -389,43 +385,6 @@ export default function EntityDetailPage() {
     },
   ], [])
 
-  const relationshipCols = useMemo<ColumnDef<Relationship, unknown>[]>(() => [
-    {
-      id: 'entity',
-      header: 'Connected person',
-      cell: ({ row }) => (
-        <Link to={`/entities/${row.original.other_entity_id}`}>
-          {row.original.other_name || row.original.other_entity_id.slice(0, 8)}
-        </Link>
-      ),
-    },
-    {
-      id: 'type',
-      header: 'Type',
-      cell: ({ row }) => (
-        <span className="rounded-full bg-info/15 px-2 py-0.5 text-xs font-medium text-info">
-          {row.original.relationship_type.replace(/_/g, ' ')}
-        </span>
-      ),
-    },
-    {
-      id: 'weight',
-      header: 'Weight',
-      accessorFn: (r) => r.weight,
-      cell: ({ row }) => <span className="font-mono tabular-nums text-sm">{row.original.weight}</span>,
-    },
-    {
-      id: 'why',
-      header: 'Why',
-      cell: ({ row }) => {
-        const s = row.original.sources
-        const groups = s && typeof s === 'object' && 'groups' in s ? (s as { groups: string[] }).groups : []
-        const text = row.original.why || groups.join(', ') || '—'
-        return <span className="block max-w-[360px] text-xs text-text-muted">{text}</span>
-      },
-    },
-  ], [])
-
   if (loading) return <LoadingSpinner label="Loading person…" />
   if (!entity) return <EmptyState title="Person not found" description="This entity may have been merged or removed." />
 
@@ -441,9 +400,7 @@ export default function EntityDetailPage() {
     { key: 'timeline', label: 'Timeline' },
     { key: 'map', label: 'Map' },
     { key: 'behavior', label: 'Behavior' },
-    { key: 'interactions', label: 'Interactions' },
-    { key: 'relationships', label: 'Relationships' },
-    { key: 'social-circle', label: 'Social Circle' },
+    { key: 'connections', label: 'Connections' },
     { key: 'intelligence', label: 'Intelligence' },
     { key: 'settings', label: 'Settings' },
   ]
@@ -611,48 +568,28 @@ export default function EntityDetailPage() {
         </div>
       )}
 
-      {/* ── Social Circle ──────────────────────────────────────────────── */}
-      {tab === 'social-circle' && (
-        <div className="space-y-4">
-          <Card title="Face Associations">
-            <div className="text-sm text-text-secondary mb-4">
-              Faces found in photos posted by this entity. These can establish social connections.
-            </div>
-            
-            {!socialCircle ? (
-              <LoadingSpinner label="Loading social circle…" />
-            ) : socialCircle.length === 0 ? (
-              <EmptyState title="No face associations" description="No faces were found in this entity's photos." />
-            ) : (
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {socialCircle.map((assoc, i) => (
-                  <div key={i} className="rounded-md border border-border p-3 flex flex-col gap-2">
-                    <FaceAvatar url={assoc.face_crop_url || null} name="Associate" size={60} />
-                    <div className="text-xs text-text-muted break-all">
-                      From Media: {assoc.media_item_id.slice(0,8)}...
-                    </div>
-                    {assoc.matched_entity_id ? (
-                      <div className="mt-2 text-sm border-t border-border pt-2">
-                        <div className="font-medium text-text-secondary text-xs uppercase tracking-wider mb-1">Matched Entity</div>
-                        <Link to={`/entities/${assoc.matched_entity_id}`} className="block truncate text-accent hover:underline">
-                          {assoc.matched_entity_name || assoc.matched_entity_id.slice(0, 8)}
-                        </Link>
-                        {assoc.matched_confidence && (
-                          <div className="text-xs text-text-muted mt-0.5">
-                            Confidence: {Math.round(assoc.matched_confidence * 100)}%
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="mt-2 text-xs text-text-muted border-t border-border pt-2 italic">
-                        Unmatched face
-                      </div>
-                    )}
-                  </div>
-                ))}
+      {/* ── Connections (merged: relationships + interactions + social circle) ── */}
+      {tab === 'connections' && (
+        <div className="space-y-3">
+          {lanes && lanes.total > 0 && (
+            <Card>
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-sm font-semibold">Time window</div>
+                <div className="text-xs text-text-muted">Filters directed interactions</div>
               </div>
-            )}
-          </Card>
+              <TimelineLanes data={lanes} selectedRange={brushRange} onRangeChange={setBrushRange} />
+            </Card>
+          )}
+          <ConnectionsPanel
+            entityId={entity.id}
+            centerName={entity.canonical_name}
+            centerFace={entity.face_crop_url ?? null}
+            relationships={relationships}
+            interactions={interactions}
+            network={network}
+            associates={associates?.associates ?? []}
+            socialCircle={socialCircle ?? []}
+          />
         </div>
       )}
 
@@ -1005,118 +942,6 @@ export default function EntityDetailPage() {
             )}
           </div>
         )
-      )}
-
-      {/* ── Relationships ────────────────────────────────────────────── */}
-      {tab === 'interactions' && (
-        <div className="space-y-3">
-          {lanes && lanes.total > 0 && (
-            <Card>
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-sm font-semibold">Time window</div>
-                <div className="text-xs text-text-muted">Filters graph + summary</div>
-              </div>
-              <TimelineLanes data={lanes} selectedRange={brushRange} onRangeChange={setBrushRange} />
-            </Card>
-          )}
-          {interactions.length === 0 ? (
-            <EmptyState
-              icon={<Users2 className="h-10 w-10" />}
-              title="No directed interactions yet"
-              description="Replies, reactions, follows, mentions, tags, and DMs will appear here once both sides resolve to tracked entities."
-            />
-          ) : (
-            <>
-              <Card>
-                <div className="mb-1 text-sm font-semibold">
-                  Directed interaction graph <span className="text-text-muted">(arrow = action direction)</span>
-                </div>
-                <NetworkGraph
-                  data={{
-                    center: { id: entity?.id || id || '', name: entity?.canonical_name || null, face: entity?.face_crop_url || null },
-                    nodes: interactions.map((item) => ({
-                      id: item.entity_id,
-                      name: item.name,
-                      face: item.face,
-                      weight: item.total,
-                      out: item.out,
-                      in: item.in,
-                    })),
-                  }}
-                />
-              </Card>
-              <Card title="Reciprocal summary">
-                <div className="space-y-2">
-                  {interactions.map((item) => (
-                    <div key={item.entity_id} className="flex items-start justify-between gap-3 rounded-lg border border-border px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <FaceAvatar url={item.face} name={item.name || item.entity_id} size={28} />
-                        <div>
-                          <Link to={`/entities/${item.entity_id}`} className="text-sm font-medium">
-                            {item.name || item.entity_id.slice(0, 8)}
-                          </Link>
-                          <div className="text-xs text-text-muted">
-                            out {item.out.total} | in {item.in.total}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="text-right text-xs text-text-muted">
-                        <div>out: {Object.entries(item.out.by_type).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}</div>
-                        <div>in: {Object.entries(item.in.by_type).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </Card>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* ── Relationships ────────────────────────────────────────────── */}
-      {tab === 'relationships' && (
-        <div className="space-y-3">
-          {network && network.nodes.length > 0 && (
-            <Card>
-              <div className="mb-1 text-sm font-semibold">
-                Connection graph <span className="text-text-muted">(click to pivot)</span>
-              </div>
-              <NetworkGraph data={network} />
-            </Card>
-          )}
-          {associates && associates.associates.length > 0 && (
-            <Card>
-              <div className="mb-2 text-sm font-semibold">
-                Seen with <span className="text-text-muted">(co-tagged in photos)</span>
-              </div>
-              <div className="flex flex-wrap gap-1">
-                {associates.associates.map((a, i) => {
-                  const chip = (
-                    <span className="inline-flex items-center gap-1 rounded-full border border-border py-0.5 pl-0.5 pr-2 text-xs">
-                      <FaceAvatar url={a.face} name={a.entity_name || a.full_name || a.username} size={22} />
-                      <span>{a.entity_name || a.full_name || a.username}</span>
-                      <span className="text-text-muted">×{a.shared}</span>
-                    </span>
-                  )
-                  return a.entity_id
-                    ? <Link key={i} to={`/entities/${a.entity_id}`}>{chip}</Link>
-                    : <span key={i}>{chip}</span>
-                })}
-              </div>
-            </Card>
-          )}
-          {relationships.length === 0 ? (
-            <EmptyState
-              icon={<Users2 className="h-10 w-10" />}
-              title="No relationships found"
-              description="Connections to other tracked people appear here as the graph engine finds them."
-            />
-          ) : (
-            <Card>
-              <DataTable data={relationships} columns={relationshipCols} pageSize={20} />
-            </Card>
-          )}
-        </div>
       )}
 
       {/* ── Intelligence ─────────────────────────────────────────────── */}
