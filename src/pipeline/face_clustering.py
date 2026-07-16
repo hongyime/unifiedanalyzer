@@ -641,6 +641,132 @@ async def propagate_drive_faces_via_knn() -> dict:
     return stats
 
 
+# ── Q2: cluster -> identity materialization ──
+
+# A cluster must have at least this many non-junk faces to become an identity.
+# Singletons (size 1) are almost always one-off detections; requiring >=2 keeps
+# facetracker.identities meaningful (a "person seen more than once").
+_IDENTITY_MIN_CLUSTER_SIZE = int(os.getenv("FACE_IDENTITY_MIN_CLUSTER_SIZE", "2"))
+
+
+async def build_identities_from_clusters() -> dict:
+    """Q2: materialize facetracker.identities (+ face_identity_map) from the
+    face clusters produced by cluster_faces().
+
+    Root cause this fixes: nothing in the codebase ever wrote facetracker.identities
+    (face_worker Stage-1 only creates the schema), so identities stayed 0 even
+    with 10k+ clustered faces. This builds one Identity per multi-face cluster,
+    computes its centroid embedding, maps every non-junk face in the cluster to it
+    (face_identity_map, assigned_by='auto_cluster'), and — when the cluster has a
+    single dominant bridged entity — copies that entity's canonical_name onto the
+    Identity.name so the identity is human-readable.
+
+    Idempotent: rebuilt from scratch each pass (identities are a pure projection
+    of the current clustering). face_identity_map is keyed unique on face_id.
+
+    Returns counts. Junk faces (is_junk) are excluded."""
+    import time
+    _t = time.monotonic()
+    analyzer = get_analyzer_pool()
+    stats = {"identities": 0, "faces_mapped": 0, "named": 0}
+
+    async with analyzer.acquire() as conn:
+        await _ensure_schema(conn)
+        # Clusters eligible to become identities: size >= min, non-junk faces only.
+        clusters = await conn.fetch(
+            """
+            SELECT cluster_id, count(*) AS n
+            FROM facetracker.faces
+            WHERE cluster_id IS NOT NULL AND NOT is_junk AND embedding_vec IS NOT NULL
+            GROUP BY cluster_id
+            HAVING count(*) >= $1
+            """,
+            _IDENTITY_MIN_CLUSTER_SIZE,
+        )
+        if not clusters:
+            logger.info("build_identities_from_clusters: no eligible clusters")
+            return stats
+
+        # Dominant bridged entity per cluster (for naming) — single distinct
+        # entity only, else leave unnamed (ambiguous).
+        ent_rows = await conn.fetch(
+            """
+            SELECT f.cluster_id, ef.entity_id::text AS eid, count(*) AS n
+            FROM facetracker.faces f
+            JOIN public.entity_faces ef ON ef.face_id = f.id
+            WHERE f.cluster_id IS NOT NULL AND NOT f.is_junk
+            GROUP BY f.cluster_id, ef.entity_id
+            """
+        )
+        by_cluster: dict[int, set[str]] = {}
+        for r in ent_rows:
+            by_cluster.setdefault(r["cluster_id"], set()).add(r["eid"])
+        dominant = {cid: next(iter(es)) for cid, es in by_cluster.items() if len(es) == 1}
+        # Resolve canonical names for the dominant entities in one shot.
+        names: dict[str, str] = {}
+        if dominant:
+            name_rows = await conn.fetch(
+                "SELECT id::text AS id, canonical_name FROM entities WHERE id = ANY($1::uuid[])",
+                list(set(dominant.values())),
+            )
+            names = {r["id"]: r["canonical_name"] for r in name_rows if r["canonical_name"]}
+
+        # Rebuild from scratch (pure projection of current clustering).
+        async with conn.transaction():
+            await conn.execute("TRUNCATE facetracker.face_identity_map, facetracker.identities RESTART IDENTITY CASCADE")
+            for c in clusters:
+                cid = c["cluster_id"]
+                eid = dominant.get(cid)
+                nm = names.get(eid) if eid else None
+                # Centroid = mean of the cluster's non-junk embeddings (computed
+                # in SQL via pgvector AVG). label mirrors name for the UI.
+                centroid = await conn.fetchval(
+                    """
+                    SELECT AVG(embedding_vec)::text
+                    FROM facetracker.faces
+                    WHERE cluster_id = $1 AND NOT is_junk AND embedding_vec IS NOT NULL
+                    """,
+                    cid,
+                )
+                identity_id = await conn.fetchval(
+                    """
+                    INSERT INTO facetracker.identities (name, label, is_verified, cluster_id, centroid_embedding)
+                    VALUES ($1, $1, FALSE, $2, $3::vector)
+                    RETURNING id
+                    """,
+                    nm, cid, centroid,
+                )
+                stats["identities"] += 1
+                if nm:
+                    stats["named"] += 1
+                # Map every non-junk face in the cluster to this identity. The
+                # highest-quality face is the primary representative.
+                mapped = await conn.execute(
+                    """
+                    INSERT INTO facetracker.face_identity_map
+                        (face_id, identity_id, similarity_to_centroid, is_primary, assigned_by, confidence)
+                    SELECT f.id, $2, NULL,
+                           (f.id = (SELECT id FROM facetracker.faces
+                                    WHERE cluster_id = $1 AND NOT is_junk AND embedding_vec IS NOT NULL
+                                    ORDER BY quality_score DESC NULLS LAST LIMIT 1)),
+                           'auto_cluster', f.quality_score
+                    FROM facetracker.faces f
+                    WHERE f.cluster_id = $1 AND NOT f.is_junk AND f.embedding_vec IS NOT NULL
+                    ON CONFLICT (face_id) DO NOTHING
+                    """,
+                    cid, identity_id,
+                )
+                # asyncpg execute returns "INSERT 0 N"; parse the count.
+                try:
+                    stats["faces_mapped"] += int(str(mapped).split()[-1])
+                except (ValueError, IndexError):
+                    pass
+
+    stats["wall_s"] = round(time.monotonic() - _t, 1)
+    logger.info("build_identities_from_clusters: %s", stats)
+    return stats
+
+
 async def run_face_clustering() -> dict:
     """Orchestrator: cluster faces then propagate entity attribution. Gated on
     face-corpus growth so idle cycles are cheap. Wired into incremental_runner
@@ -665,8 +791,14 @@ async def run_face_clustering() -> dict:
         _last_face_count = face_count
         return cluster_stats
     prop_stats = await propagate_entity_faces()
+    # Q2: materialize identities from the (now-propagated) clusters. Runs after
+    # propagation so newly-bridged entities can name their identity.
+    ident_stats = await build_identities_from_clusters()
     _last_face_count = face_count
 
-    stats = {**cluster_stats, **prop_stats, "junk_flagged": junk_stats.get("junk_after")}
+    stats = {**cluster_stats, **prop_stats,
+             "junk_flagged": junk_stats.get("junk_after"),
+             "identities": ident_stats.get("identities"),
+             "identities_named": ident_stats.get("named")}
     logger.info("Face clustering: %s", stats)
     return stats
