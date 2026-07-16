@@ -103,6 +103,11 @@ async def _ensure_schema(conn) -> None:
     """Idempotent DDL: a cluster_id on faces + a cluster metadata table."""
     await conn.execute("ALTER TABLE facetracker.faces ADD COLUMN IF NOT EXISTS cluster_id INTEGER")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_cluster ON facetracker.faces(cluster_id)")
+    # Q3 junk gate: is_junk marks faces that the quality gate deems NOT a real
+    # face (or too low-quality to trust). Junk faces are excluded from clustering,
+    # entity bridging, and identity building. NULL/false = kept.
+    await conn.execute("ALTER TABLE facetracker.faces ADD COLUMN IF NOT EXISTS is_junk BOOLEAN NOT NULL DEFAULT FALSE")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_is_junk ON facetracker.faces(is_junk) WHERE is_junk")
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS facetracker.face_clusters (
             cluster_id          INTEGER PRIMARY KEY,
@@ -111,6 +116,71 @@ async def _ensure_schema(conn) -> None:
             created_at          TIMESTAMPTZ DEFAULT NOW()
         )
     """)
+
+
+# ── Q3: face-quality gate (mark obvious non-faces / untrustworthy crops) ──
+
+# Env-tunable thresholds for flagging EXISTING faces as junk. Defaults are
+# conservative (spot-checking showed even 0.62-0.72 det_score crops are usually
+# real faces, incl. stylised/drawn ones) so a real face is not dropped. Raise
+# FACE_JUNK_MIN_CONFIDENCE toward 0.60-0.65 to be more aggressive.
+_JUNK_MIN_CONFIDENCE = float(os.getenv("FACE_JUNK_MIN_CONFIDENCE", "0.55"))
+_JUNK_MIN_AREA_PERCENT = float(os.getenv("FACE_JUNK_MIN_AREA_PERCENT", "0"))
+_JUNK_MIN_LAPLACIAN = float(os.getenv("FACE_JUNK_MIN_LAPLACIAN", "0"))
+_JUNK_MAX_ASPECT = float(os.getenv("FACE_JUNK_MAX_ASPECT", "2.6"))
+
+
+async def flag_junk_faces() -> dict:
+    """Q3: mark obvious non-faces / untrustworthy crops in facetracker.faces as
+    is_junk=TRUE so they are excluded from clustering + entity bridging.
+
+    Tunable via env (see module constants). A face is junk if ANY of:
+      * detection_confidence < FACE_JUNK_MIN_CONFIDENCE  (RetinaFace det_score —
+        the strongest non-face discriminator)
+      * face_area_percent    < FACE_JUNK_MIN_AREA_PERCENT (0 = disabled)
+      * laplacian_variance   < FACE_JUNK_MIN_LAPLACIAN     (0 = disabled)
+      * bbox aspect ratio    > FACE_JUNK_MAX_ASPECT        (banner/logo strip)
+
+    Idempotent: recomputes the flag every pass (also UN-flags faces that would
+    now pass, e.g. after the operator relaxes a threshold). Returns before/after
+    counts. Bridged entity_faces rows for newly-junked faces are removed so junk
+    can't leak into the social-face graph."""
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        await _ensure_schema(conn)
+        before = await conn.fetchval("SELECT count(*) FROM facetracker.faces WHERE is_junk")
+        total = await conn.fetchval("SELECT count(*) FROM facetracker.faces")
+        # Aspect uses pixel bbox (nullable-safe). GREATEST(w/h, h/w).
+        await conn.execute(
+            """
+            UPDATE facetracker.faces f SET is_junk = (
+                COALESCE(f.detection_confidence, 1.0) < $1
+                OR ($2 > 0 AND COALESCE(f.face_area_percent, 100.0) < $2)
+                OR ($3 > 0 AND COALESCE(f.laplacian_variance, 1e9) < $3)
+                OR (
+                    (f.bbox_px_x2 - f.bbox_px_x1) > 0 AND (f.bbox_px_y2 - f.bbox_px_y1) > 0
+                    AND GREATEST(
+                        (f.bbox_px_x2 - f.bbox_px_x1)::float / NULLIF(f.bbox_px_y2 - f.bbox_px_y1, 0),
+                        (f.bbox_px_y2 - f.bbox_px_y1)::float / NULLIF(f.bbox_px_x2 - f.bbox_px_x1, 0)
+                    ) > $4
+                )
+            )
+            """,
+            _JUNK_MIN_CONFIDENCE, _JUNK_MIN_AREA_PERCENT, _JUNK_MIN_LAPLACIAN, _JUNK_MAX_ASPECT,
+        )
+        after = await conn.fetchval("SELECT count(*) FROM facetracker.faces WHERE is_junk")
+        # Purge entity_faces + cluster_id for junk faces so downstream joins
+        # never see them.
+        purged = await conn.fetchval(
+            "WITH d AS (DELETE FROM public.entity_faces ef "
+            "USING facetracker.faces f WHERE ef.face_id = f.id AND f.is_junk RETURNING ef.face_id) "
+            "SELECT count(*) FROM d"
+        )
+        await conn.execute("UPDATE facetracker.faces SET cluster_id = NULL WHERE is_junk AND cluster_id IS NOT NULL")
+    stats = {"total": total, "junk_before": before, "junk_after": after,
+             "kept": total - after, "entity_faces_purged": purged}
+    logger.info("flag_junk_faces: %s", stats)
+    return stats
 
 
 def _knn_connected_components(M: "np.ndarray", threshold: float, k: int) -> "np.ndarray":
@@ -197,6 +267,7 @@ async def cluster_faces() -> dict:
             SELECT id, embedding_vec::text AS emb
             FROM facetracker.faces
             WHERE embedding_vec IS NOT NULL
+              AND NOT is_junk
             ORDER BY quality_score DESC NULLS LAST
             LIMIT $1
         """, _FACE_CLUSTER_MAX)
@@ -585,6 +656,10 @@ async def run_face_clustering() -> dict:
     if face_count == _last_face_count:
         return {"skipped": "no_new_faces", "faces": face_count}
 
+    # Q3: flag obvious non-faces BEFORE clustering so junk never joins a cluster
+    # or bridges to an entity. Cheap idempotent UPDATE; re-runs each growth tick.
+    junk_stats = await flag_junk_faces()
+
     cluster_stats = await cluster_faces()
     if cluster_stats.get("skipped"):
         _last_face_count = face_count
@@ -592,6 +667,6 @@ async def run_face_clustering() -> dict:
     prop_stats = await propagate_entity_faces()
     _last_face_count = face_count
 
-    stats = {**cluster_stats, **prop_stats}
+    stats = {**cluster_stats, **prop_stats, "junk_flagged": junk_stats.get("junk_after")}
     logger.info("Face clustering: %s", stats)
     return stats

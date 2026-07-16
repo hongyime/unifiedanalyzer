@@ -59,10 +59,22 @@ class FaceDetectionResult:
 class FaceDetector:
     """Detect faces in images using InsightFace RetinaFace."""
 
-    # Configuration thresholds
-    MIN_AREA_RATIO = 0.05  # Face must be at least 5% of image area
-    MIN_LAPLACIAN_VARIANCE = 100  # Minimum sharpness
-    MIN_CONFIDENCE = 0.5  # Minimum detection confidence
+    # Configuration thresholds. Q3 (face-quality gate, 2026-07): these are now
+    # ENV-TUNABLE so the ingest path can tighten what counts as a real face
+    # without a code change (the user's "some aren't even faces" complaint).
+    # Defaults are the historical hardcoded values so behaviour is unchanged
+    # until an operator raises the floor. RetinaFace's det_score is the single
+    # most discriminating signal for logo/pattern false-positives — bump
+    # FACE_MIN_CONFIDENCE (e.g. 0.60) to drop the low-confidence junk tail while
+    # keeping real (even stylised/drawn) faces, which spot-checking showed still
+    # score well above the raw 0.50 floor.
+    MIN_AREA_RATIO = float(os.getenv("FACE_MIN_AREA_RATIO", "0.05"))  # >=5% of image area
+    MIN_LAPLACIAN_VARIANCE = float(os.getenv("FACE_MIN_LAPLACIAN_VARIANCE", "100"))  # sharpness
+    MIN_CONFIDENCE = float(os.getenv("FACE_MIN_CONFIDENCE", "0.5"))  # detection confidence
+    # Aspect-ratio sanity: a real face crop is roughly square (RetinaFace boxes
+    # are near-1:1). A wildly elongated box (banner/logo strip mis-fired as a
+    # face) has max(w/h, h/w) far above ~1. 0 disables the check.
+    MAX_ASPECT_RATIO = float(os.getenv("FACE_MAX_ASPECT_RATIO", "0") or 0)
 
     def __init__(self, model_name: str = "buffalo_l", providers: List[str] = None, root: str = None):
         """
@@ -169,6 +181,17 @@ class FaceDetector:
                 if area_ratio < self.MIN_AREA_RATIO:
                     logger.debug(f"Face filtered: area_ratio {area_ratio:.3f} < {self.MIN_AREA_RATIO}")
                     continue
+
+                # Q3: aspect-ratio sanity — reject wildly non-square boxes
+                # (logo strips / banners mis-detected as faces). Only when the
+                # operator opts in (MAX_ASPECT_RATIO > 0).
+                if self.MAX_ASPECT_RATIO > 0:
+                    bw = max(1, x2 - x1)
+                    bh = max(1, y2 - y1)
+                    aspect = max(bw / bh, bh / bw)
+                    if aspect > self.MAX_ASPECT_RATIO:
+                        logger.debug(f"Face filtered: aspect {aspect:.2f} > {self.MAX_ASPECT_RATIO}")
+                        continue
 
                 # Get confidence
                 confidence = face.det_score if hasattr(face, 'det_score') else 1.0
