@@ -604,6 +604,10 @@ async def ensure_timeline_partitions(months_ahead: int = 6) -> None:
                     f"CREATE TABLE {name} PARTITION OF timeline_events "
                     f"FOR VALUES FROM ('{y:04d}-{mo:02d}-01') TO ('{ny:04d}-{nmo:02d}-01')"
                 )
+                await conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {name}_entity_attributed_time_idx "
+                    f"ON {name}(entity_id, occurred_at DESC) WHERE entity_id IS NOT NULL"
+                )
                 logger.info("Created timeline partition %s", name)
             except Exception:
                 # e.g. a stray out-of-range row already sits in DEFAULT for this
@@ -642,7 +646,16 @@ async def build_timeline(
         logger.debug("ensure_timeline_partitions failed (non-fatal)", exc_info=True)
     entity_lookup = await _get_entity_lookup()
 
-    stats = {"total": 0, "inserted": 0, "skipped_tables": []}
+    stats = {
+        "total": 0,
+        "processed": 0,
+        "inserted": 0,
+        "attributed": 0,
+        "unresolved": 0,
+        "skipped_invalid_time": 0,
+        "skipped_tables": [],
+        "by_source": {},
+    }
 
     for pq in PLATFORM_QUERIES:
         if pq["source"] in skip_sources:
@@ -669,6 +682,9 @@ async def build_timeline(
 
                     batch: list[tuple] = []
                     row_count = 0
+                    attributed_count = 0
+                    unresolved_count = 0
+                    invalid_time_count = 0
 
                     async for row in cursor:
                         # Try the primary entity_ref then an optional fallback
@@ -696,8 +712,10 @@ async def build_timeline(
                         # Skip null/bogus timestamps so they don't regenerate as
                         # 1970/198x (or far-future) timeline noise.
                         if not occurred_at or occurred_at < TIMELINE_MIN_DATE:
+                            invalid_time_count += 1
                             continue
                         if occurred_at > datetime.now(timezone.utc) + TIMELINE_MAX_FUTURE:
+                            invalid_time_count += 1
                             continue
 
                         batch.append((
@@ -710,6 +728,10 @@ async def build_timeline(
                             _jsonb_param(row.get("metadata")),
                         ))
                         row_count += 1
+                        if entity_id:
+                            attributed_count += 1
+                        else:
+                            unresolved_count += 1
 
                         if len(batch) >= BATCH_SIZE:
                             await _insert_batch(analyzer, batch)
@@ -721,7 +743,23 @@ async def build_timeline(
                         stats["inserted"] += len(batch)
 
                     stats["total"] += row_count
-                    logger.info("Timeline %s: %d rows processed", source_name, row_count)
+                    stats["processed"] += row_count
+                    stats["attributed"] += attributed_count
+                    stats["unresolved"] += unresolved_count
+                    stats["skipped_invalid_time"] += invalid_time_count
+                    stats["by_source"][source_name] = {
+                        "processed": row_count,
+                        "attributed": attributed_count,
+                        "unresolved": unresolved_count,
+                        "skipped_invalid_time": invalid_time_count,
+                    }
+                    logger.info(
+                        "Timeline %s: %d rows processed (%d attributed, %d unresolved)",
+                        source_name,
+                        row_count,
+                        attributed_count,
+                        unresolved_count,
+                    )
 
         except Exception as e:
             logger.warning("Skipping %s: %s", source_name, e)
@@ -744,7 +782,7 @@ async def _insert_batch(pool, batch: list[tuple]) -> None:
             -- 3-col semantics. Backed by idx_timeline_uniq4.
             ON CONFLICT (source, event_type, source_record_id, occurred_at)
             DO UPDATE SET
-                entity_id = EXCLUDED.entity_id,
+                entity_id = COALESCE(EXCLUDED.entity_id, timeline_events.entity_id),
                 title = EXCLUDED.title,
                 metadata = EXCLUDED.metadata
             -- Only write when the attribution actually changes. Without this
@@ -753,7 +791,10 @@ async def _insert_batch(pool, batch: list[tuple]) -> None:
             -- Postgres volume for no reason. IS DISTINCT FROM handles NULLs on
             -- both sides. Metadata/title updates are also allowed so newly-added
             -- source payloads can backfill existing timeline rows.
-            WHERE timeline_events.entity_id IS DISTINCT FROM EXCLUDED.entity_id
+            WHERE (
+                    EXCLUDED.entity_id IS NOT NULL
+                    AND timeline_events.entity_id IS DISTINCT FROM EXCLUDED.entity_id
+                  )
                OR timeline_events.title IS DISTINCT FROM EXCLUDED.title
                OR timeline_events.metadata IS DISTINCT FROM EXCLUDED.metadata
         """, batch)

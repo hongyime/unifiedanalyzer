@@ -128,6 +128,17 @@ CREATE TABLE IF NOT EXISTS timeline_events (
 CREATE INDEX IF NOT EXISTS idx_timeline_entity_time ON timeline_events(entity_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_timeline_entity_time_lane_cover
     ON timeline_events(entity_id, occurred_at DESC) INCLUDE (source, event_type);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_partitioned_table pt
+        JOIN pg_class c ON c.oid = pt.partrelid WHERE c.relname = 'timeline_events'
+    ) THEN
+        CREATE INDEX IF NOT EXISTS idx_timeline_entity_attributed_time
+            ON timeline_events(entity_id, occurred_at DESC)
+            WHERE entity_id IS NOT NULL;
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_timeline_time ON timeline_events(occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_timeline_source ON timeline_events(source);
 -- P2-5 (identity_system_review_plan.md): 4-column unique key including the
