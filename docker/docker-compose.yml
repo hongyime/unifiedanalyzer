@@ -167,6 +167,10 @@ services:
          "/mnt/w/$$RECYCLE.BIN", "/mnt/w/System Volume Information",
          "/mnt/x/$$RECYCLE.BIN", "/mnt/x/System Volume Information"]
     volumes:
+      # Live source mount (matches analyzer/scheduler) so code changes to
+      # src/face_worker.py + src/face/* take effect on `restart` without an
+      # image rebuild (Q1 video ingest + Q3 detector gate). dist stays baked.
+      - "../src:/app/src"
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
       # Whole-drive read-only mounts for face scanning. Read-only: the worker

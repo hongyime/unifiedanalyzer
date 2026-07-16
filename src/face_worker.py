@@ -717,6 +717,255 @@ def relink_entity_faces(limit: int | None = None) -> dict:
     return stats
 
 
+# Collector video content types worth sampling for faces. Personal-comms video
+# (telegram/beeper/whatsapp) is highest-signal for OSINT; the big YouTube/TikTok/
+# Instagram volume is opt-in via FACE_VIDEO_SOURCES so a run isn't swamped by
+# influencer content. Override to '' to take all sources.
+_VIDEO_FACE_SOURCES = tuple(
+    s.strip() for s in os.getenv(
+        "FACE_VIDEO_SOURCES", "telegram,beeper,whatsapp,threads,instagram"
+    ).split(",") if s.strip()
+)
+_VIDEO_FRAME_INTERVAL_SEC = int(os.getenv("FACE_VIDEO_FRAME_INTERVAL", "20"))
+_VIDEO_FRAME_MAX = int(os.getenv("FACE_VIDEO_FRAME_MAX", "12"))
+
+
+def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
+    """Q1: index faces from collector VIDEO media into facetracker.
+
+    The face corpus was image-only (facetracker.images.is_video all False, 42k
+    collector videos unprocessed by the facetracker path). ingest_collector_media
+    handles only ('image','profile_photo'); video frames extracted by the
+    analyzer's Tier-1 extract_video_frames() land in public.media_analysis, NOT
+    facetracker — so no video face ever reached clustering / entity_faces.
+
+    This walks collector videos (FACE_VIDEO_SOURCES), samples keyframes with
+    ffmpeg (fps=1/interval, capped at FACE_VIDEO_FRAME_MAX; falls back to the
+    first frame for sub-interval clips), runs InsightFace on each frame, and
+    writes ONE facetracker Image per video with is_video=True + video_frames=N
+    and every detected face across frames (frame index recorded on Face.frame_number
+    + video_path). Bridges to the owning entity via media attribution, identical
+    to the image path, so video faces feed clustering, identities, and entity_faces.
+
+    Deduped by images.file_path (the video's collector path), bounded by `limit`
+    (videos, not frames) per call for resumable batching. Idempotent.
+
+    tracked_only mirrors ingest_collector_media: restrict to videos whose owner
+    resolves to a known analyzer entity FIRST, so detector time is spent where it
+    can populate entity_faces (personal-comms video is mostly untracked group
+    chats). ffmpeg/drive gates fail closed (graceful offline)."""
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    import cv2
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    from src.face.engine.detector import FaceDetector
+    from src.face.storage.database import Image as FtImage, Face as FtFace
+    from src.pipeline.media_common import resolve_media_path, _MEDIA_CONFINEMENT_ROOT
+
+    stats = {"scanned": 0, "videos_indexed": 0, "frames": 0, "faces": 0,
+             "linked": 0, "skipped": 0, "no_frames": 0}
+
+    if shutil.which("ffmpeg") is None:
+        logger.warning("ingest_video_frames: ffmpeg not on PATH, skipping")
+        return {**stats, "skipped_reason": "ffmpeg_unavailable"}
+    if not _MEDIA_CONFINEMENT_ROOT.exists():
+        logger.warning("ingest_video_frames: media root offline, skipping")
+        return {**stats, "skipped_reason": "drive_offline"}
+
+    analyzer_engine = create_engine(
+        analyzer_sqlalchemy_url(),
+        connect_args={"options": f"-csearch_path={FACE_DB_SCHEMA},public"},
+        pool_pre_ping=True,
+        pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
+        max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
+    )
+    collector_engine = create_engine(
+        _collector_sqlalchemy_url(), pool_pre_ping=True,
+        pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
+        max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
+    )
+    _wait_for_db(analyzer_engine)
+    _wait_for_db(collector_engine)
+
+    with analyzer_engine.connect() as aconn:
+        done = {r[0] for r in aconn.execute(text("SELECT file_path FROM images")).fetchall()}
+        entity_lookup = _build_entity_lookup(aconn)
+
+    # Candidate videos. Restrict source when FACE_VIDEO_SOURCES is set.
+    with collector_engine.connect() as cconn:
+        if _VIDEO_FACE_SOURCES:
+            rows = cconn.execute(
+                text("SELECT id::text AS id, source, entity_id, content_type, file_path "
+                     "FROM media_items WHERE content_type = 'video' AND file_path IS NOT NULL "
+                     "AND source = ANY(:srcs) ORDER BY collected_at DESC"),
+                {"srcs": list(_VIDEO_FACE_SOURCES)},
+            ).fetchall()
+        else:
+            rows = cconn.execute(
+                text("SELECT id::text AS id, source, entity_id, content_type, file_path "
+                     "FROM media_items WHERE content_type = 'video' AND file_path IS NOT NULL "
+                     "ORDER BY collected_at DESC")
+            ).fetchall()
+
+    if tracked_only:
+        rows = [
+            r for r in rows
+            if entity_lookup.get((r.source, r.entity_id))
+            or (entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None)
+        ]
+
+    detector = None
+    Session = sessionmaker(bind=analyzer_engine)
+
+    def _extract_frames(video_path: Path, outdir: Path) -> list[tuple[int, Path]]:
+        """ffmpeg keyframe sample -> [(sec, frame_path)]. Falls back to first
+        frame for clips shorter than the sampling interval."""
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(video_path),
+             "-vf", f"fps=1/{_VIDEO_FRAME_INTERVAL_SEC}",
+             "-frames:v", str(_VIDEO_FRAME_MAX), "-loglevel", "error",
+             str(outdir / "frame_%03d.jpg")],
+            capture_output=True, timeout=180,
+        )
+        frames = []
+        for fp in sorted(outdir.glob("frame_*.jpg")):
+            try:
+                idx = int(fp.stem.split("_")[1])
+            except (ValueError, IndexError):
+                continue
+            frames.append(((idx - 1) * _VIDEO_FRAME_INTERVAL_SEC, fp))
+        if not frames:
+            first = outdir / "fallback.jpg"
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(video_path), "-frames:v", "1",
+                 "-loglevel", "error", str(first)],
+                capture_output=True, timeout=180,
+            )
+            if first.exists():
+                frames.append((0, first))
+        return frames
+
+    for r in rows:
+        if stats["videos_indexed"] >= limit:
+            break
+        if r.file_path in done:
+            continue
+        stats["scanned"] += 1
+        disk = resolve_media_path(r.file_path)
+        if disk is None:
+            stats["skipped"] += 1
+            continue
+
+        eid = entity_lookup.get((r.source, r.entity_id)) or (
+            entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None
+        )
+
+        with tempfile.TemporaryDirectory(prefix="vidframes_") as td:
+            outdir = Path(td)
+            try:
+                frames = _extract_frames(disk, outdir)
+            except Exception:
+                logger.debug("ffmpeg failed for %s", disk, exc_info=True)
+                frames = []
+            if not frames:
+                stats["no_frames"] += 1
+                # Tombstone so a genuinely un-sampleable video isn't retried
+                # forever (mirrors the image-path tombstone policy).
+                s = Session()
+                try:
+                    s.add(FtImage(
+                        file_path=r.file_path, file_hash=r.id, file_size=0,
+                        file_mtime=0.0, width=0, height=0, status="failed",
+                        is_video=True, video_frames=0, face_count=0,
+                    ))
+                    s.commit()
+                except Exception:
+                    s.rollback()
+                finally:
+                    s.close()
+                done.add(r.file_path)
+                continue
+
+            if detector is None:
+                detector = FaceDetector()
+
+            # Detect across all frames; collect (frame_sec, w, h, faces).
+            per_frame = []
+            total_faces = 0
+            for sec, fp in frames:
+                img = cv2.imread(str(fp))
+                if img is None:
+                    continue
+                h, w = img.shape[:2]
+                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                fs = detector.detect(rgb)
+                per_frame.append((sec, w, h, fs))
+                total_faces += len(fs)
+            stats["frames"] += len(per_frame)
+
+            # Use the first decoded frame's dims as the Image's canonical size.
+            if not per_frame:
+                stats["skipped"] += 1
+                continue
+            _sec0, w0, h0, _ = per_frame[0]
+
+            sess = Session()
+            try:
+                image_row = FtImage(
+                    file_path=r.file_path, file_hash=r.id,
+                    file_size=int(disk.stat().st_size), file_mtime=disk.stat().st_mtime,
+                    width=w0, height=h0, status="completed", is_video=True,
+                    video_frames=len(per_frame), face_count=total_faces,
+                )
+                sess.add(image_row)
+                sess.flush()
+                for sec, w, h, fs in per_frame:
+                    for idx, f in enumerate(fs):
+                        if f.embedding is None:
+                            continue
+                        x1, y1, x2, y2 = [int(v) for v in f.bbox]
+                        face_row = FtFace(
+                            image_id=image_row.id,
+                            embedding_id=f"{r.id}:{sec}:{idx}",
+                            bbox_x1=x1 / w, bbox_y1=y1 / h, bbox_x2=x2 / w, bbox_y2=y2 / h,
+                            bbox_px_x1=x1, bbox_px_y1=y1, bbox_px_x2=x2, bbox_px_y2=y2,
+                            quality_score=float(f.quality_score),
+                            laplacian_variance=float(f.laplacian_variance),
+                            face_area_percent=float(f.area_ratio * 100.0),
+                            detection_confidence=float(f.confidence),
+                            embedding_vec=f.embedding.tolist(),
+                            frame_number=sec, video_path=r.file_path,
+                        )
+                        sess.add(face_row)
+                        sess.flush()
+                        stats["faces"] += 1
+                        if eid:
+                            sess.execute(text(
+                                "INSERT INTO public.entity_faces (entity_id, face_id, media_item_id, confidence, method) "
+                                "VALUES (:e, :f, :m, :c, 'media_attribution') ON CONFLICT (entity_id, face_id) DO NOTHING"
+                            ), {"e": eid, "f": face_row.id, "m": r.id, "c": float(f.quality_score)})
+                            stats["linked"] += 1
+                sess.commit()
+                stats["videos_indexed"] += 1
+                done.add(r.file_path)
+            except Exception:
+                sess.rollback()
+                logger.exception("video ingest failed for media_item %s", r.id)
+                stats["skipped"] += 1
+            finally:
+                sess.close()
+
+    analyzer_engine.dispose()
+    collector_engine.dispose()
+    logger.info("ingest_video_frames: %s", stats)
+    return stats
+
+
 def loop(batch: int, interval: int) -> None:
     """Run ingest_collector_media in a continuous loop (the intended end-state:
     a separate long-running worker process, see docs/facetracker_merge_plan.md §6).
@@ -743,9 +992,16 @@ def loop(batch: int, interval: int) -> None:
     # become resolvable. Cheaper than the drive walk; every ~30min by default.
     relink_interval = int(os.getenv("FACE_WORKER_RELINK_INTERVAL", "1800"))
     relink_every = max(1, relink_interval // max(1, interval))
+    # Q1 video cadence: video sampling is far heavier per item (ffmpeg + N-frame
+    # detect) than an image, so it runs on its own slower cadence and a smaller
+    # per-tick batch. FACE_WORKER_VIDEO_INTERVAL=0 disables the video path.
+    video_batch = int(os.getenv("FACE_WORKER_VIDEO_BATCH", "10"))
+    video_interval = int(os.getenv("FACE_WORKER_VIDEO_INTERVAL", "600"))
+    video_every = max(1, video_interval // max(1, interval)) if video_interval > 0 else 0
     logger.info(
-        "Face worker loop: batch=%d interval=%ds | drive_batch=%d drive_every=%d | relink_every=%d ticks",
-        batch, interval, drive_limit, drive_every, relink_every,
+        "Face worker loop: batch=%d interval=%ds | drive_batch=%d drive_every=%d | "
+        "relink_every=%d | video_batch=%d video_every=%d ticks",
+        batch, interval, drive_limit, drive_every, relink_every, video_batch, video_every,
     )
     tick = 0
     while True:
@@ -783,6 +1039,19 @@ def loop(batch: int, interval: int) -> None:
             except Exception:
                 logger.exception("drive ingest tick failed (will retry next cycle)")
 
+        # Q1: video-frame face ingest on its own (slower) cadence. Tracked-owner
+        # videos first so entity_faces coverage isn't starved by group-chat video.
+        if video_every and tick % video_every == 0:
+            try:
+                vt = ingest_video_frames(video_batch, tracked_only=True)
+                if vt.get("videos_indexed"):
+                    logger.info("tracked video ingest tick: %s", vt)
+                vstats = ingest_video_frames(video_batch)
+                if vstats.get("videos_indexed"):
+                    logger.info("video ingest tick: %s", vstats)
+            except Exception:
+                logger.exception("video ingest tick failed (will retry next cycle)")
+
         tick += 1
         time.sleep(interval)
 
@@ -818,6 +1087,14 @@ def main() -> None:
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else None
         logger.info("entity_faces relink (limit=%s)…", limit)
         logger.info("relink stats: %s", relink_entity_faces(limit))
+    elif cmd == "video":
+        # Q1 one-shot: index faces from collector VIDEO media into facetracker
+        # (is_video=True). Pass "tracked" as the 3rd arg to restrict to
+        # known-entity-owned videos first.
+        limit = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+        tracked = len(sys.argv) > 3 and sys.argv[3] == "tracked"
+        logger.info("Video-frame ingest (limit=%d, tracked_only=%s)…", limit, tracked)
+        logger.info("video ingest stats: %s", ingest_video_frames(limit, tracked_only=tracked))
     elif cmd == "loop":
         batch = int(os.getenv("FACE_WORKER_BATCH", "50"))
         interval = int(os.getenv("FACE_WORKER_INTERVAL", "300"))
