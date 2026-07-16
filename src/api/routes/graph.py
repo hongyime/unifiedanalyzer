@@ -372,6 +372,61 @@ async def entity_associates(entity_id: str, limit: int = Query(40, ge=1, le=100)
     return {"associates": out[:limit]}
 
 
+@router.get("/entities/{entity_id}/social-circle")
+async def entity_social_circle(entity_id: str, limit: int = Query(80, ge=1, le=200)):
+    """Face associations from this entity's own media.
+
+    `face_associations` stores the other detected faces in photos/videos owned by
+    the entity. The frontend expects both unmatched face leads and matched known
+    people, so this keeps every association and resolves a best entity match only
+    when the associated face is already bridged through public.entity_faces.
+    """
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT fa.associated_face_id,
+                   fa.media_item_id,
+                   fa.quality_score,
+                   fa.first_seen_at,
+                   match.entity_id::text AS matched_entity_id,
+                   match.canonical_name AS matched_entity_name,
+                   match.confidence AS matched_confidence
+            FROM face_associations fa
+            LEFT JOIN LATERAL (
+                SELECT ef.entity_id,
+                       e.canonical_name,
+                       ef.confidence
+                FROM public.entity_faces ef
+                JOIN entities e ON e.id = ef.entity_id
+                WHERE ef.face_id = fa.associated_face_id
+                  AND ef.entity_id <> fa.entity_id
+                ORDER BY ef.confidence DESC NULLS LAST, e.canonical_name NULLS LAST
+                LIMIT 1
+            ) AS match ON TRUE
+            WHERE fa.entity_id = $1::uuid
+            ORDER BY
+                match.confidence DESC NULLS LAST,
+                fa.quality_score DESC NULLS LAST,
+                fa.first_seen_at DESC NULLS LAST
+            LIMIT $2
+        """, entity_id, limit)
+
+    return {
+        "associations": [
+            {
+                "associated_face_id": r["associated_face_id"],
+                "face_crop_url": face_crop_url(r["associated_face_id"]),
+                "media_item_id": r["media_item_id"],
+                "matched_entity_id": r["matched_entity_id"],
+                "matched_entity_name": r["matched_entity_name"],
+                "matched_confidence": r["matched_confidence"],
+                "first_seen_at": r["first_seen_at"].isoformat() if r["first_seen_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.get("/entities/{entity_id}/network")
 async def entity_network(entity_id: str, limit: int = Query(30, ge=1, le=80)):
     """Ego-graph: the entity + its strongest neighbours (edges from
