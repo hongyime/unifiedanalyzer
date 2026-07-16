@@ -132,23 +132,45 @@ async def _stop_heartbeat(hb: asyncio.Task) -> None:
 
 
 async def clear_orphaned_run_locks() -> int:
-    """Mark every still-'running' analysis_runs row as failed. Called once at
-    scheduler startup: in the single-scheduler-process model a freshly started
-    scheduler is the ONLY scheduler, so any 'running' row was orphaned by a
-    predecessor killed mid-run (e.g. a container recreate). Without this, the new
-    scheduler would skip runs for up to 30 min until _is_run_locked's stale-lock
-    timer fires. Returns the number cleared."""
+    """Clear only STALE still-'running' analysis_runs rows at scheduler startup.
+
+    Q5 fix (2026-07-16): the old version marked EVERY status='running' row failed
+    on startup ("Orphaned by scheduler restart — cleared on startup"). In the
+    single-scheduler model that is wrong for the common case of a *restart*: a
+    scheduler recreate that happens WHILE a legitimate full_resolution (~2.9h) is
+    executing would kill it every time, so full-res never reached 'completed'
+    (verified: all recent full_resolution rows failed with exactly that message,
+    last completed run was 2026-07-12).
+
+    Correct rule — identical to the stale-lock test in _is_run_locked: only clear
+    a run whose heartbeat (falling back to started_at for pre-heartbeat rows) has
+    been silent longer than _STALE_HEARTBEAT_MINUTES. A run with a FRESH heartbeat
+    means the previous scheduler process was, until seconds ago, actively driving
+    it. Two cases at startup:
+      * the old process is genuinely gone (crash/recreate) → its heartbeat stops,
+        so within _STALE_HEARTBEAT_MINUTES this cleaner (or _is_run_locked's own
+        stale-lock UPDATE, which runs before every scheduled run) frees the lock.
+      * the old process is momentarily still finishing → a fresh heartbeat keeps
+        the run alive; the single-scheduler safety is preserved because
+        _is_run_locked still refuses to start a NEW run while any 'running' row
+        exists, so we never double-write.
+    Trading a few minutes of lock latency after a hard crash for not orphaning
+    every in-flight full-res is the whole point. Returns the number cleared."""
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         cleared = await conn.fetch("""
             UPDATE analysis_runs
             SET status = 'failed', finished_at = NOW(),
-                error_message = 'Orphaned by scheduler restart — cleared on startup'
+                error_message = 'Stale run lock (heartbeat silent) — cleared on scheduler startup'
             WHERE status = 'running'
+              AND COALESCE(heartbeat_at, started_at) < NOW() - make_interval(mins => $1)
             RETURNING id
-        """)
+        """, _STALE_HEARTBEAT_MINUTES)
     if cleared:
-        logger.warning("Cleared %d orphaned run lock(s) on scheduler startup", len(cleared))
+        logger.warning(
+            "Cleared %d stale run lock(s) on scheduler startup (heartbeat older than %d min)",
+            len(cleared), _STALE_HEARTBEAT_MINUTES,
+        )
     return len(cleared)
 
 
