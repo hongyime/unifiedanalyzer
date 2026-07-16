@@ -184,6 +184,9 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_status ON analysis_runs(status);
 CREATE INDEX IF NOT EXISTS idx_runs_started ON analysis_runs(started_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_runs_one_running
+    ON analysis_runs(status)
+    WHERE status = 'running';
 -- P0-3 (identity_system_review_plan.md): liveness heartbeat for run locks. A
 -- background task bumps this every ~60s while a run executes; the stale-lock
 -- cleaner keys off COALESCE(heartbeat_at, started_at) so a legitimately long run

@@ -4,6 +4,8 @@ import os
 import time
 from datetime import datetime, timezone
 
+from asyncpg import UniqueViolationError
+
 from src.db.connection import get_analyzer_pool
 from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.beeper_bridge import bridge_beeper
@@ -81,21 +83,30 @@ logger = logging.getLogger(__name__)
 # the 2-5h total runtime the old start-based timeout kept tripping on.
 _STALE_HEARTBEAT_MINUTES = int(os.getenv("STALE_RUN_HEARTBEAT_MINUTES", "30"))
 _HEARTBEAT_INTERVAL_SECONDS = 60
+_RUN_CLAIM_LOCK_KEY = 0x55414E4152554E  # "UANARUN": serialize run creation.
+
+
+async def _clear_stale_run_locks(conn, error_message: str) -> list[str]:
+    rows = await conn.fetch("""
+        UPDATE analysis_runs
+        SET status = 'failed', finished_at = NOW(),
+            error_message = $2
+        WHERE status = 'running'
+          AND COALESCE(heartbeat_at, started_at) < NOW() - make_interval(mins => $1)
+        RETURNING id::text
+    """, _STALE_HEARTBEAT_MINUTES, error_message)
+    return [r["id"] for r in rows]
 
 
 async def _is_run_locked() -> bool:
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
-        cleaned = await conn.fetchval("""
-            UPDATE analysis_runs
-            SET status = 'failed', finished_at = NOW(),
-                error_message = 'Stale lock (heartbeat silent) — cleaned up automatically'
-            WHERE status = 'running'
-              AND COALESCE(heartbeat_at, started_at) < NOW() - make_interval(mins => $1)
-            RETURNING id
-        """, _STALE_HEARTBEAT_MINUTES)
-        if cleaned:
-            logger.warning("Cleaned up stale run lock: %s", cleaned)
+        cleaned = await _clear_stale_run_locks(
+            conn,
+            "Stale lock (heartbeat silent) - cleaned up automatically",
+        )
+        for run_id in cleaned:
+            logger.warning("Cleaned up stale run lock: %s", run_id)
         row = await conn.fetchval("""
             SELECT id FROM analysis_runs WHERE status = 'running' LIMIT 1
         """)
@@ -158,14 +169,10 @@ async def clear_orphaned_run_locks() -> int:
     every in-flight full-res is the whole point. Returns the number cleared."""
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
-        cleared = await conn.fetch("""
-            UPDATE analysis_runs
-            SET status = 'failed', finished_at = NOW(),
-                error_message = 'Stale run lock (heartbeat silent) — cleared on scheduler startup'
-            WHERE status = 'running'
-              AND COALESCE(heartbeat_at, started_at) < NOW() - make_interval(mins => $1)
-            RETURNING id
-        """, _STALE_HEARTBEAT_MINUTES)
+        cleared = await _clear_stale_run_locks(
+            conn,
+            "Stale run lock (heartbeat silent) - cleared on scheduler startup",
+        )
     if cleared:
         logger.warning(
             "Cleared %d stale run lock(s) on scheduler startup (heartbeat older than %d min)",
@@ -185,13 +192,32 @@ async def get_last_run_time(run_type: str) -> datetime | None:
     return row
 
 
-async def _create_run(run_type: str) -> str:
+async def _try_create_run(run_type: str) -> str | None:
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
-        return await conn.fetchval("""
-            INSERT INTO analysis_runs (run_type, status, heartbeat_at)
-            VALUES ($1, 'running', NOW()) RETURNING id::text
-        """, run_type)
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", _RUN_CLAIM_LOCK_KEY)
+            cleaned = await _clear_stale_run_locks(
+                conn,
+                "Stale lock (heartbeat silent) - cleaned up automatically",
+            )
+            for stale_id in cleaned:
+                logger.warning("Cleaned up stale run lock before starting %s: %s", run_type, stale_id)
+
+            running_id = await conn.fetchval(
+                "SELECT id::text FROM analysis_runs WHERE status = 'running' LIMIT 1"
+            )
+            if running_id:
+                return None
+
+            try:
+                return await conn.fetchval("""
+                    INSERT INTO analysis_runs (run_type, status, heartbeat_at)
+                    VALUES ($1, 'running', NOW()) RETURNING id::text
+                """, run_type)
+            except UniqueViolationError:
+                logger.warning("Run claim lost unique-index race for %s", run_type)
+                return None
 
 
 async def _get_recent_alerts(since_minutes: int = 5) -> list[dict]:
@@ -364,11 +390,11 @@ async def _alert_on_repeated_phase_failures(threshold: int = 3) -> None:
 
 
 async def run_incremental() -> dict:
-    if await _is_run_locked():
+    run_id = await _try_create_run("incremental")
+    if not run_id:
         logger.warning("Another run is in progress, skipping")
         return {"skipped": True}
 
-    run_id = await _create_run("incremental")
     stats = {"entities": 0, "events": 0, "alerts": 0, "signals": 0}
     heartbeat = asyncio.create_task(_heartbeat_loop(run_id))
 
@@ -470,11 +496,11 @@ async def hard_reset_entities() -> None:
 
 
 async def run_full_resolution() -> dict:
-    if await _is_run_locked():
+    run_id = await _try_create_run("full_resolution")
+    if not run_id:
         logger.warning("Another run is in progress, skipping")
         return {"skipped": True}
 
-    run_id = await _create_run("full_resolution")
     stats = {"entities": 0, "events": 0, "alerts": 0, "signals": 0}
     heartbeat = asyncio.create_task(_heartbeat_loop(run_id))
 
