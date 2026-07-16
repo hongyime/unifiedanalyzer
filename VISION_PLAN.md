@@ -73,6 +73,38 @@ broader **face→entity attribution** would auto-light both. Plus:
   activities from the same ~111m cell 1.336,103.672). (face T4.1 still upstream-
   starved — separate track, untouched here.)
 
+## GAP-ROUND-3 (QUALITY) — 2026-07-16, verified from ground truth
+- [x] **Q1 Video → face pipeline** (commits eef6b2e, 833491f). Root cause: videos
+  never reached facetracker (`ingest_collector_media` handled image/profile_photo
+  only). New `ingest_video_frames()` (ffmpeg keyframes → InsightFace → facetracker,
+  is_video=true) + `FACE_VIDEO_MIN_AREA_RATIO`. **is_video images 0 → 59**, real
+  video faces detected. face_worker src-mounted + recreated to run the loop.
+- [x] **Q2 Face clusters → identities → entities** (commit a163c71). Root cause:
+  nothing wrote `facetracker.identities`. New `build_identities_from_clusters()`.
+  **identities 0 → 1,913**, face_identity_map 0 → 5,349, 5 named to real entities
+  (cluster 84 → "Bryan Seah", 15 faces). Fixes dashboard "Identities: 0".
+  entity_faces still ~50 — the entity BRIDGE is data-coverage-limited (most
+  collected media owners are untracked search/github/beeper ids), not a code bug.
+- [x] **Q3 Face quality gate** (commit 87a6963). Env-tunable detector thresholds +
+  `facetracker.faces.is_junk` + `flag_junk_faces()`. **222 junk flagged** (det_score
+  0.50–0.55), 14,646 real faces kept; junk excluded from clustering/bridging.
+- [x] **Q4 Temporal false positives** (commit 3d44c31). Rarity-weighted cosine +
+  Poisson co-occurrence gate + hub exclusion. **temporal_hour_similarity 1,284 → 11**
+  (dropped "both post at 2pm" pairs, kept p=1.6e-14 real coincidences).
+- [x] **Q5 Full-res run resilience** (commit 0270154). `clear_orphaned_run_locks`
+  now only clears STALE-heartbeat runs, not every 'running' — a fresh run survives a
+  scheduler restart (verified: 2min hb survives, 45min cleared). A full_resolution
+  is now running uninterrupted.
+- [x] **Q6 Dashboard Connections view** (commit b2fec24). Merged social-circle /
+  relationships / interactions into one `ConnectionsPanel.tsx` (list↔graph toggle +
+  type filter), lossless; build+tsc pass.
+
+**STILL DATA-STARVED (not code — grows over time):**
+- [ ] **T4.1 face co-appearance** — still 0. Only **1** owned multi-face photo across
+  27 tracked entities; max cross-entity face cosine 0.20 (< 0.55 gate). Auto-fires as
+  face→entity coverage grows (fed by Q1 video faces + broader resolution). Not fixable
+  by code today.
+
 ## Goal
 Turn `unifiedanalyzer` into a targeted-OSINT subject profiler: pick ANY entity
 (sparse or rich) → replay everything they did across every platform on one
