@@ -400,41 +400,50 @@ async def correlate_activity() -> dict:
 
     # --- Persist results ---
     async with analyzer.acquire() as conn:
-        # Tier 1: store in entity_relationships
-        await conn.execute(
-            "DELETE FROM entity_relationships WHERE relationship_type = 'temporal_hour_similarity'"
-        )
-        await conn.execute(
-            "DELETE FROM entity_relationships WHERE relationship_type = 'co_presence'"
-        )
-        await conn.execute(
-            "DELETE FROM entity_relationships WHERE relationship_type = 'co_absence'"
-        )
-        for eid_a, eid_b, sim in tier1_pairs:
-            a, b = (eid_a, eid_b) if eid_a < eid_b else (eid_b, eid_a)
-            try:
+        async with conn.transaction():
+            # Tier 1: store in entity_relationships
+            await conn.execute(
+                "DELETE FROM entity_relationships WHERE relationship_type = 'temporal_hour_similarity'"
+            )
+            await conn.execute(
+                "DELETE FROM entity_relationships WHERE relationship_type = 'co_presence'"
+            )
+            await conn.execute(
+                "DELETE FROM entity_relationships WHERE relationship_type = 'co_absence'"
+            )
+            for eid_a, eid_b, sim in tier1_pairs:
+                a, b = (eid_a, eid_b) if eid_a < eid_b else (eid_b, eid_a)
                 await conn.execute("""
                     INSERT INTO entity_relationships
                         (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
                     VALUES ($1::uuid, $2::uuid, 'temporal_hour_similarity', $3, true, $4::jsonb)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (entity_a_id, entity_b_id, relationship_type)
+                    DO UPDATE SET
+                        weight = EXCLUDED.weight,
+                        cross_platform = EXCLUDED.cross_platform,
+                        sources = EXCLUDED.sources,
+                        last_seen_at = EXCLUDED.last_seen_at,
+                        updated_at = NOW()
                 """, a, b, round(sim * 100), json.dumps({
                     "weighted_similarity": round(sim, 4),
                     "why": "Rarity-weighted posting-hour agreement, confirmed by "
                            "repeated statistically-improbable tight co-occurrences.",
                 }))
-            except Exception:
-                logger.debug("Tier1 insert failed for %s/%s", a, b, exc_info=True)
 
-        for eid_a, eid_b, days, k, pval, conf in copresence_pairs:
-            a, b = (eid_a, eid_b) if eid_a < eid_b else (eid_b, eid_a)
-            weight = max(1, round(conf * 100) + min(40, k * 3 + days * 2))
-            try:
+            for eid_a, eid_b, days, k, pval, conf in copresence_pairs:
+                a, b = (eid_a, eid_b) if eid_a < eid_b else (eid_b, eid_a)
+                weight = max(1, round(conf * 100) + min(40, k * 3 + days * 2))
                 await conn.execute("""
                     INSERT INTO entity_relationships
                         (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
                     VALUES ($1::uuid, $2::uuid, 'co_presence', $3, true, $4::jsonb)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (entity_a_id, entity_b_id, relationship_type)
+                    DO UPDATE SET
+                        weight = EXCLUDED.weight,
+                        cross_platform = EXCLUDED.cross_platform,
+                        sources = EXCLUDED.sources,
+                        last_seen_at = EXCLUDED.last_seen_at,
+                        updated_at = NOW()
                 """, a, b, weight, json.dumps({
                     "window_seconds": _COPRESENCE_WINDOW_SEC,
                     "coincident_events": k,
@@ -443,18 +452,21 @@ async def correlate_activity() -> dict:
                     "confidence": conf,
                     "why": "Repeated activity within a sub-minute window suggests tight co-presence.",
                 }))
-            except Exception:
-                logger.debug("co_presence insert failed for %s/%s", a, b, exc_info=True)
 
-        for eid_a, eid_b, overlap_days, shared_active_days, shared_silent_days, silence_jaccard, agreement, conf in coabsence_pairs:
-            a, b = (eid_a, eid_b) if eid_a < eid_b else (eid_b, eid_a)
-            weight = max(1, round(conf * 100) + min(35, shared_silent_days * 2 + shared_active_days * 3))
-            try:
+            for eid_a, eid_b, overlap_days, shared_active_days, shared_silent_days, silence_jaccard, agreement, conf in coabsence_pairs:
+                a, b = (eid_a, eid_b) if eid_a < eid_b else (eid_b, eid_a)
+                weight = max(1, round(conf * 100) + min(35, shared_silent_days * 2 + shared_active_days * 3))
                 await conn.execute("""
                     INSERT INTO entity_relationships
                         (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
                     VALUES ($1::uuid, $2::uuid, 'co_absence', $3, true, $4::jsonb)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (entity_a_id, entity_b_id, relationship_type)
+                    DO UPDATE SET
+                        weight = EXCLUDED.weight,
+                        cross_platform = EXCLUDED.cross_platform,
+                        sources = EXCLUDED.sources,
+                        last_seen_at = EXCLUDED.last_seen_at,
+                        updated_at = NOW()
                 """, a, b, weight, json.dumps({
                     "overlap_days": overlap_days,
                     "shared_active_days": shared_active_days,
@@ -464,25 +476,23 @@ async def correlate_activity() -> dict:
                     "confidence": conf,
                     "why": "Their active and quiet windows move together over time, including matched silence periods.",
                 }))
-            except Exception:
-                logger.debug("co_absence insert failed for %s/%s", a, b, exc_info=True)
 
-        # Tier 2: store as identity signals (temporal_copost) — preserve across runs
-        await conn.execute(
-            "DELETE FROM identity_signals WHERE signal_type = 'temporal_copost'"
-        )
-        if copost_pairs:
-            signal_rows = [
-                (eid_a, "temporal_copost", "timeline", None, None, None,
-                 "timeline", eid_b, f"copost_days:{days},events:{k},p:{pval:.2e}", conf)
-                for eid_a, eid_b, days, k, pval, conf in copost_pairs
-            ]
-            await conn.executemany("""
-                INSERT INTO identity_signals
-                    (entity_id, signal_type, source_platform, source_table, source_column,
-                     source_record_id, target_platform, target_record_id, value, confidence)
-                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            """, signal_rows)
+            # Tier 2: store as identity signals (temporal_copost) — preserve across runs
+            await conn.execute(
+                "DELETE FROM identity_signals WHERE signal_type = 'temporal_copost'"
+            )
+            if copost_pairs:
+                signal_rows = [
+                    (eid_a, "temporal_copost", "timeline", None, None, None,
+                     "timeline", eid_b, f"copost_days:{days},events:{k},p:{pval:.2e}", conf)
+                    for eid_a, eid_b, days, k, pval, conf in copost_pairs
+                ]
+                await conn.executemany("""
+                    INSERT INTO identity_signals
+                        (entity_id, signal_type, source_platform, source_table, source_column,
+                         source_record_id, target_platform, target_record_id, value, confidence)
+                    VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """, signal_rows)
 
     logger.info("Temporal correlation: %s", stats)
     return stats

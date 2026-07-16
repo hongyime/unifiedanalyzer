@@ -146,11 +146,6 @@ async def refresh_relationship_intelligence() -> dict:
                 "metadata": row["metadata"],
             })
 
-        await conn.execute(
-            "DELETE FROM entity_relationships WHERE relationship_type = ANY($1::text[])",
-            ["self_declared_link", "content_reuse", "shared_home_or_gym", "style_similarity"],
-        )
-
         payloads: list[tuple] = []
         for pair, rows in by_pair["self_declared_link"].items():
             counts: dict[str, int] = defaultdict(int)
@@ -362,15 +357,27 @@ async def refresh_relationship_intelligence() -> dict:
 
         stats["style_similarity_rows"] = len(by_pair["style_similarity"])
 
-        if payloads:
-            await conn.executemany(
-                """
-                INSERT INTO entity_relationships
-                    (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources, last_seen_at)
-                VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, $7::timestamptz)
-                """,
-                payloads,
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM entity_relationships WHERE relationship_type = ANY($1::text[])",
+                ["self_declared_link", "content_reuse", "shared_home_or_gym", "style_similarity"],
             )
+            if payloads:
+                await conn.executemany(
+                    """
+                    INSERT INTO entity_relationships
+                        (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources, last_seen_at)
+                    VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, $7::timestamptz)
+                    ON CONFLICT (entity_a_id, entity_b_id, relationship_type)
+                    DO UPDATE SET
+                        weight = EXCLUDED.weight,
+                        cross_platform = EXCLUDED.cross_platform,
+                        sources = EXCLUDED.sources,
+                        last_seen_at = EXCLUDED.last_seen_at,
+                        updated_at = NOW()
+                    """,
+                    payloads,
+                )
 
     logger.info("Relationship intelligence refreshed: %s", stats)
     return stats

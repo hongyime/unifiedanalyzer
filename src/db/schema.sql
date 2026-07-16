@@ -251,6 +251,26 @@ CREATE TABLE IF NOT EXISTS entity_relationships (
 );
 CREATE INDEX IF NOT EXISTS idx_relationships_a ON entity_relationships(entity_a_id);
 CREATE INDEX IF NOT EXISTS idx_relationships_b ON entity_relationships(entity_b_id);
+WITH ranked_relationships AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY entity_a_id, entity_b_id, relationship_type
+               ORDER BY updated_at DESC NULLS LAST,
+                        weight DESC NULLS LAST,
+                        created_at DESC NULLS LAST,
+                        id DESC
+           ) AS rn
+    FROM entity_relationships
+    WHERE entity_a_id IS NOT NULL
+      AND entity_b_id IS NOT NULL
+      AND relationship_type IS NOT NULL
+)
+DELETE FROM entity_relationships er
+USING ranked_relationships r
+WHERE er.id = r.id
+  AND r.rn > 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relationships_pair_type_unique
+    ON entity_relationships(entity_a_id, entity_b_id, relationship_type);
 
 CREATE TABLE IF NOT EXISTS entity_interactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

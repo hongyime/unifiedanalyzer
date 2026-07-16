@@ -136,16 +136,17 @@ async def dismiss_match(req: DismissMatchRequest):
     same_person_probability suggestion so it stops surfacing."""
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
-        try:
-            await record_label(conn, req.entity_a, req.entity_b, 0, "dashboard_dismiss")
-        except Exception:
-            pass
-        await conn.execute("""
-            DELETE FROM entity_relationships
-            WHERE relationship_type = 'same_person_probability'
-              AND ((entity_a_id = $1::uuid AND entity_b_id = $2::uuid)
-                OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
-        """, req.entity_a, req.entity_b)
+        async with conn.transaction():
+            try:
+                await record_label(conn, req.entity_a, req.entity_b, 0, "dashboard_dismiss")
+            except Exception:
+                pass
+            await conn.execute("""
+                DELETE FROM entity_relationships
+                WHERE relationship_type = 'same_person_probability'
+                  AND ((entity_a_id = $1::uuid AND entity_b_id = $2::uuid)
+                    OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
+            """, req.entity_a, req.entity_b)
 
         # Track-C: hash-chained audit entry. Non-fatal.
         try:

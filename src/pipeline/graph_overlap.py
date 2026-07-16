@@ -103,19 +103,23 @@ async def compute_graph_overlap() -> dict:
         rels.append((a, b, round(jaccard * 100), json.dumps({"jaccard": round(jaccard, 4), "shared": inter})))
 
     async with analyzer.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM entity_relationships WHERE relationship_type = 'social_graph_overlap'"
-        )
-        for a, b, weight, meta in rels:
-            try:
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM entity_relationships WHERE relationship_type = 'social_graph_overlap'"
+            )
+            for a, b, weight, meta in rels:
                 await conn.execute("""
                     INSERT INTO entity_relationships
                         (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
                     VALUES ($1::uuid, $2::uuid, 'social_graph_overlap', $3, false, $4::jsonb)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (entity_a_id, entity_b_id, relationship_type)
+                    DO UPDATE SET
+                        weight = EXCLUDED.weight,
+                        cross_platform = EXCLUDED.cross_platform,
+                        sources = EXCLUDED.sources,
+                        last_seen_at = EXCLUDED.last_seen_at,
+                        updated_at = NOW()
                 """, a, b, weight, meta)
-            except Exception:
-                logger.debug("graph_overlap insert failed for %s/%s", a, b, exc_info=True)
 
     stats = {"entities": len(entity_neighbors), "overlap_pairs": len(rels)}
     logger.info("Graph overlap: %s", stats)

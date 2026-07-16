@@ -79,9 +79,13 @@ async def emit_social_face_link_signals() -> dict:
         # Still run the DELETE so a stale signal set from a prior pass is not
         # left lingering when the source data has emptied out.
         async with analyzer.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM identity_signals WHERE signal_type = 'social_face_link'"
-            )
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM identity_signals WHERE signal_type = 'social_face_link'"
+                )
+                await conn.execute(
+                    "DELETE FROM entity_relationships WHERE relationship_type = 'mutual_social_face'"
+                )
         logger.info("social_face_link signals: %s (no candidates)", stats)
         return stats
 
@@ -157,41 +161,49 @@ async def emit_social_face_link_signals() -> dict:
         ))
 
     async with analyzer.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM identity_signals WHERE signal_type = 'social_face_link'"
-        )
-        if new_signals:
-            await conn.executemany("""
-                INSERT INTO identity_signals
-                    (entity_id, signal_type, source_platform, source_table, source_column,
-                     source_record_id, target_platform, target_record_id, value, confidence, metadata)
-                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-            """, new_signals)
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM identity_signals WHERE signal_type = 'social_face_link'"
+            )
+            if new_signals:
+                await conn.executemany("""
+                    INSERT INTO identity_signals
+                        (entity_id, signal_type, source_platform, source_table, source_column,
+                         source_record_id, target_platform, target_record_id, value, confidence, metadata)
+                    VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+                """, new_signals)
+
+            # Mutual social face logic (T1.3)
+            mutual_pairs = set()
+            for (owner, target_b), (cos, _, _) in items:
+                if (target_b, owner) in pair_best:
+                    # To avoid duplicate (A->B and B->A), just sort them
+                    a, b = (owner, target_b) if owner < target_b else (target_b, owner)
+                    if (a, b) not in mutual_pairs:
+                        mutual_pairs.add((a, b))
             
-        # Mutual social face logic (T1.3)
-        mutual_pairs = set()
-        for (owner, target_b), (cos, _, _) in items:
-            if (target_b, owner) in pair_best:
-                # To avoid duplicate (A->B and B->A), just sort them
-                a, b = (owner, target_b) if owner < target_b else (target_b, owner)
-                if (a, b) not in mutual_pairs:
-                    mutual_pairs.add((a, b))
-        
-        await conn.execute(
-            "DELETE FROM entity_relationships WHERE relationship_type = 'mutual_social_face'"
-        )
-        if mutual_pairs:
-            rel_rows = []
-            for a, b in mutual_pairs:
-                rel_rows.append((
-                    a, b, "mutual_social_face", 90, True, 
-                    json.dumps({"method": "social_face_link_bilateral_check"})
-                ))
-            await conn.executemany("""
-                INSERT INTO entity_relationships
-                    (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
-                VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb)
-            """, rel_rows)
+            await conn.execute(
+                "DELETE FROM entity_relationships WHERE relationship_type = 'mutual_social_face'"
+            )
+            if mutual_pairs:
+                rel_rows = []
+                for a, b in mutual_pairs:
+                    rel_rows.append((
+                        a, b, "mutual_social_face", 90, True,
+                        json.dumps({"method": "social_face_link_bilateral_check"})
+                    ))
+                await conn.executemany("""
+                    INSERT INTO entity_relationships
+                        (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
+                    VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb)
+                    ON CONFLICT (entity_a_id, entity_b_id, relationship_type)
+                    DO UPDATE SET
+                        weight = EXCLUDED.weight,
+                        cross_platform = EXCLUDED.cross_platform,
+                        sources = EXCLUDED.sources,
+                        last_seen_at = EXCLUDED.last_seen_at,
+                        updated_at = NOW()
+                """, rel_rows)
 
     stats["signals_emitted"] = len(new_signals)
     stats["mutual_social_faces"] = len(mutual_pairs)

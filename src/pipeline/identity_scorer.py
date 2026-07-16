@@ -22,6 +22,7 @@ temporal_correlation.correlate_activity() for 'temporal_hour_similarity'.
 """
 import json
 import logging
+from uuid import UUID
 
 from src.db.connection import get_analyzer_pool
 from src.pipeline.identity_calibration import pair_feature_vector, get_model, predict_proba
@@ -105,6 +106,14 @@ def _pair_key(a: str, b: str) -> tuple[str, str]:
     return (a, b) if a < b else (b, a)
 
 
+def _is_uuid(value: str | None) -> bool:
+    try:
+        UUID(str(value))
+        return True
+    except Exception:
+        return False
+
+
 async def compute_identity_scores() -> dict:
     analyzer = get_analyzer_pool()
 
@@ -164,6 +173,10 @@ async def compute_identity_scores() -> dict:
             tgt_eid = row["target_record_id"]
 
         if not tgt_eid or tgt_eid == src_eid:
+            continue
+
+        if not _is_uuid(src_eid) or not _is_uuid(tgt_eid):
+            skipped_unresolved += 1
             continue
 
         key = _pair_key(src_eid, tgt_eid)
@@ -241,15 +254,23 @@ async def compute_identity_scores() -> dict:
         ))
 
     async with analyzer.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM entity_relationships WHERE relationship_type = 'same_person_probability'"
-        )
-        if insert_rows:
-            await conn.executemany("""
-                INSERT INTO entity_relationships
-                    (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
-                VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb)
-            """, insert_rows)
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM entity_relationships WHERE relationship_type = 'same_person_probability'"
+            )
+            if insert_rows:
+                await conn.executemany("""
+                    INSERT INTO entity_relationships
+                        (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
+                    VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb)
+                    ON CONFLICT (entity_a_id, entity_b_id, relationship_type)
+                    DO UPDATE SET
+                        weight = EXCLUDED.weight,
+                        cross_platform = EXCLUDED.cross_platform,
+                        sources = EXCLUDED.sources,
+                        last_seen_at = EXCLUDED.last_seen_at,
+                        updated_at = NOW()
+                """, insert_rows)
 
     high_confidence = sum(1 for r in results if r["score"] >= _HIGH_CONFIDENCE)
 

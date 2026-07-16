@@ -118,36 +118,44 @@ async def build_whatsapp_group_graph() -> dict:
             ))
 
     async with analyzer.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM entity_relationships WHERE relationship_type = 'whatsapp_group_co_member'"
-        )
-        for (a, b), shared_groups in pair_weights.items():
-            weighted = sum(group["weight"] for group in shared_groups)
-            weight = max(1, round(weighted * 100))
-            await conn.execute("""
-                INSERT INTO entity_relationships
-                    (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
-                VALUES ($1::uuid, $2::uuid, 'whatsapp_group_co_member', $3, false, $4::jsonb)
-            """, a, b, weight, json.dumps({
-                "groups": [group["name"] for group in shared_groups],
-                "group_sizes": {group["name"]: group["size"] for group in shared_groups},
-                "weighted_total": round(weighted, 4),
-                "shared_group_count": len(shared_groups),
-                "why": "Shared smaller groups contribute more weight than large groups (weighted by true group size).",
-            }))
-            stats["relationships"] += 1
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM entity_relationships WHERE relationship_type = 'whatsapp_group_co_member'"
+            )
+            for (a, b), shared_groups in pair_weights.items():
+                weighted = sum(group["weight"] for group in shared_groups)
+                weight = max(1, round(weighted * 100))
+                await conn.execute("""
+                    INSERT INTO entity_relationships
+                        (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
+                    VALUES ($1::uuid, $2::uuid, 'whatsapp_group_co_member', $3, false, $4::jsonb)
+                    ON CONFLICT (entity_a_id, entity_b_id, relationship_type)
+                    DO UPDATE SET
+                        weight = EXCLUDED.weight,
+                        cross_platform = EXCLUDED.cross_platform,
+                        sources = EXCLUDED.sources,
+                        last_seen_at = EXCLUDED.last_seen_at,
+                        updated_at = NOW()
+                """, a, b, weight, json.dumps({
+                    "groups": [group["name"] for group in shared_groups],
+                    "group_sizes": {group["name"]: group["size"] for group in shared_groups},
+                    "weighted_total": round(weighted, 4),
+                    "shared_group_count": len(shared_groups),
+                    "why": "Shared smaller groups contribute more weight than large groups (weighted by true group size).",
+                }))
+                stats["relationships"] += 1
 
-        await conn.execute(
-            "DELETE FROM identity_signals WHERE signal_type = 'group_cooccurrence' AND source_platform = 'whatsapp'"
-        )
-        if new_signals:
-            await conn.executemany("""
-                INSERT INTO identity_signals
-                    (entity_id, signal_type, source_platform, source_table, source_column,
-                     source_record_id, target_platform, target_record_id, value, confidence)
-                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            """, new_signals)
-            stats["group_cooccurrence_signals"] = len(new_signals)
+            await conn.execute(
+                "DELETE FROM identity_signals WHERE signal_type = 'group_cooccurrence' AND source_platform = 'whatsapp'"
+            )
+            if new_signals:
+                await conn.executemany("""
+                    INSERT INTO identity_signals
+                        (entity_id, signal_type, source_platform, source_table, source_column,
+                         source_record_id, target_platform, target_record_id, value, confidence)
+                    VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """, new_signals)
+                stats["group_cooccurrence_signals"] = len(new_signals)
 
     logger.info("WhatsApp group graph: %s", stats)
     return stats
@@ -234,36 +242,44 @@ async def build_telegram_group_graph() -> dict:
             ))
 
     async with analyzer.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM entity_relationships WHERE relationship_type = 'telegram_group_co_member'"
-        )
-        for (a, b), shared_groups in pair_weights.items():
-            weighted = sum(group["weight"] for group in shared_groups)
-            weight = max(1, round(weighted * 100))
-            await conn.execute("""
-                INSERT INTO entity_relationships
-                    (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
-                VALUES ($1::uuid, $2::uuid, 'telegram_group_co_member', $3, false, $4::jsonb)
-            """, a, b, weight, json.dumps({
-                "groups": [group["name"] for group in shared_groups],
-                "group_sizes": {group["name"]: group["size"] for group in shared_groups},
-                "weighted_total": round(weighted, 4),
-                "shared_group_count": len(shared_groups),
-                "why": "Shared smaller groups contribute more weight than large groups (weighted by true group size).",
-            }))
-            stats["relationships"] += 1
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM entity_relationships WHERE relationship_type = 'telegram_group_co_member'"
+            )
+            for (a, b), shared_groups in pair_weights.items():
+                weighted = sum(group["weight"] for group in shared_groups)
+                weight = max(1, round(weighted * 100))
+                await conn.execute("""
+                    INSERT INTO entity_relationships
+                        (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
+                    VALUES ($1::uuid, $2::uuid, 'telegram_group_co_member', $3, false, $4::jsonb)
+                    ON CONFLICT (entity_a_id, entity_b_id, relationship_type)
+                    DO UPDATE SET
+                        weight = EXCLUDED.weight,
+                        cross_platform = EXCLUDED.cross_platform,
+                        sources = EXCLUDED.sources,
+                        last_seen_at = EXCLUDED.last_seen_at,
+                        updated_at = NOW()
+                """, a, b, weight, json.dumps({
+                    "groups": [group["name"] for group in shared_groups],
+                    "group_sizes": {group["name"]: group["size"] for group in shared_groups},
+                    "weighted_total": round(weighted, 4),
+                    "shared_group_count": len(shared_groups),
+                    "why": "Shared smaller groups contribute more weight than large groups (weighted by true group size).",
+                }))
+                stats["relationships"] += 1
 
-        await conn.execute(
-            "DELETE FROM identity_signals WHERE signal_type = 'group_cooccurrence' AND source_platform = 'telegram'"
-        )
-        if new_signals:
-            await conn.executemany("""
-                INSERT INTO identity_signals
-                    (entity_id, signal_type, source_platform, source_table, source_column,
-                     source_record_id, target_platform, target_record_id, value, confidence)
-                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            """, new_signals)
-            stats["group_cooccurrence_signals"] = len(new_signals)
+            await conn.execute(
+                "DELETE FROM identity_signals WHERE signal_type = 'group_cooccurrence' AND source_platform = 'telegram'"
+            )
+            if new_signals:
+                await conn.executemany("""
+                    INSERT INTO identity_signals
+                        (entity_id, signal_type, source_platform, source_table, source_column,
+                         source_record_id, target_platform, target_record_id, value, confidence)
+                    VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """, new_signals)
+                stats["group_cooccurrence_signals"] = len(new_signals)
 
     logger.info("Telegram group graph: %s", stats)
     return stats
