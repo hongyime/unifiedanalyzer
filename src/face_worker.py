@@ -728,6 +728,12 @@ _VIDEO_FACE_SOURCES = tuple(
 )
 _VIDEO_FRAME_INTERVAL_SEC = int(os.getenv("FACE_VIDEO_FRAME_INTERVAL", "20"))
 _VIDEO_FRAME_MAX = int(os.getenv("FACE_VIDEO_FRAME_MAX", "12"))
+# Video frames are typically full-resolution (720p/1080p), so a real face
+# occupies a much smaller fraction of the frame than in a cropped profile photo.
+# The image-tuned MIN_AREA_RATIO=0.05 filtered out nearly every genuine video
+# face (observed at area_ratio 0.02-0.03). Use a smaller, tunable floor for the
+# video path so real faces survive; the Q3 is_junk gate still governs downstream.
+_VIDEO_MIN_AREA_RATIO = float(os.getenv("FACE_VIDEO_MIN_AREA_RATIO", "0.01"))
 
 
 def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
@@ -893,6 +899,9 @@ def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
 
             if detector is None:
                 detector = FaceDetector()
+                # Relax the area gate for the video path (see _VIDEO_MIN_AREA_RATIO).
+                # Keep the detector's other thresholds (confidence, sharpness).
+                detector.MIN_AREA_RATIO = _VIDEO_MIN_AREA_RATIO
 
             # Detect across all frames; collect (frame_sec, w, h, faces).
             per_frame = []
