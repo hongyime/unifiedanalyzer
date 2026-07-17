@@ -157,10 +157,24 @@ async def get_entity_timeline(
                 entity_id,
             )
             if total is None:
-                total = await conn.fetchval(
-                    "SELECT COUNT(*) FROM timeline_events WHERE entity_id = $1::uuid",
+                # No precomputed profile count — COUNT directly, but bound to the
+                # entity's date-range so it partition-prunes (an unbounded COUNT
+                # scans all 373 partitions ~16s for a profile-less entity).
+                rng = await conn.fetchrow(
+                    "SELECT first_event_at, last_event_at FROM entities WHERE id = $1::uuid",
                     entity_id,
                 )
+                if rng and rng["first_event_at"] is not None:
+                    total = await conn.fetchval(
+                        "SELECT COUNT(*) FROM timeline_events WHERE entity_id = $1::uuid "
+                        "AND occurred_at >= $2 AND occurred_at <= $3",
+                        entity_id, rng["first_event_at"], rng["last_event_at"],
+                    )
+                else:
+                    total = await conn.fetchval(
+                        "SELECT COUNT(*) FROM timeline_events WHERE entity_id = $1::uuid",
+                        entity_id,
+                    )
             rows = await _fetch_recent_timeline_rows(conn, entity_id, offset + per_page)
             rows = rows[offset: offset + per_page]
             total = max(int(total or 0), offset + len(rows))
