@@ -33,6 +33,7 @@ async def health_check():
             row = await conn.fetchrow("""
                 SELECT run_type, finished_at FROM analysis_runs
                 WHERE status = 'completed'
+                  AND run_type IN ('incremental', 'full_resolution')
                 ORDER BY finished_at DESC LIMIT 1
             """)
             if row:

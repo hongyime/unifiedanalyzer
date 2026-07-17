@@ -51,7 +51,9 @@ async def build_health_snapshot() -> dict:
             )
             last = await conn.fetchrow(
                 "SELECT run_type, finished_at FROM analysis_runs "
-                "WHERE status = 'completed' ORDER BY finished_at DESC LIMIT 1"
+                "WHERE status = 'completed' "
+                "AND run_type IN ('incremental', 'full_resolution') "
+                "ORDER BY finished_at DESC LIMIT 1"
             )
             if last and last["finished_at"]:
                 snap["last_completed_run"] = {

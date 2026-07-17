@@ -157,6 +157,7 @@ async def _build_status() -> dict:
         last = await conn.fetchrow(
             "SELECT run_type, finished_at FROM analysis_runs "
             "WHERE status = 'completed' AND finished_at IS NOT NULL "
+            "AND run_type IN ('incremental', 'full_resolution') "
             "ORDER BY finished_at DESC LIMIT 1"
         )
         failed_24h = await conn.fetchval(
