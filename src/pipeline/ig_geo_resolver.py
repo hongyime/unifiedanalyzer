@@ -2,19 +2,12 @@
 profiles first-class entities so their content — especially the 4,512
 geo-tagged posts — surfaces on the map.
 
-Two systemic collector-data facts drive this module:
+Two collector-data facts drive this module:
 
-  1. NULL-FK bug (matches the recurring "NULL FK hides data" hazard):
-     ~23,519 of 23,555 `instagram_posts` rows — including ALL 4,512
-     geo-tagged posts — have `profile_id = NULL`, so every consumer that
-     attributes an IG post via `instagram_posts.profile_id ->
-     instagram_profiles.id` (the timeline builder's IG block AND the
-     `/geo` endpoint) silently drops them. The author's numeric id is
-     nonetheless recoverable: `platform_post_id` has the shape
-     `<media_id>_<author_user_id>`, and that trailing id equals
-     `instagram_profiles.platform_user_id`. We backfill `profile_id` for
-     the geo posts from that split so the existing (out-of-scope) API +
-     timeline join starts attributing them — no API/timeline code change.
+  1. NULL-FK repair belongs to unifiedcollector. The author's numeric id is
+     recoverable from `platform_post_id` (`<media_id>_<author_user_id>`), but
+     the analyzer must only read collector data. Collector startup maintenance
+     now owns the `instagram_posts.profile_id` backfill.
 
   2. The resolver only mints entities for target/corroborated profiles
      (SYNC #30), so most collected IG authors never get an
@@ -39,9 +32,9 @@ Safety / idempotency:
   * A pre-created entity whose link loses the ON CONFLICT race is deleted
     so no orphan lingers (mirrors beeper_bridge).
 
-Wire order: run this AFTER resolve_entities()/bridge_beeper() (so those
-own their profiles first) and BEFORE build_timeline() (so the timeline's
-IG block sees the repaired profile_id and the fresh links).
+Wire order: run this AFTER resolve_entities()/bridge_beeper() (so those own
+their profiles first) and BEFORE build_timeline() (so the timeline's IG block
+sees fresh links). Collector-side maintenance repairs profile_id independently.
 """
 
 import logging
@@ -56,23 +49,6 @@ IG_LINK_CONFIDENCE = 0.7
 # Backfill/scan touch the full instagram_posts table (~23k rows) plus the
 # media/comment joins; give them headroom beyond the pool default.
 SCAN_TIMEOUT_SECONDS = 300
-
-
-# Recover the missing instagram_posts.profile_id for geo-tagged posts from the
-# author id embedded in platform_post_id (`<media_id>_<author_user_id>`), so the
-# out-of-scope timeline builder + /geo endpoint (both join on profile_id) start
-# attributing the 4,512 geo posts. Scoped to geo posts (location_lat present) to
-# keep the change tight to GAP-4; the same NULL-FK affects ~22k non-geo posts too
-# (documented, not repaired here). Idempotent: only fills rows still NULL.
-_BACKFILL_GEO_PROFILE_ID_SQL = """
-    UPDATE instagram_posts p
-    SET profile_id = ipf.id
-    FROM instagram_profiles ipf
-    WHERE p.profile_id IS NULL
-      AND p.location_lat IS NOT NULL
-      AND split_part(p.platform_post_id, '_', 2) ~ '^[0-9]+$'
-      AND ipf.platform_user_id = split_part(p.platform_post_id, '_', 2)
-"""
 
 
 # Every IG profile with substantive collected content, keyed on the numeric
@@ -116,13 +92,12 @@ _SUBSTANTIVE_IG_PROFILES_SQL = """
 
 
 async def resolve_ig_geo_entities() -> dict:
-    """Backfill geo-post author FKs, then upsert an entity+link for every IG
-    profile with substantive collected content. Returns run stats."""
+    """Upsert an entity+link for every IG profile with substantive collected
+    content. Returns run stats. Collector data is read-only here."""
     collector = get_collector_pool()
     analyzer = get_analyzer_pool()
 
     stats = {
-        "geo_profile_id_backfilled": 0,
         "substantive_profiles": 0,
         "already_linked": 0,
         "entities_created": 0,
@@ -130,15 +105,8 @@ async def resolve_ig_geo_entities() -> dict:
         "skipped_no_uid": 0,
     }
 
-    # ---- 1. Repair the NULL profile_id on geo posts ----------------------
+    # ---- 1. Read IG profiles with substantive collected content -----------
     async with collector.acquire() as conn:
-        res = await conn.execute(_BACKFILL_GEO_PROFILE_ID_SQL, timeout=SCAN_TIMEOUT_SECONDS)
-        # res like "UPDATE 4202"
-        try:
-            stats["geo_profile_id_backfilled"] = int(res.split()[-1])
-        except (ValueError, IndexError):
-            stats["geo_profile_id_backfilled"] = 0
-
         profiles = await conn.fetch(_SUBSTANTIVE_IG_PROFILES_SQL, timeout=SCAN_TIMEOUT_SECONDS)
 
     stats["substantive_profiles"] = len(profiles)

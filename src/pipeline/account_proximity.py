@@ -39,6 +39,13 @@ DEFAULT_OWNER_ACCOUNTS = {
 BEEPER_ID_RE = re.compile(r"^@(?P<prefix>[a-z]+)(?:go)?_(?P<value>[^:]+):", re.I)
 
 
+def _telegram_t1_max_group_size() -> int:
+    try:
+        return max(2, int(os.getenv("PROXIMITY_TELEGRAM_T1_MAX_GROUP_SIZE", "50")))
+    except ValueError:
+        return 50
+
+
 def _split_env_set(name: str) -> set[str]:
     raw = os.getenv(name, "")
     return {p.strip().lower() for p in re.split(r"[,;\s]+", raw) if p.strip()}
@@ -370,24 +377,46 @@ async def _add_group_comembers(acc: ProximityAccumulator, owner_accounts: dict[s
     async with pool.acquire() as conn:
         if telegram_owner_ids:
             rows = await conn.fetch("""
-                WITH owner_members AS (
+                WITH chat_sizes AS (
+                    SELECT chat_id, count(*)::int AS member_count
+                    FROM telegram_chat_members
+                    GROUP BY chat_id
+                ), owner_members AS (
                     SELECT m.chat_id, u.platform_user_id AS owner_account
                     FROM telegram_chat_members m
                     JOIN telegram_users u ON u.id = m.user_id
                     WHERE u.platform_user_id = ANY($1::text[])
                 )
                 SELECT om.owner_account, u.platform_user_id AS account_id, u.username,
-                       count(DISTINCT om.chat_id) AS shared_chats
+                       count(DISTINCT om.chat_id) AS shared_chats,
+                       min(cs.member_count)::int AS min_group_size
                 FROM owner_members om
                 JOIN telegram_chat_members m ON m.chat_id = om.chat_id
                 JOIN telegram_users u ON u.id = m.user_id
+                JOIN chat_sizes cs ON cs.chat_id = om.chat_id
                 WHERE NULLIF(u.platform_user_id, '') IS NOT NULL
                   AND u.platform_user_id <> om.owner_account
                   AND COALESCE(u.is_bot, FALSE) IS FALSE
                 GROUP BY om.owner_account, u.platform_user_id, u.username
             """, telegram_owner_ids)
+            max_t1_group_size = _telegram_t1_max_group_size()
             for row in rows:
-                acc.add("telegram", row["account_id"], row["owner_account"], 1, _reason("telegram_group_comember", shared_chats=row["shared_chats"], username=row["username"]))
+                min_group_size = row["min_group_size"] or 999999
+                tier = 1 if min_group_size <= max_t1_group_size else 2
+                reason_type = "telegram_small_group_comember" if tier == 1 else "telegram_large_group_comember"
+                acc.add(
+                    "telegram",
+                    row["account_id"],
+                    row["owner_account"],
+                    tier,
+                    _reason(
+                        reason_type,
+                        shared_chats=row["shared_chats"],
+                        username=row["username"],
+                        min_group_size=min_group_size,
+                        t1_max_group_size=max_t1_group_size,
+                    ),
+                )
 
         if whatsapp_owner_ids:
             rows = await conn.fetch("""

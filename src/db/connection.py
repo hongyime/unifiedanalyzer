@@ -1,5 +1,5 @@
-import os
 import asyncio
+import os
 import asyncpg
 import logging
 from pathlib import Path
@@ -34,18 +34,22 @@ def _parse_dsn(dsn: str) -> dict:
     }
 
 
+async def _create_pool_once(params: dict, max_size: int) -> asyncpg.Pool:
+    min_size = max(1, max_size // 4)
+    return await asyncpg.create_pool(
+        **params,
+        min_size=min_size,
+        max_size=max_size,
+        ssl="disable",
+        command_timeout=300,
+    )
+
+
 async def _create_pool_with_retry(params: dict, max_size: int, label: str) -> asyncpg.Pool:
     attempt = 0
     while True:
         try:
-            min_size = max(1, max_size // 4)
-            pool = await asyncpg.create_pool(
-                **params,
-                min_size=min_size,
-                max_size=max_size,
-                ssl="disable",
-                command_timeout=300,
-            )
+            pool = await _create_pool_once(params, max_size)
             if attempt > 0:
                 logger.info("Connected to %s after %d retries", label, attempt)
             return pool
@@ -63,10 +67,40 @@ async def init_pools(apply_schema_ddl: bool = True) -> None:
     max_size = int(os.getenv("DB_MAX_POOL_SIZE", "10"))
 
     analyzer_params = _parse_dsn(_get_env("ANALYZER_DATABASE_URL"))
-    collector_params = _parse_dsn(_get_env("COLLECTOR_DATABASE_URL"))
-
     _analyzer_pool = await _create_pool_with_retry(analyzer_params, max_size, "analyzer")
-    _collector_pool = await _create_pool_with_retry(collector_params, max_size, "collector")
+
+    collector_dsn = os.getenv("COLLECTOR_DATABASE_URL")
+    require_collector = os.getenv("REQUIRE_COLLECTOR_DATABASE", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if collector_dsn:
+        collector_params = _parse_dsn(collector_dsn)
+        if require_collector:
+            _collector_pool = await _create_pool_with_retry(collector_params, max_size, "collector")
+        else:
+            timeout = float(os.getenv("COLLECTOR_DB_INIT_TIMEOUT_SECONDS", "5"))
+            try:
+                _collector_pool = await asyncio.wait_for(
+                    _create_pool_once(collector_params, max_size),
+                    timeout=timeout,
+                )
+            except Exception as e:  # noqa: BLE001 - collector is optional for analyzer uptime
+                _collector_pool = None
+                logger.warning(
+                    "Collector database unavailable at startup (%s); analyzer will run degraded",
+                    e.__class__.__name__,
+                )
+    elif require_collector:
+        _collector_pool = await _create_pool_with_retry(
+            _parse_dsn(_get_env("COLLECTOR_DATABASE_URL")),
+            max_size,
+            "collector",
+        )
+    else:
+        _collector_pool = None
+        logger.warning("COLLECTOR_DATABASE_URL is unset; analyzer will run without collector reads")
 
     if apply_schema_ddl:
         # apply_schema()'s DDL (CREATE EXTENSION/TABLE/INDEX IF NOT EXISTS) can
@@ -116,12 +150,15 @@ def get_collector_pool() -> asyncpg.Pool:
 
 
 async def check_db_connectivity() -> bool:
+    """Return whether the analyzer DB is usable.
+
+    The collector DB is a read-only upstream. It may be absent without pausing
+    the API or scheduler; collector-dependent phases handle their own skips.
+    """
     try:
-        if _analyzer_pool is None or _collector_pool is None:
+        if _analyzer_pool is None:
             return False
         async with _analyzer_pool.acquire(timeout=5) as conn:
-            await conn.fetchval("SELECT 1")
-        async with _collector_pool.acquire(timeout=5) as conn:
             await conn.fetchval("SELECT 1")
         return True
     except Exception:

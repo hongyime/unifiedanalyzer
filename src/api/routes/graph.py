@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Query
@@ -6,6 +7,7 @@ from src.db.connection import get_analyzer_pool, get_collector_pool
 from src.api.face_lookup import representative_faces, face_crop_url
 
 router = APIRouter(tags=["graph"])
+logger = logging.getLogger(__name__)
 
 
 def _relationship_why(relationship_type: str, sources) -> str | None:
@@ -121,11 +123,15 @@ async def entity_geo(
     """Geo footprint for the map: Strava route polylines + start points, and
     Instagram tagged-place pins. Reads the collector DB."""
     analyzer = get_analyzer_pool()
-    collector = get_collector_pool()
     async with analyzer.acquire() as conn:
         links = await conn.fetch(
             "SELECT source, platform_id FROM entity_platform_links WHERE entity_id = $1::uuid", entity_id
         )
+    try:
+        collector = get_collector_pool()
+    except Exception as e:  # noqa: BLE001 - geo source data is collector-owned
+        logger.warning("entity_geo collector read skipped: %s", e)
+        return {"routes": [], "points": [], "counts": {"routes": 0, "points": 0}, "collector_skipped": True}
     strava_ids = []
     for link in links:
         if link["source"] != "strava" or not link["platform_id"]:
@@ -278,12 +284,16 @@ async def entity_associates(entity_id: str, limit: int = Query(40, ge=1, le=100)
     the people they tagged (entity is the poster). Resolved to analyzer entities
     where possible; otherwise social_users supplies a name/photo."""
     analyzer = get_analyzer_pool()
-    collector = get_collector_pool()
     async with analyzer.acquire() as conn:
         links = await conn.fetch(
             "SELECT platform_id, platform_username FROM entity_platform_links "
             "WHERE entity_id = $1::uuid AND source = 'instagram'", entity_id
         )
+    try:
+        collector = get_collector_pool()
+    except Exception as e:  # noqa: BLE001 - associates are collector-sourced
+        logger.warning("entity_associates collector read skipped: %s", e)
+        return {"associates": [], "collector_skipped": True}
     ig_ids = [l["platform_id"] for l in links if l["platform_id"]]
     ig_users = [l["platform_username"] for l in links if l["platform_username"]]
     if not ig_ids and not ig_users:

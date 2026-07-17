@@ -9,11 +9,14 @@ persists until the user hits "Mark reviewed".
 deleted_at is WHEN WE OBSERVED the deletion (collector caveat), good enough for
 "what changed". Only messages we already captured can be flagged.
 """
+import logging
+
 from fastapi import APIRouter
 
 from src.db.connection import get_analyzer_pool, get_collector_pool
 
 router = APIRouter(tags=["changelog"])
+logger = logging.getLogger(__name__)
 
 _DEFAULT_WINDOW = "30 days"
 
@@ -21,7 +24,6 @@ _DEFAULT_WINDOW = "30 days"
 @router.get("/entities/{entity_id}/changelog")
 async def entity_changelog(entity_id: str):
     analyzer = get_analyzer_pool()
-    collector = get_collector_pool()
 
     async with analyzer.acquire() as conn:
         since = await conn.fetchval(
@@ -56,33 +58,39 @@ async def entity_changelog(entity_id: str):
     bp_ids = [l["platform_id"] for l in links if l["source"] == "beeper" and l["platform_id"]]
 
     deletions: list[dict] = []
-    async with collector.acquire() as cc:
-        if tg_ids:
-            rows = await cc.fetch("""
-                SELECT text, (metadata->>'deleted_at')::timestamptz AS deleted_at
-                FROM telegram_messages
-                WHERE sender_id::text = ANY($1::text[]) AND metadata->>'deleted' = 'true'
-                  AND (metadata->>'deleted_at')::timestamptz > $2
-                ORDER BY deleted_at DESC LIMIT 30
-            """, tg_ids, since)
-            deletions += [{"platform": "telegram", "text": r["text"],
-                           "deleted_at": r["deleted_at"].isoformat() if r["deleted_at"] else None} for r in rows]
-        if wa_ids:
-            rows = await cc.fetch("""
-                SELECT text, deleted_at FROM whatsapp_messages
-                WHERE sender_id::text = ANY($1::text[]) AND is_deleted = true AND deleted_at > $2
-                ORDER BY deleted_at DESC LIMIT 30
-            """, wa_ids, since)
-            deletions += [{"platform": "whatsapp", "text": r["text"],
-                           "deleted_at": r["deleted_at"].isoformat() if r["deleted_at"] else None} for r in rows]
-        if bp_ids:
-            rows = await cc.fetch("""
-                SELECT text, deleted_at FROM beeper_shadow_messages
-                WHERE sender_id::text = ANY($1::text[]) AND is_deleted = true AND deleted_at > $2
-                ORDER BY deleted_at DESC LIMIT 30
-            """, bp_ids, since)
-            deletions += [{"platform": "beeper", "text": r["text"],
-                           "deleted_at": r["deleted_at"].isoformat() if r["deleted_at"] else None} for r in rows]
+    collector_deletions_skipped = False
+    try:
+        collector = get_collector_pool()
+        async with collector.acquire() as cc:
+            if tg_ids:
+                rows = await cc.fetch("""
+                    SELECT text, (metadata->>'deleted_at')::timestamptz AS deleted_at
+                    FROM telegram_messages
+                    WHERE sender_id::text = ANY($1::text[]) AND metadata->>'deleted' = 'true'
+                      AND (metadata->>'deleted_at')::timestamptz > $2
+                    ORDER BY deleted_at DESC LIMIT 30
+                """, tg_ids, since)
+                deletions += [{"platform": "telegram", "text": r["text"],
+                               "deleted_at": r["deleted_at"].isoformat() if r["deleted_at"] else None} for r in rows]
+            if wa_ids:
+                rows = await cc.fetch("""
+                    SELECT text, deleted_at FROM whatsapp_messages
+                    WHERE sender_id::text = ANY($1::text[]) AND is_deleted = true AND deleted_at > $2
+                    ORDER BY deleted_at DESC LIMIT 30
+                """, wa_ids, since)
+                deletions += [{"platform": "whatsapp", "text": r["text"],
+                               "deleted_at": r["deleted_at"].isoformat() if r["deleted_at"] else None} for r in rows]
+            if bp_ids:
+                rows = await cc.fetch("""
+                    SELECT text, deleted_at FROM beeper_shadow_messages
+                    WHERE sender_id::text = ANY($1::text[]) AND is_deleted = true AND deleted_at > $2
+                    ORDER BY deleted_at DESC LIMIT 30
+                """, bp_ids, since)
+                deletions += [{"platform": "beeper", "text": r["text"],
+                               "deleted_at": r["deleted_at"].isoformat() if r["deleted_at"] else None} for r in rows]
+    except Exception as e:  # noqa: BLE001 - deletion tracking is collector-sourced
+        collector_deletions_skipped = True
+        logger.warning("changelog collector deletions skipped: %s", e)
 
     additions = {
         "platform_links": [{"source": r["source"], "username": r["platform_username"] or r["platform_id"],
@@ -97,6 +105,7 @@ async def entity_changelog(entity_id: str):
         "since": since.isoformat() if since else None,
         "additions": additions,
         "deletions": deletions,
+        "collector_deletions_skipped": collector_deletions_skipped,
         "total_changes": total,
     }
 

@@ -275,12 +275,16 @@ async def _resolve_thumbnail_path(analysis_id: str):
             return resolve_media_path(sibling)
 
     # Case 3: real media item — look up its file_path in the collector DB.
-    collector = get_collector_pool()
-    async with collector.acquire() as conn:
-        file_path = await conn.fetchval(
-            "SELECT file_path FROM media_items WHERE id = $1::uuid",
-            media_item_id,
-        )
+    try:
+        collector = get_collector_pool()
+        async with collector.acquire() as conn:
+            file_path = await conn.fetchval(
+                "SELECT file_path FROM media_items WHERE id = $1::uuid",
+                media_item_id,
+            )
+    except Exception as e:  # noqa: BLE001 - thumbnails degrade if collector is offline
+        logger.warning("collector media lookup skipped for %s: %s", media_item_id, e)
+        return None
     return resolve_media_path(file_path)
 
 

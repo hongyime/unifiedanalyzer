@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import os
 import time
@@ -367,13 +368,21 @@ def _secondary_phases() -> list[tuple[str, object]]:
     ]
 
 
-async def _run_phase(run_id: str, run_type: str, name: str, fn) -> None:
+async def _call_phase(fn):
+    result = fn()
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+async def _run_phase(run_id: str, run_type: str, name: str, fn, *, default=None):
     """Run one non-fatal phase; record ok/failed + duration to run_phase_status.
     Never raises — a phase failure is logged and persisted, not fatal."""
     start = time.monotonic()
     status, err = "ok", None
+    result = default
     try:
-        await fn()
+        result = await _call_phase(fn)
     except Exception as e:  # noqa: BLE001 — phases are intentionally non-fatal
         logger.exception("%s failed (non-fatal)", name)
         status, err = "failed", str(e)[:2000]
@@ -387,6 +396,7 @@ async def _run_phase(run_id: str, run_type: str, name: str, fn) -> None:
                 run_id, run_type, name, status, duration_ms, err)
     except Exception:
         logger.debug("phase status write failed (non-fatal)", exc_info=True)
+    return result
 
 
 async def _run_secondary_phases(run_id: str, run_type: str) -> None:
@@ -430,58 +440,70 @@ async def run_incremental() -> dict:
     try:
         since = await get_last_run_time("incremental")
 
-        resolver_stats = await resolve_entities()
+        resolver_stats = await _run_phase(
+            run_id, "incremental", "resolve_entities", resolve_entities, default={}
+        )
         stats["entities"] = resolver_stats.get("entities", 0)
         stats["signals"] = resolver_stats.get("signals", 0)
 
         # SYNC #31: bridge beeper native ids into native-source links BEFORE
         # timeline attribution so beeper messages attribute to those entities.
-        beeper_stats = await bridge_beeper()
-        stats["beeper_links"] = beeper_stats["totals"]["links_created"]
+        beeper_stats = await _run_phase(
+            run_id, "incremental", "beeper_bridge", bridge_beeper, default={"totals": {}}
+        )
+        stats["beeper_links"] = beeper_stats.get("totals", {}).get("links_created", 0)
 
-        # GAP-4: repair NULL profile_id on IG geo posts + mint entities for every
-        # IG profile with substantive collected content, BEFORE timeline attribution
-        # so the IG post/geo blocks (which join on profile_id + links) surface them.
-        try:
-            ig_geo_stats = await resolve_ig_geo_entities()
-            stats["ig_geo_links"] = ig_geo_stats["links_created"]
-        except Exception:
-            logger.warning("resolve_ig_geo_entities failed (non-fatal)", exc_info=True)
+        # GAP-4: mint entities for every IG profile with substantive collected
+        # content. Collector-owned maintenance repairs instagram_posts.profile_id.
+        ig_geo_stats = await _run_phase(
+            run_id, "incremental", "ig_geo_entities", resolve_ig_geo_entities, default={}
+        )
+        stats["ig_geo_links"] = ig_geo_stats.get("links_created", 0)
 
         # gap-round-2: mint entities for every Strava athlete with collected
         # activities (unblocks T5.2 shared-route-origin). Same "create-entity-if-
         # content" pattern as ig_geo; runs BEFORE build_timeline so Strava blocks
         # + route_similarity see the fresh links.
-        try:
-            strava_stats = await resolve_strava_athlete_entities()
-            stats["strava_links"] = strava_stats["links_created"]
-        except Exception:
-            logger.warning("resolve_strava_athlete_entities failed (non-fatal)", exc_info=True)
+        strava_stats = await _run_phase(
+            run_id, "incremental", "strava_athlete_entities", resolve_strava_athlete_entities, default={}
+        )
+        stats["strava_links"] = strava_stats.get("links_created", 0)
 
         # SYNC #35: cross-source identity signals (tg<->wa phone, IG external_url).
-        xsrc_stats = await emit_cross_source_signals()
-        stats["xsrc_signals"] = xsrc_stats["rows"]
+        xsrc_stats = await _run_phase(
+            run_id, "incremental", "cross_source_signals", emit_cross_source_signals, default={}
+        )
+        stats["xsrc_signals"] = xsrc_stats.get("rows", 0)
 
-        timeline_stats = await build_timeline(since=since)
+        timeline_stats = await _run_phase(
+            run_id, "incremental", "timeline", lambda: build_timeline(since=since), default={}
+        )
         stats["events"] = timeline_stats.get("inserted", 0)
-        interaction_stats = await build_interaction_graph(since=since)
+        interaction_stats = await _run_phase(
+            run_id, "incremental", "interactions", lambda: build_interaction_graph(since=since), default={}
+        )
         stats["interactions"] = interaction_stats.get("inserted", 0)
-        proximity_stats = await compute_account_proximity()
+        proximity_stats = await _run_phase(
+            run_id, "incremental", "account_proximity", compute_account_proximity, default={}
+        )
         stats["account_proximity"] = proximity_stats.get("rows", 0)
         # Refresh per-entity date-range for partition-pruned timeline queries.
-        stats["entity_ranges"] = await update_entity_event_ranges()
+        stats["entity_ranges"] = await _run_phase(
+            run_id, "incremental", "entity_event_ranges", update_entity_event_ranges, default=0
+        )
 
-        alert_stats = await run_alerts()
+        alert_stats = await _run_phase(
+            run_id, "incremental", "alerts", run_alerts, default={}
+        )
         stats["alerts"] = sum(alert_stats.values())
 
         # Non-fatal: behavioral profiling scans entities x timeline_events and can
         # time out under heavy concurrent collector write load. It must not abort
         # the run before _run_secondary_phases (content/temporal/embeddings/
         # topical/faces/identity_scoring) — those are the payload. (2026-07-12)
-        try:
-            await compute_behavioral_profiles()
-        except Exception:
-            logger.warning("compute_behavioral_profiles failed (non-fatal, secondary phases continue)", exc_info=True)
+        await _run_phase(
+            run_id, "incremental", "behavioral_profiles", compute_behavioral_profiles
+        )
 
         # P2-3: all non-fatal secondary phases (media analysis, graphs, face
         # clustering, identity scoring, geocode) — each timed + status-recorded.
@@ -557,37 +579,40 @@ async def run_full_resolution() -> dict:
         #
         # A destructive from-scratch rebuild is now an explicit opt-in
         # (hard_reset_entities below), never the automatic 12h path.
-        resolver_stats = await resolve_entities()
+        resolver_stats = await _run_phase(
+            run_id, "full_resolution", "resolve_entities", resolve_entities, default={}
+        )
         stats["entities"] = resolver_stats.get("entities", 0)
         stats["signals"] = resolver_stats.get("signals", 0)
 
         # SYNC #31: bridge beeper native ids into native-source links before the
         # full re-attribution rescan.
-        beeper_stats = await bridge_beeper()
-        stats["beeper_links"] = beeper_stats["totals"]["links_created"]
+        beeper_stats = await _run_phase(
+            run_id, "full_resolution", "beeper_bridge", bridge_beeper, default={"totals": {}}
+        )
+        stats["beeper_links"] = beeper_stats.get("totals", {}).get("links_created", 0)
 
-        # GAP-4: repair NULL profile_id on IG geo posts + mint entities for every
-        # IG profile with substantive collected content, BEFORE the full timeline
-        # re-attribution so the IG post/geo blocks surface them.
-        try:
-            ig_geo_stats = await resolve_ig_geo_entities()
-            stats["ig_geo_links"] = ig_geo_stats["links_created"]
-        except Exception:
-            logger.warning("resolve_ig_geo_entities failed (non-fatal)", exc_info=True)
+        # GAP-4: mint entities for every IG profile with substantive collected
+        # content. Collector-owned maintenance repairs instagram_posts.profile_id.
+        ig_geo_stats = await _run_phase(
+            run_id, "full_resolution", "ig_geo_entities", resolve_ig_geo_entities, default={}
+        )
+        stats["ig_geo_links"] = ig_geo_stats.get("links_created", 0)
 
         # gap-round-2: mint entities for every Strava athlete with collected
         # activities (unblocks T5.2 shared-route-origin). Same "create-entity-if-
         # content" pattern as ig_geo; runs BEFORE the full timeline re-attribution
         # so Strava blocks + route_similarity see the fresh links.
-        try:
-            strava_stats = await resolve_strava_athlete_entities()
-            stats["strava_links"] = strava_stats["links_created"]
-        except Exception:
-            logger.warning("resolve_strava_athlete_entities failed (non-fatal)", exc_info=True)
+        strava_stats = await _run_phase(
+            run_id, "full_resolution", "strava_athlete_entities", resolve_strava_athlete_entities, default={}
+        )
+        stats["strava_links"] = strava_stats.get("links_created", 0)
 
         # SYNC #35: cross-source identity signals (tg<->wa phone, IG external_url).
-        xsrc_stats = await emit_cross_source_signals()
-        stats["xsrc_signals"] = xsrc_stats["rows"]
+        xsrc_stats = await _run_phase(
+            run_id, "full_resolution", "cross_source_signals", emit_cross_source_signals, default={}
+        )
+        stats["xsrc_signals"] = xsrc_stats.get("rows", 0)
 
         # Full re-attribution rescan, but skip github: its ~7.3M commits are a
         # hard attribution ceiling (~6 tracked github entities) and dominate the
@@ -597,25 +622,38 @@ async def run_full_resolution() -> dict:
         import os as _os_ir
         _skip = _os_ir.getenv("FULL_REBUILD_SKIP_SOURCES", "github")
         skip_sources = {s.strip() for s in _skip.split(",") if s.strip()}
-        timeline_stats = await build_timeline(since=None, skip_sources=skip_sources)
+        timeline_stats = await _run_phase(
+            run_id,
+            "full_resolution",
+            "timeline",
+            lambda: build_timeline(since=None, skip_sources=skip_sources),
+            default={},
+        )
         stats["events"] = timeline_stats.get("inserted", 0)
-        interaction_stats = await build_interaction_graph(since=None)
+        interaction_stats = await _run_phase(
+            run_id, "full_resolution", "interactions", lambda: build_interaction_graph(since=None), default={}
+        )
         stats["interactions"] = interaction_stats.get("inserted", 0)
-        proximity_stats = await compute_account_proximity()
+        proximity_stats = await _run_phase(
+            run_id, "full_resolution", "account_proximity", compute_account_proximity, default={}
+        )
         stats["account_proximity"] = proximity_stats.get("rows", 0)
-        stats["entity_ranges"] = await update_entity_event_ranges()
+        stats["entity_ranges"] = await _run_phase(
+            run_id, "full_resolution", "entity_event_ranges", update_entity_event_ranges, default=0
+        )
 
-        alert_stats = await run_alerts()
+        alert_stats = await _run_phase(
+            run_id, "full_resolution", "alerts", run_alerts, default={}
+        )
         stats["alerts"] = sum(alert_stats.values())
 
         # Non-fatal: behavioral profiling scans entities x timeline_events and can
         # time out under heavy concurrent collector write load. It must not abort
         # the run before _run_secondary_phases (content/temporal/embeddings/
         # topical/faces/identity_scoring) — those are the payload. (2026-07-12)
-        try:
-            await compute_behavioral_profiles()
-        except Exception:
-            logger.warning("compute_behavioral_profiles failed (non-fatal, secondary phases continue)", exc_info=True)
+        await _run_phase(
+            run_id, "full_resolution", "behavioral_profiles", compute_behavioral_profiles
+        )
 
         # P2-3: all non-fatal secondary phases (shared with run_incremental),
         # each timed + status-recorded so a persistently failing step is visible.

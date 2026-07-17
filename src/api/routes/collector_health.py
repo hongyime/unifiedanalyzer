@@ -1,33 +1,40 @@
+import logging
+
 from fastapi import APIRouter
 
 from src.db.connection import get_collector_pool
 
 router = APIRouter(tags=["collector-health"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/collector/health")
 async def collector_health():
-    pool = get_collector_pool()
-    async with pool.acquire() as conn:
-        runs = await conn.fetch("""
-            SELECT source, status,
-                   MAX(started_at) AS last_started,
-                   MAX(completed_at) AS last_completed,
-                   SUM(items_collected) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS items_24h,
-                   SUM(items_failed) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS failed_24h,
-                   COUNT(*) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS runs_24h
-            FROM collection_runs
-            GROUP BY source, status
-            ORDER BY source
-        """)
+    try:
+        pool = get_collector_pool()
+        async with pool.acquire() as conn:
+            runs = await conn.fetch("""
+                SELECT source, status,
+                       MAX(started_at) AS last_started,
+                       MAX(completed_at) AS last_completed,
+                       SUM(items_collected) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS items_24h,
+                       SUM(items_failed) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS failed_24h,
+                       COUNT(*) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS runs_24h
+                FROM collection_runs
+                GROUP BY source, status
+                ORDER BY source
+            """)
 
-        targets = await conn.fetch("""
-            SELECT source, status, COUNT(*) AS count,
-                   MAX(last_collection_at) AS last_collection
-            FROM collection_targets
-            GROUP BY source, status
-            ORDER BY source
-        """)
+            targets = await conn.fetch("""
+                SELECT source, status, COUNT(*) AS count,
+                       MAX(last_collection_at) AS last_collection
+                FROM collection_targets
+                GROUP BY source, status
+                ORDER BY source
+            """)
+    except Exception as e:  # noqa: BLE001 - collector health is optional for analyzer uptime
+        logger.warning("collector health skipped: %s", e)
+        return {"collectors": [], "collector_db": "unreachable", "error": str(e)[:300]}
 
     collectors: dict = {}
     for r in runs:
