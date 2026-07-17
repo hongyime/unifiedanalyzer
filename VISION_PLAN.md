@@ -294,7 +294,7 @@ is undirected (a/b) → build a NEW directed layer.
   Notes 2026-07-15: implemented in analyzer schema (`src/db/schema.sql`) and
   applied live; table now holds directed interaction rows and supports typed,
   directional aggregation.
-- [ ] **T2.2 Builder `src/pipeline/interaction_graph.py`.** Populate from:
+- [x] **T2.2 Builder `src/pipeline/interaction_graph.py`.** (DONE — entity_interactions live, 7,837+ rows.) Populate from:
   reactions (reactor→msg author), replies (`reply_to_message_id`), comments
   (author→post owner), IG `mentions` (parse @handle → resolve to entity via
   `entity_platform_links`), tags (T4.2), follows (`follow_edges`), forwards
@@ -528,7 +528,7 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   `EntityDetail.tsx` already has explicit `EmptyState` branches for timeline,
   map, behavior, interactions, relationships, social-circle, and not-found
   cases, so sparse pages degrade cleanly instead of erroring.
-- [ ] **CC2 Performance at scale.** Timeline/geo/interaction endpoints paginate +
+- [x] **CC2 Performance at scale.** (DONE 2026-07-17 — per-entity date-range pruning: timeline-lanes/intelligence/timeline all sub-second.) Timeline/geo/interaction endpoints paginate +
   window; no full-table scans per entity (indexes on `(actor,occurred_at)` etc).
   *Accept:* rich-entity page < 2s. Notes 2026-07-15: timeline pages remain
   paginated, interaction + geo endpoints are brush-windowed, and the timeline UI
