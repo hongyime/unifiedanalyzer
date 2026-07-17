@@ -544,26 +544,30 @@ async def _add_friend_of_friend(
         """, list(t1_entities))
 
     t1_and_owner = t1_entities | owner_entities
+    owner_by_platform = _best_owner_by_platform(acc)
     for row in rows:
         a, b = row["a"], row["b"]
         peer = b if a in t1_entities else a
         if peer in t1_and_owner:
             continue
         for link in _peer_links(peer, links_by_entity):
-            owner = _owner_for_peer_link(acc, link)
+            owner = _owner_for_peer_link(owner_by_platform, link)
             if owner:
                 acc.add(link["source"], link["platform_id"], owner, 3, _reason("friend_of_friend", relationship=row["relationship_type"], weight=row["weight"]))
 
 
-def _owner_for_peer_link(acc: ProximityAccumulator, link: dict[str, str]) -> str:
-    source = _platform(link["source"])
-    best_owner = ""
-    best_tier = 99
+def _best_owner_by_platform(acc: ProximityAccumulator) -> dict[str, str]:
+    best: dict[str, tuple[int, str]] = {}
     for (platform, _account_id, owner), row in acc.rows.items():
-        if platform == source and row.tier < best_tier:
-            best_owner = owner
-            best_tier = row.tier
-    return best_owner
+        current = best.get(platform)
+        if current is None or row.tier < current[0]:
+            best[platform] = (row.tier, owner)
+    return {platform: owner for platform, (_tier, owner) in best.items()}
+
+
+def _owner_for_peer_link(owner_by_platform: dict[str, str], link: dict[str, str]) -> str:
+    source = _platform(link["source"])
+    return owner_by_platform.get(source, "")
 
 
 async def _add_discovered_only(
