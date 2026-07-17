@@ -56,6 +56,13 @@ _FACE_CLUSTER_MAX = int(os.getenv("FACE_CLUSTER_MAX", "20000"))
 # average-linkage. Combined with the P1-2 propagation purity gate, two distinct
 # people are far less likely to merge through one borderline bridge face.
 _FACE_KNN = int(os.getenv("FACE_CLUSTER_KNN", "20"))
+# Exact flat kNN is quadratic in runtime. Keep it for small corpora where it is
+# deterministic and cheap; use bounded HNSW for larger full-resolution runs.
+_FACE_EXACT_SEARCH_MAX = int(os.getenv("FACE_CLUSTER_EXACT_SEARCH_MAX", "5000"))
+_FACE_HNSW_M = int(os.getenv("FACE_CLUSTER_HNSW_M", "32"))
+_FACE_HNSW_EF_CONSTRUCTION = int(os.getenv("FACE_CLUSTER_HNSW_EF_CONSTRUCTION", "80"))
+_FACE_HNSW_EF_SEARCH = int(os.getenv("FACE_CLUSTER_HNSW_EF_SEARCH", "64"))
+_FACE_FAISS_THREADS = int(os.getenv("FACE_CLUSTER_FAISS_THREADS", "2"))
 # Group-photo guard: only propagate attribution to sibling faces from images
 # with at most this many detected faces (selfies/portraits, not crowds).
 _MAX_PROPAGATE_FACE_COUNT = int(os.getenv("FACE_CLUSTER_MAX_GROUP_FACES", "3"))
@@ -195,10 +202,30 @@ def _knn_connected_components(M: "np.ndarray", threshold: float, k: int) -> "np.
     k = min(k + 1, n)  # +1 because the first neighbour is the face itself
     try:
         import faiss
-        index = faiss.IndexFlatIP(M.shape[1])  # inner product on normalized = cosine
+        if _FACE_FAISS_THREADS > 0 and hasattr(faiss, "omp_set_num_threads"):
+            faiss.omp_set_num_threads(_FACE_FAISS_THREADS)
+
+        if n <= _FACE_EXACT_SEARCH_MAX:
+            logger.info("cluster_faces: using exact FAISS search for %d faces", n)
+            index = faiss.IndexFlatIP(M.shape[1])  # inner product on normalized = cosine
+        else:
+            logger.info(
+                "cluster_faces: using FAISS HNSW search for %d faces "
+                "(exact_limit=%d, m=%d, ef_search=%d)",
+                n, _FACE_EXACT_SEARCH_MAX, _FACE_HNSW_M, _FACE_HNSW_EF_SEARCH,
+            )
+            index = faiss.IndexHNSWFlat(M.shape[1], _FACE_HNSW_M, faiss.METRIC_INNER_PRODUCT)
+            index.hnsw.efConstruction = _FACE_HNSW_EF_CONSTRUCTION
+            index.hnsw.efSearch = _FACE_HNSW_EF_SEARCH
         index.add(M)
         sims, idxs = index.search(M, k)
     except Exception:
+        if n > _FACE_EXACT_SEARCH_MAX:
+            logger.warning(
+                "FAISS large-corpus search failed; failing closed to singleton face clusters",
+                exc_info=True,
+            )
+            return np.arange(n, dtype=np.int64)
         logger.warning("faiss unavailable; falling back to agglomerative clustering", exc_info=True)
         from sklearn.cluster import AgglomerativeClustering
         return AgglomerativeClustering(
