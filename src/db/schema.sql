@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS entity_platform_links (
 );
 CREATE INDEX IF NOT EXISTS idx_epl_entity ON entity_platform_links(entity_id);
 CREATE INDEX IF NOT EXISTS idx_epl_source ON entity_platform_links(source);
+CREATE INDEX IF NOT EXISTS idx_epl_source_platform_id_active
+    ON entity_platform_links(source, platform_id)
+    WHERE retracted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_epl_source_platform_username_lower_active
+    ON entity_platform_links(source, lower(platform_username))
+    WHERE retracted_at IS NULL AND platform_username IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS identity_signals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -305,6 +311,22 @@ CREATE INDEX IF NOT EXISTS idx_entity_interactions_target_time
     ON entity_interactions(target_entity_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_entity_interactions_type
     ON entity_interactions(interaction_type, occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS account_proximity (
+    platform VARCHAR(30) NOT NULL,
+    account_id VARCHAR(255) NOT NULL,
+    owner_account VARCHAR(255) NOT NULL,
+    tier SMALLINT NOT NULL CHECK (tier BETWEEN 1 AND 4),
+    reasons JSONB NOT NULL DEFAULT '[]',
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (platform, account_id, owner_account)
+);
+CREATE INDEX IF NOT EXISTS idx_account_proximity_tier
+    ON account_proximity(tier);
+CREATE INDEX IF NOT EXISTS idx_account_proximity_platform_owner
+    ON account_proximity(platform, owner_account, tier);
+CREATE INDEX IF NOT EXISTS idx_account_proximity_account
+    ON account_proximity(platform, account_id);
 
 -- Phase 6: media content analysis (see docs/media_analysis_plan.md).
 -- One row per (media_item_id, analysis_type). media_item_id references

@@ -14,6 +14,7 @@ from src.pipeline.strava_athlete_resolver import resolve_strava_athlete_entities
 from src.pipeline.cross_source_signals import emit_cross_source_signals
 from src.pipeline.timeline_builder import build_timeline
 from src.pipeline.interaction_graph import build_interaction_graph
+from src.pipeline.account_proximity import compute_account_proximity
 from src.pipeline.alert_engine import run_alerts
 from src.pipeline.behavioral_profiler import compute_behavioral_profiles
 from src.pipeline.group_graph import build_whatsapp_group_graph, build_telegram_group_graph
@@ -465,6 +466,8 @@ async def run_incremental() -> dict:
         stats["events"] = timeline_stats.get("inserted", 0)
         interaction_stats = await build_interaction_graph(since=since)
         stats["interactions"] = interaction_stats.get("inserted", 0)
+        proximity_stats = await compute_account_proximity()
+        stats["account_proximity"] = proximity_stats.get("rows", 0)
         # Refresh per-entity date-range for partition-pruned timeline queries.
         stats["entity_ranges"] = await update_entity_event_ranges()
 
@@ -598,6 +601,8 @@ async def run_full_resolution() -> dict:
         stats["events"] = timeline_stats.get("inserted", 0)
         interaction_stats = await build_interaction_graph(since=None)
         stats["interactions"] = interaction_stats.get("inserted", 0)
+        proximity_stats = await compute_account_proximity()
+        stats["account_proximity"] = proximity_stats.get("rows", 0)
         stats["entity_ranges"] = await update_entity_event_ranges()
 
         alert_stats = await run_alerts()

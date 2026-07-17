@@ -22,8 +22,35 @@ SORT_COLUMNS = {
     "confidence": "e.confidence_score",
     "signals": "e.signal_count",
     "platforms": "platform_count",
+    "proximity": "pe.proximity_tier",
     "created": "e.created_at",
 }
+
+PROXIMITY_ENTITY_CTE = """
+WITH proximity_rows AS (
+    SELECT epl.entity_id, ap.platform, ap.account_id, ap.owner_account,
+           ap.tier, ap.reasons, ap.updated_at
+    FROM entity_platform_links epl
+    JOIN account_proximity ap
+      ON ap.platform = epl.source
+     AND ap.account_id = epl.platform_id
+    WHERE epl.retracted_at IS NULL
+    UNION ALL
+    SELECT epl.entity_id, ap.platform, ap.account_id, ap.owner_account,
+           ap.tier, ap.reasons, ap.updated_at
+    FROM entity_platform_links epl
+    JOIN account_proximity ap
+      ON ap.platform = epl.source
+     AND ap.account_id = lower(epl.platform_username)
+    WHERE epl.retracted_at IS NULL
+      AND epl.platform_username IS NOT NULL
+),
+proximity_entity AS (
+    SELECT entity_id, MIN(tier) AS proximity_tier
+    FROM proximity_rows
+    GROUP BY entity_id
+)
+"""
 
 
 @router.get("/entities")
@@ -32,6 +59,8 @@ async def list_entities(
     per_page: int = Query(50, ge=1, le=200),
     search: str | None = None,
     tier: str | None = None,
+    proximity_tier: int | None = Query(None, ge=1, le=4),
+    proximity_platform: str | None = None,
     platform: str | None = None,
     min_platforms: int | None = None,
     sort: str = "confidence",
@@ -61,6 +90,26 @@ async def list_entities(
         params.append(tier)
         idx += 1
 
+    if proximity_tier is not None or proximity_platform:
+        proximity_conditions = []
+        if proximity_tier is not None:
+            proximity_conditions.append(f"pr.tier = ${idx}")
+            params.append(proximity_tier)
+            idx += 1
+        if proximity_platform:
+            proximity_conditions.append(f"pr.platform = ${idx}")
+            params.append(proximity_platform)
+            idx += 1
+        proximity_where = " AND ".join(proximity_conditions)
+        if proximity_where:
+            proximity_where = " AND " + proximity_where
+        conditions.append(f"""EXISTS (
+            SELECT 1
+            FROM proximity_rows pr
+            WHERE pr.entity_id = e.id
+              {proximity_where}
+        )""")
+
     if platform:
         conditions.append(f"""EXISTS (
             SELECT 1 FROM entity_platform_links epl
@@ -85,16 +134,26 @@ async def list_entities(
 
     async with pool.acquire() as conn:
         total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM entities e {where}", *params
+            f"""
+            {PROXIMITY_ENTITY_CTE}
+            SELECT COUNT(*)
+            FROM entities e
+            LEFT JOIN proximity_entity pe ON pe.entity_id = e.id
+            {where}
+            """,
+            *params,
         )
 
         params.extend([per_page, offset])
         rows = await conn.fetch(f"""
+            {PROXIMITY_ENTITY_CTE}
             SELECT e.id, e.tier, e.canonical_name, e.confidence_score,
                    e.signal_count, e.last_seen_at, e.created_at,
                    (SELECT COUNT(*) FROM entity_platform_links epl WHERE epl.entity_id = e.id) AS platform_count,
-                   (SELECT array_agg(DISTINCT epl.source) FROM entity_platform_links epl WHERE epl.entity_id = e.id) AS platforms
+                   (SELECT array_agg(DISTINCT epl.source) FROM entity_platform_links epl WHERE epl.entity_id = e.id) AS platforms,
+                   pe.proximity_tier
             FROM entities e
+            LEFT JOIN proximity_entity pe ON pe.entity_id = e.id
             {where}
             ORDER BY {sort_col} {sort_dir} NULLS LAST, e.canonical_name
             LIMIT ${idx} OFFSET ${idx + 1}
@@ -111,6 +170,7 @@ async def list_entities(
                 "confidence_score": r["confidence_score"],
                 "signal_count": r["signal_count"],
                 "last_seen_at": r["last_seen_at"].isoformat() if r["last_seen_at"] else None,
+                "proximity_tier": r["proximity_tier"],
                 "platform_count": r["platform_count"],
                 "platforms": r["platforms"] or [],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -249,6 +309,33 @@ async def get_entity(entity_id: str):
             ORDER BY confidence DESC
         """, entity_id)
 
+        proximity = await conn.fetch("""
+            WITH proximity_rows AS (
+                SELECT epl.entity_id, ap.platform, ap.account_id, ap.owner_account,
+                       ap.tier, ap.reasons, ap.updated_at
+                FROM entity_platform_links epl
+                JOIN account_proximity ap
+                  ON ap.platform = epl.source
+                 AND ap.account_id = epl.platform_id
+                WHERE epl.entity_id = $1::uuid
+                  AND epl.retracted_at IS NULL
+                UNION ALL
+                SELECT epl.entity_id, ap.platform, ap.account_id, ap.owner_account,
+                       ap.tier, ap.reasons, ap.updated_at
+                FROM entity_platform_links epl
+                JOIN account_proximity ap
+                  ON ap.platform = epl.source
+                 AND ap.account_id = lower(epl.platform_username)
+                WHERE epl.entity_id = $1::uuid
+                  AND epl.retracted_at IS NULL
+                  AND epl.platform_username IS NOT NULL
+            )
+            SELECT DISTINCT ap.platform, ap.account_id, ap.owner_account,
+                   ap.tier, ap.reasons, ap.updated_at
+            FROM proximity_rows ap
+            ORDER BY ap.tier, ap.platform, ap.owner_account
+        """, entity_id)
+
         _rep = await representative_faces(conn, [entity_id])
 
     return {
@@ -257,6 +344,18 @@ async def get_entity(entity_id: str):
         "watch_status": entity["watch_status"],
         "canonical_name": entity["canonical_name"],
         "face_crop_url": face_crop_url(_rep.get(entity_id)),
+        "proximity_tier": min((p["tier"] for p in proximity), default=None),
+        "proximity": [
+            {
+                "platform": p["platform"],
+                "account_id": p["account_id"],
+                "owner_account": p["owner_account"],
+                "tier": p["tier"],
+                "reasons": p["reasons"] or [],
+                "updated_at": p["updated_at"].isoformat() if p["updated_at"] else None,
+            }
+            for p in proximity
+        ],
         "confidence_score": entity["confidence_score"],
         "signal_count": entity["signal_count"],
         "last_seen_at": entity["last_seen_at"].isoformat() if entity["last_seen_at"] else None,
