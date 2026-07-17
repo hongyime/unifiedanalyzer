@@ -105,29 +105,24 @@ broader **face→entity attribution** would auto-light both. Plus:
   face→entity coverage grows (fed by Q1 video faces + broader resolution). Not fixable
   by code today.
 
-## QUEUED — Per-entity date-range partition pruning (do AFTER current Codex batch)
-**Why:** `timeline_events` has 373 monthly partitions but is queried by `entity_id`
-(not the partition key), so every per-entity timeline query MergeAppends ALL
-partitions (~6.6s). A `years=5` global band-aid is live in `timeline-lanes`
-(commit bf6b1dd, 1.7s). The REAL fix bounds each query to the entity's OWN active
-range → perfect pruning for everyone, fast AND complete (old GitHub history still
-shows by default). Supersedes + REMOVES the `years` band-aid. Also fixes
-`intelligence` (~3.4s, same root cause). Do NOT start while Codex edits the
-analyzer repo — collides on entities schema + shared query files.
-- [ ] **1. Schema** — add `first_event_at` + `last_event_at` (nullable timestamptz)
-  to `entities` (additive/idempotent — schema.sql or new migration, IF NOT EXISTS).
-- [ ] **2. Pipeline** — after `build_timeline`, `UPDATE entities SET
-  first_event_at/last_event_at = (min/max occurred_at per entity_id FROM
-  timeline_events)`. Idempotent; keeps range current every run.
-- [ ] **3. Bound hot queries** — `timeline.py` (timeline-lanes + timeline),
-  `intelligence.py`, `graph.py`: add `occurred_at BETWEEN first_event_at AND
-  last_event_at` (from the entity row) so Postgres partition-prunes per entity.
-- [ ] **4. Remove the `years=5` band-aid** from timeline-lanes (superseded); keep
-  `years` only as an optional override, default to the entity's full range.
-- [ ] **5. Verify** — sub-second for rich/sparse/old-GitHub entities with FULL
-  data; confirm `intelligence` drops too.
-- [ ] **6. Deploy** — restart analyzer + scheduler AFTER the full-res run completes
-  (don't orphan it).
+## DONE (2026-07-17) — Per-entity date-range partition pruning (commit 024f621)
+**Result (measured under full-res contention):** timeline-lanes **6,742ms → 12–153ms**;
+intelligence **3,350ms → 50–338ms** — sub-second for every entity, FULL history, no
+global window. Root cause was 373 timeline_events partitions queried by entity_id
+(not the partition key) → MergeAppend of all partitions.
+- [x] **1. Schema** — `entities.first_event_at` + `last_event_at` (schema.sql ALTER
+  IF NOT EXISTS + applied live).
+- [x] **2. Pipeline** — `update_entity_event_ranges()` wired after `build_timeline`
+  in both run paths (idempotent, `IS DISTINCT FROM` guard). Backfilled 3,433 entities.
+- [x] **3. Bound hot queries** — timeline-lanes + intelligence bound `occurred_at`
+  to the entity's `[first_event_at, last_event_at]` (fetched as params → partition
+  pruning), with a recent fallback for not-yet-ranged entities.
+- [x] **4. Removed the `years=5` band-aid** from timeline-lanes (superseded).
+- [x] **5. Verified** — see result above.
+- [x] **6. Deployed** — analyzer restarted (scheduler untouched; full-res run kept
+  alive). schema.sql ALTER applies on any clean boot.
+- NOTE: `graph.py` (/timeline pagination, /associates) NOT bounded here — /associates
+  already indexed by Codex; a future pass can apply the same range-bound if needed.
 
 ## Goal
 Turn `unifiedanalyzer` into a targeted-OSINT subject profiler: pick ANY entity
