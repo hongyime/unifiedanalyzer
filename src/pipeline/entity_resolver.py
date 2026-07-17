@@ -244,13 +244,24 @@ async def load_platform_profiles() -> tuple[dict[str, list[PlatformProfile]], li
                 source="threads", platform_id=row["author_username"],
                 username=row["author_username"], name=None,
             ))
-        for row in await conn.fetch(
-            "SELECT DISTINCT author_username FROM x_posts "
-            "WHERE author_username IS NOT NULL AND author_username <> ''"
-        ):
+        try:
+            x_rows = await conn.fetch(
+                """
+                SELECT platform_user_id, username, display_name
+                FROM x_profiles
+                WHERE platform_user_id IS NOT NULL AND platform_user_id <> ''
+                """
+            )
+        except Exception:
+            logger.debug("x_profiles unavailable; falling back to x_posts authors", exc_info=True)
+            x_rows = await conn.fetch(
+                "SELECT DISTINCT author_username AS platform_user_id, author_username AS username, NULL::text AS display_name "
+                "FROM x_posts WHERE author_username IS NOT NULL AND author_username <> ''"
+            )
+        for row in x_rows:
             profiles.append(PlatformProfile(
-                source="x", platform_id=row["author_username"],
-                username=row["author_username"], name=None,
+                source="x", platform_id=row["platform_user_id"],
+                username=row["username"], name=row["display_name"],
             ))
 
         for row in await conn.fetch(
