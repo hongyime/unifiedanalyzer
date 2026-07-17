@@ -264,6 +264,23 @@ async def load_platform_profiles() -> tuple[dict[str, list[PlatformProfile]], li
                 username=row["username"], name=row["display_name"],
             ))
 
+        try:
+            fb_rows = await conn.fetch(
+                """
+                SELECT platform_user_id, username, display_name
+                FROM facebook_profiles
+                WHERE platform_user_id IS NOT NULL AND platform_user_id <> ''
+                """
+            )
+        except Exception:
+            logger.debug("facebook_profiles unavailable; skipping facebook profile load", exc_info=True)
+            fb_rows = []
+        for row in fb_rows:
+            profiles.append(PlatformProfile(
+                source="facebook", platform_id=row["platform_user_id"],
+                username=row["username"], name=row["display_name"],
+            ))
+
         for row in await conn.fetch(
             "SELECT platform_user_id, name, pushname FROM whatsapp_users"
         ):
