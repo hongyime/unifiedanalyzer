@@ -21,12 +21,25 @@ def _partition_names_desc(start: datetime | None = None, floor_year: int = 2010)
 
 
 async def _fetch_recent_timeline_rows(conn, entity_id: str, limit: int) -> list:
-    # Single indexed query on the parent partitioned table (perf fix — was a
-    # per-partition round-trip loop back to 2010).
+    # Bound to the entity's own date-range so Postgres partition-prunes the 373
+    # timeline_events partitions (else it MergeAppends all of them, ~6.6s).
+    rng = await conn.fetchrow(
+        "SELECT first_event_at, last_event_at FROM entities WHERE id = $1::uuid",
+        entity_id,
+    )
+    if rng and rng["first_event_at"] is not None:
+        return await conn.fetch("""
+            SELECT id, source, event_type, source_record_id, occurred_at, title, metadata
+            FROM timeline_events
+            WHERE entity_id = $1::uuid
+              AND occurred_at >= $3 AND occurred_at <= $4
+            ORDER BY occurred_at DESC
+            LIMIT $2
+        """, entity_id, limit, rng["first_event_at"], rng["last_event_at"])
     return await conn.fetch("""
         SELECT id, source, event_type, source_record_id, occurred_at, title, metadata
         FROM timeline_events
-        WHERE entity_id = $1::uuid
+        WHERE entity_id = $1::uuid AND occurred_at > now() - interval '5 years'
         ORDER BY occurred_at DESC
         LIMIT $2
     """, entity_id, limit)
