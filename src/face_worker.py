@@ -646,7 +646,7 @@ def relink_entity_faces(limit: int | None = None) -> dict:
     """
     from sqlalchemy import create_engine, text
 
-    stats = {"faces_checked": 0, "linked": 0}
+    stats = {"faces_checked": 0, "linked": 0, "junk_entity_faces": 0}
     analyzer_engine = create_engine(
         analyzer_sqlalchemy_url(),
         connect_args={"options": f"-csearch_path={FACE_DB_SCHEMA},public"},
@@ -677,41 +677,49 @@ def relink_entity_faces(limit: int | None = None) -> dict:
                 q += f" LIMIT {int(limit)}"
             faces = aconn.execute(text(q)).fetchall()
         stats["faces_checked"] = len(faces)
-        if not faces:
-            return stats
+        if faces:
+            # Resolve each distinct media_item -> (source, entity_id) from collector.
+            mids = list({f.mid for f in faces})
+            attr: dict[str, tuple] = {}
+            with collector_engine.connect() as cconn:
+                CH = 5000
+                for i in range(0, len(mids), CH):
+                    for _id, src, eid in cconn.execute(
+                        text("SELECT id::text, source, entity_id FROM media_items "
+                             "WHERE id = ANY(CAST(:ids AS uuid[]))"),
+                        {"ids": mids[i:i + CH]},
+                    ).fetchall():
+                        attr[_id] = (src, eid)
 
-        # Resolve each distinct media_item -> (source, entity_id) from collector.
-        mids = list({f.mid for f in faces})
-        attr: dict[str, tuple] = {}
-        with collector_engine.connect() as cconn:
-            CH = 5000
-            for i in range(0, len(mids), CH):
-                for _id, src, eid in cconn.execute(
-                    text("SELECT id::text, source, entity_id FROM media_items "
-                         "WHERE id = ANY(CAST(:ids AS uuid[]))"),
-                    {"ids": mids[i:i + CH]},
-                ).fetchall():
-                    attr[_id] = (src, eid)
+            with analyzer_engine.begin() as aconn:
+                for f in faces:
+                    a = attr.get(f.mid)
+                    if not a:
+                        continue
+                    src, eid_raw = a
+                    eid = lookup.get((src, eid_raw)) or (
+                        lookup.get((src, eid_raw.lower())) if eid_raw else None
+                    )
+                    if not eid:
+                        continue
+                    aconn.execute(
+                        text("INSERT INTO public.entity_faces "
+                             "(entity_id, face_id, media_item_id, confidence, method) "
+                             "VALUES (:e, :f, :m, :c, 'media_attribution_relink') "
+                             "ON CONFLICT (entity_id, face_id) DO NOTHING"),
+                        {"e": eid, "f": f.face_id, "m": f.mid, "c": float(f.q or 0.0)},
+                    )
+                    stats["linked"] += 1
 
-        with analyzer_engine.begin() as aconn:
-            for f in faces:
-                a = attr.get(f.mid)
-                if not a:
-                    continue
-                src, eid_raw = a
-                eid = lookup.get((src, eid_raw)) or (
-                    lookup.get((src, eid_raw.lower())) if eid_raw else None
-                )
-                if not eid:
-                    continue
-                aconn.execute(
-                    text("INSERT INTO public.entity_faces "
-                         "(entity_id, face_id, media_item_id, confidence, method) "
-                         "VALUES (:e, :f, :m, :c, 'media_attribution_relink') "
-                         "ON CONFLICT (entity_id, face_id) DO NOTHING"),
-                    {"e": eid, "f": f.face_id, "m": f.mid, "c": float(f.q or 0.0)},
-                )
-                stats["linked"] += 1
+        with analyzer_engine.connect() as aconn:
+            stats["junk_entity_faces"] = int(aconn.execute(text(
+                "SELECT COUNT(*) FROM public.entity_faces ef "
+                "JOIN faces f ON f.id = ef.face_id "
+                "WHERE COALESCE(f.is_junk, false)"
+            )).scalar() or 0)
+        assert stats["junk_entity_faces"] == 0, (
+            f"entity_faces has {stats['junk_entity_faces']} junk-linked face(s)"
+        )
     finally:
         analyzer_engine.dispose()
         collector_engine.dispose()
