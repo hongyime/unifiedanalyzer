@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections import defaultdict
@@ -17,7 +18,10 @@ async def compute_behavioral_profiles() -> int:
             WHERE EXISTS (SELECT 1 FROM timeline_events te WHERE te.entity_id = e.id)
         """)
 
-        for entity in entities:
+        for entity_index, entity in enumerate(entities):
+            if entity_index and entity_index % 25 == 0:
+                await asyncio.sleep(0)
+
             eid = entity["id"]
 
             rows = await conn.fetch("""
@@ -34,11 +38,13 @@ async def compute_behavioral_profiles() -> int:
             dow_dist: dict[str, int] = defaultdict(int)
             source_dist: dict[str, int] = defaultdict(int)
 
-            for r in rows:
+            for row_index, r in enumerate(rows):
                 ts = r["occurred_at"]
                 hour_dist[str(ts.hour)] += 1
                 dow_dist[str(ts.weekday())] += 1
                 source_dist[r["source"]] += 1
+                if row_index and row_index % 5000 == 0:
+                    await asyncio.sleep(0)
 
             first = rows[0]["occurred_at"]
             last = rows[-1]["occurred_at"]
