@@ -95,6 +95,9 @@ services:
       OPENBLAS_NUM_THREADS: "${SCHEDULER_THREADS:-2}"
       NUMEXPR_NUM_THREADS: "${SCHEDULER_THREADS:-2}"
       VECLIB_MAXIMUM_THREADS: "${SCHEDULER_THREADS:-2}"
+      # NER transformer enrichment is optional and memory-heavy; keep it opt-in
+      # for the scheduler so a secondary enrichment phase cannot kill a full run.
+      ENTITY_ENRICHMENT_ENABLED: "${ENTITY_ENRICHMENT_ENABLED:-0}"
     volumes:
       # Live-mount src (no image rebuild — shared Docker vhdx must not grow).
       - "../src:/app/src"

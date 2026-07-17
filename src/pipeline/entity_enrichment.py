@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # Config (env-tunable — see .env.example).
 # --------------------------------------------------------------------------- #
 def _is_enabled() -> bool:
-    return os.getenv("ENTITY_ENRICHMENT_ENABLED", "1") == "1"
+    return os.getenv("ENTITY_ENRICHMENT_ENABLED", "0").lower() in {"1", "true", "yes"}
 
 
 def _max_chars() -> int:
