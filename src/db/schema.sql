@@ -477,3 +477,11 @@ CREATE INDEX IF NOT EXISTS idx_face_assoc_face ON face_associations(associated_f
 ALTER TABLE entities ADD COLUMN IF NOT EXISTS primary_face_id INTEGER;
 CREATE INDEX IF NOT EXISTS idx_entities_primary_face
     ON entities(primary_face_id) WHERE primary_face_id IS NOT NULL;
+
+-- Per-entity active date-range, maintained by the timeline pipeline. timeline_events
+-- has 373 monthly partitions but is queried by entity_id (not the partition key), so
+-- an unbounded per-entity query MergeAppends ALL partitions (~6.6s). Bounding a query
+-- to the entity's own [first_event_at, last_event_at] lets Postgres partition-prune
+-- to just that entity's active months — fast for everyone, no global time window.
+ALTER TABLE entities ADD COLUMN IF NOT EXISTS first_event_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE entities ADD COLUMN IF NOT EXISTS last_event_at TIMESTAMP WITH TIME ZONE;

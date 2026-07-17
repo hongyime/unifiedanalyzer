@@ -33,32 +33,43 @@ async def _fetch_recent_timeline_rows(conn, entity_id: str, limit: int) -> list:
 
 
 @router.get("/entities/{entity_id}/timeline-lanes")
-async def timeline_lanes(
-    entity_id: str,
-    max_events: int = Query(2500, ge=1, le=8000),
-    years: int = Query(5, ge=1, le=50),
-):
+async def timeline_lanes(entity_id: str, max_events: int = Query(2500, ge=1, le=8000)):
     """Per-platform event timestamps for the swimlane timeline chart, plus alert
     markers and the overall time range. Epochs (float seconds) keep the payload
     small and let the client lay out the x-axis without date parsing per point.
 
-    `years` bounds the lookback so Postgres can PARTITION-PRUNE. timeline_events
-    has 373 monthly partitions (2005 floor → future) and entity_id is NOT the
-    partition key, so an unbounded per-entity query MergeAppends ALL partitions
-    (~6.6s even for a sparse entity). Bounding occurred_at prunes to the recent
-    partitions (3y → 307ms in testing, a 22x win). This is a recent-activity
-    scrubber; the client can widen `years` to reach older events on demand.
+    timeline_events has 373 monthly partitions but is queried by entity_id (NOT the
+    partition key), so an unbounded per-entity query MergeAppends ALL partitions
+    (~6.6s even for a sparse entity). We bound occurred_at to the entity's OWN
+    active range (entities.first_event_at/last_event_at, maintained by the timeline
+    pipeline) so Postgres partition-prunes to just that entity's active months —
+    fast for everyone AND complete (all of the entity's history, no global window).
     """
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT source, event_type, extract(epoch FROM occurred_at) AS ts
-            FROM timeline_events
-            WHERE entity_id = $1::uuid
-              AND occurred_at > now() - make_interval(years => $3)
-            ORDER BY occurred_at DESC
-            LIMIT $2
-        """, entity_id, max_events, years)
+        rng = await conn.fetchrow(
+            "SELECT first_event_at, last_event_at FROM entities WHERE id = $1::uuid",
+            entity_id,
+        )
+        if rng and rng["first_event_at"] is not None:
+            rows = await conn.fetch("""
+                SELECT source, event_type, extract(epoch FROM occurred_at) AS ts
+                FROM timeline_events
+                WHERE entity_id = $1::uuid
+                  AND occurred_at >= $3 AND occurred_at <= $4
+                ORDER BY occurred_at DESC
+                LIMIT $2
+            """, entity_id, max_events, rng["first_event_at"], rng["last_event_at"])
+        else:
+            # Range not computed yet (new entity, pre-first-pipeline-run): recent
+            # fallback so we still prune rather than scan all 373 partitions.
+            rows = await conn.fetch("""
+                SELECT source, event_type, extract(epoch FROM occurred_at) AS ts
+                FROM timeline_events
+                WHERE entity_id = $1::uuid AND occurred_at > now() - interval '5 years'
+                ORDER BY occurred_at DESC
+                LIMIT $2
+            """, entity_id, max_events)
         alert_rows = await conn.fetch("""
             SELECT alert_type, extract(epoch FROM detected_at) AS ts
             FROM alerts

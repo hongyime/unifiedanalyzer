@@ -181,6 +181,34 @@ async def clear_orphaned_run_locks() -> int:
     return len(cleared)
 
 
+async def update_entity_event_ranges() -> int:
+    """Maintain entities.first_event_at / last_event_at = min/max(occurred_at) of the
+    entity's timeline events. These bound per-entity timeline queries to the entity's
+    own active months so Postgres partition-prunes timeline_events (373 partitions)
+    instead of MergeAppend-ing all of them (~6.6s). IS DISTINCT FROM guard avoids
+    dead-tuple churn on unchanged rows. Returns rows updated."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        updated = await conn.fetchval("""
+            WITH r AS (
+                SELECT entity_id, min(occurred_at) AS mn, max(occurred_at) AS mx
+                FROM timeline_events
+                WHERE entity_id IS NOT NULL
+                GROUP BY entity_id
+            ), upd AS (
+                UPDATE entities e
+                SET first_event_at = r.mn, last_event_at = r.mx
+                FROM r
+                WHERE e.id = r.entity_id
+                  AND (e.first_event_at IS DISTINCT FROM r.mn
+                       OR e.last_event_at IS DISTINCT FROM r.mx)
+                RETURNING 1
+            )
+            SELECT count(*) FROM upd
+        """)
+    return updated or 0
+
+
 async def get_last_run_time(run_type: str) -> datetime | None:
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
@@ -437,6 +465,8 @@ async def run_incremental() -> dict:
         stats["events"] = timeline_stats.get("inserted", 0)
         interaction_stats = await build_interaction_graph(since=since)
         stats["interactions"] = interaction_stats.get("inserted", 0)
+        # Refresh per-entity date-range for partition-pruned timeline queries.
+        stats["entity_ranges"] = await update_entity_event_ranges()
 
         alert_stats = await run_alerts()
         stats["alerts"] = sum(alert_stats.values())
@@ -568,6 +598,7 @@ async def run_full_resolution() -> dict:
         stats["events"] = timeline_stats.get("inserted", 0)
         interaction_stats = await build_interaction_graph(since=None)
         stats["interactions"] = interaction_stats.get("inserted", 0)
+        stats["entity_ranges"] = await update_entity_event_ranges()
 
         alert_stats = await run_alerts()
         stats["alerts"] = sum(alert_stats.values())

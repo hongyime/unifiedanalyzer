@@ -36,7 +36,8 @@ async def get_intelligence(entity_id: str):
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         entity = await conn.fetchrow(
-            "SELECT id, canonical_name, tier FROM entities WHERE id = $1::uuid", entity_id
+            "SELECT id, canonical_name, tier, first_event_at, last_event_at "
+            "FROM entities WHERE id = $1::uuid", entity_id
         )
         if not entity:
             raise HTTPException(404, "Entity not found")
@@ -82,12 +83,24 @@ async def get_intelligence(entity_id: str):
             ORDER BY r.weight DESC
         """, entity_id)
 
-        timeline_rows = await conn.fetch("""
-            SELECT source, COUNT(*) AS count, MIN(occurred_at) AS first_seen, MAX(occurred_at) AS last_seen
-            FROM timeline_events
-            WHERE entity_id = $1::uuid
-            GROUP BY source
-        """, entity_id)
+        # Bound to the entity's own date-range so Postgres partition-prunes the 373
+        # timeline_events partitions (else this GROUP BY scans them all, ~3.4s). The
+        # range IS min/max of the entity's events, so results are identical.
+        if entity["first_event_at"] is not None:
+            timeline_rows = await conn.fetch("""
+                SELECT source, COUNT(*) AS count, MIN(occurred_at) AS first_seen, MAX(occurred_at) AS last_seen
+                FROM timeline_events
+                WHERE entity_id = $1::uuid
+                  AND occurred_at >= $2 AND occurred_at <= $3
+                GROUP BY source
+            """, entity_id, entity["first_event_at"], entity["last_event_at"])
+        else:
+            timeline_rows = await conn.fetch("""
+                SELECT source, COUNT(*) AS count, MIN(occurred_at) AS first_seen, MAX(occurred_at) AS last_seen
+                FROM timeline_events
+                WHERE entity_id = $1::uuid
+                GROUP BY source
+            """, entity_id)
 
     # --- behavioral profile / metadata-derived fields ---
     meta = _decode_meta(bp["metadata"]) if bp else {}
