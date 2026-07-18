@@ -36,6 +36,7 @@ import os
 from uuid import UUID
 
 import numpy as np
+from asyncpg.exceptions import QueryCanceledError
 
 from src.db.connection import get_analyzer_pool, get_collector_pool, is_collector_unavailable_error
 
@@ -1138,7 +1139,17 @@ async def bridge_faces_to_entities() -> dict:
     cluster = await bridge_faces_by_cluster_propagation()
     profile = await bridge_profile_photo_faces()
     media = await bridge_media_owner_faces()
-    knn = await bridge_faces_via_knn_propagation()
+    try:
+        knn = await bridge_faces_via_knn_propagation()
+    except (TimeoutError, QueryCanceledError) as exc:
+        logger.warning("face bridge knn_propagation skipped: %s", exc.__class__.__name__)
+        knn = {
+            "threshold": _FACE_KNN_PROPAGATION_THRESHOLD,
+            "faces_scanned": 0,
+            "linked": 0,
+            "skipped": True,
+            "error": exc.__class__.__name__,
+        }
 
     linked_total = (
         int(cluster.get("linked") or 0)
