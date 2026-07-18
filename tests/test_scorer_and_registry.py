@@ -119,6 +119,24 @@ def test_health_reporting_excludes_probe_run_types():
     assert not is_probe_phase_name("timeline")
 
 
+def test_collector_quiet_health_uses_schedule_cadence():
+    """Collector health should not warn while a source is still inside cadence."""
+    from datetime import datetime, timedelta, timezone
+
+    from src.scheduler.scheduler import _collector_no_run_issue
+
+    now = datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc)
+    assert _collector_no_run_issue(
+        "youtube", now - timedelta(hours=11, minutes=40), 12, now
+    ) is None
+    issue = _collector_no_run_issue(
+        "youtube", now - timedelta(hours=15), 12, now
+    )
+    assert issue is not None
+    assert issue["source"] == "youtube"
+    assert "cadence 12h" in issue["message"]
+
+
 def test_face_associations_before_social_face_link():
     """Ordering matters: face_associations populates the table
     social_face_link then reads."""

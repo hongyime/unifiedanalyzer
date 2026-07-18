@@ -21,6 +21,32 @@ logger = logging.getLogger(__name__)
 _running = False
 
 
+def _collector_no_run_issue(
+    source: str,
+    last_run: datetime | None,
+    interval_hours: int | None,
+    now: datetime,
+) -> dict | None:
+    """Return a collector quiet issue only after its configured cadence is overdue."""
+    if not last_run:
+        return {"source": source, "message": "no successful scheduled run yet"}
+    if last_run.tzinfo is None:
+        last_run = last_run.replace(tzinfo=timezone.utc)
+    cadence = max(1.0, float(interval_hours or 24))
+    grace = max(1.0, cadence * 0.10)
+    hours_ago = (now - last_run).total_seconds() / 3600
+    if hours_ago <= cadence + grace:
+        return None
+    overdue = max(0.0, hours_ago - cadence)
+    return {
+        "source": source,
+        "message": (
+            f"overdue by {overdue:.0f}h "
+            f"(last run {hours_ago:.0f}h ago, cadence {cadence:.0f}h)"
+        ),
+    }
+
+
 async def _fetch_failing_production_phases(conn) -> list[str]:
     """Return phases whose latest production run status is failed.
 
@@ -47,23 +73,30 @@ async def _check_collector_health() -> list[dict]:
         collector = get_collector_pool()
         async with collector.acquire() as conn:
             rows = await conn.fetch("""
-                SELECT source,
-                       MAX(started_at) AS last_run,
-                       COUNT(*) FILTER (WHERE status = 'failed'
-                           AND started_at > NOW() - INTERVAL '24 hours') AS failed_24h
-                FROM collection_runs
-                GROUP BY source
+                WITH runs AS (
+                    SELECT source,
+                           MAX(started_at) AS last_run,
+                           COUNT(*) FILTER (WHERE status = 'failed'
+                               AND started_at > NOW() - INTERVAL '24 hours') AS failed_24h
+                    FROM collection_runs
+                    GROUP BY source
+                )
+                SELECT s.source,
+                       COALESCE(s.last_run, r.last_run) AS last_run,
+                       s.interval_hours,
+                       COALESCE(r.failed_24h, 0)::int AS failed_24h
+                FROM collection_schedules s
+                LEFT JOIN runs r ON r.source = s.source
+                WHERE s.enabled
             """)
         issues = []
         now = datetime.now(timezone.utc)
         for r in rows:
-            if r["last_run"]:
-                hours_ago = (now - r["last_run"]).total_seconds() / 3600
-                if hours_ago > 6:
-                    issues.append({
-                        "source": r["source"],
-                        "message": f"no run in {hours_ago:.0f}h",
-                    })
+            quiet_issue = _collector_no_run_issue(
+                r["source"], r["last_run"], r["interval_hours"], now
+            )
+            if quiet_issue:
+                issues.append(quiet_issue)
             if r["failed_24h"] and r["failed_24h"] >= 3:
                 issues.append({
                     "source": r["source"],
