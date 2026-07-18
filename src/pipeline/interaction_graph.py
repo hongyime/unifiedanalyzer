@@ -492,7 +492,10 @@ async def build_interaction_graph(
         params: list = []
         if since:
             where_clause = f"AND {spec['time_col']} > $1"
-            params.append(since)
+            if spec.get("db") == "analyzer" or since.tzinfo is None:
+                params.append(since)
+            else:
+                params.append(since.astimezone(timezone.utc).replace(tzinfo=None))
         query = spec["query"].format(where_clause=where_clause)
 
         processed = inserted = resolved = skipped_unresolved = skipped_self = 0
