@@ -245,6 +245,67 @@ export interface InteractionPeer {
   }
 }
 
+export interface IntersectionEntity {
+  id: string
+  name: string | null
+  face: string | null
+}
+
+export interface IntersectionEvidencePoint {
+  entity_id: string
+  entity_name: string | null
+  source: string
+  record_id: string
+  occurred_at: string | null
+  lat: number
+  lng: number
+  label: string | null
+}
+
+export interface PhysicalIntersection {
+  type: string
+  locus: { lat: number; lng: number }
+  radius_m: number
+  max_distance_m: number
+  time_gap_minutes: number
+  sources: string[]
+  evidence: IntersectionEvidencePoint[]
+}
+
+export interface DigitalIntersection {
+  type: string
+  source: string
+  label: string | null
+  entities: { id: string; name: string | null; role: string }[]
+  count: number
+  weight?: number | null
+  group_id?: string | null
+  peer?: { id: string; name: string | null }
+  first_seen_at?: string | null
+  last_seen_at?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export interface IntersectionResponse {
+  entity_ids: string[]
+  entities: IntersectionEntity[]
+  params: {
+    radius_m: number
+    window_minutes: number
+    from: string | null
+    to: string | null
+  }
+  physical: PhysicalIntersection[]
+  digital: DigitalIntersection[]
+  counts: {
+    physical: number
+    digital: number
+    physical_points_considered: number
+  }
+  collector_skipped: boolean
+  duration_ms: number
+}
+
 export interface Community {
   community_id: string
   member_count: number
@@ -573,6 +634,28 @@ export const api = {
     const suffix = q.toString() ? `?${q.toString()}` : ''
     return get<{ data: InteractionPeer[] }>(`/entities/${entityId}/interactions${suffix}`)
   },
+
+  getEntityIntersection: (
+    entityA: string,
+    entityB: string,
+    opts: { radius_m?: number; window_minutes?: number; from?: string | null; to?: string | null } = {},
+  ) => {
+    const q = new URLSearchParams()
+    if (opts.radius_m != null) q.set('radius_m', String(opts.radius_m))
+    if (opts.window_minutes != null) q.set('window_minutes', String(opts.window_minutes))
+    if (opts.from) q.set('from', opts.from)
+    if (opts.to) q.set('to', opts.to)
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return get<IntersectionResponse>(`/entities/${entityA}/intersect/${entityB}${suffix}`)
+  },
+
+  intersectEntities: (body: {
+    ids: string[]
+    radius_m?: number
+    window_minutes?: number
+    from?: string | null
+    to?: string | null
+  }) => post<IntersectionResponse>('/entities/intersect', body),
 
   getGraphOverview: () => get<{
     total_relationships: number

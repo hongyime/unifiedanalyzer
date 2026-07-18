@@ -26,6 +26,7 @@ from src.api.routes.triage import router as triage_router
 from src.api.routes.cases import router as cases_router
 from src.api.routes.changelog import router as changelog_router
 from src.api.routes.search import router as search_router
+from src.api.routes.intersections import router as intersections_router
 from src.api.websocket import router as websocket_router
 
 logging.basicConfig(
@@ -65,6 +66,7 @@ app.include_router(media_router, prefix="/api")
 app.include_router(triage_router, prefix="/api")
 app.include_router(cases_router, prefix="/api")
 app.include_router(changelog_router, prefix="/api")
+app.include_router(intersections_router, prefix="/api")
 # Axis-1 MVP: semantic timeline search. Router carries its own /api/search
 # prefix, so mount without a further prefix here.
 app.include_router(search_router)
@@ -83,7 +85,8 @@ _scheduler_task: asyncio.Task | None = None
 @app.on_event("startup")
 async def startup():
     global _scheduler_task
-    await init_pools()
+    apply_schema = os.getenv("ANALYZER_APPLY_SCHEMA_ON_STARTUP", "1") != "0"
+    await init_pools(apply_schema_ddl=apply_schema)
     # The scheduler runs the heavy Phase-6 pipeline (cv2 / ffmpeg / pypdf) whose
     # blocking C calls would freeze this uvicorn event loop for the whole run,
     # making the dashboard unresponsive. So it now runs as a SEPARATE process

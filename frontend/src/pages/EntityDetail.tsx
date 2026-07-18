@@ -18,6 +18,7 @@ import { FaceAvatar } from '../components/FaceAvatar'
 import { TimelineLanes } from '../components/TimelineLanes'
 import { ConnectionsPanel } from '../components/ConnectionsPanel'
 import { IdentitySummary } from '../components/IdentitySummary'
+import { IntersectPanel } from '../components/IntersectPanel'
 import { GeoMap } from '../components/GeoMap'
 import { PageHeader } from '../components/ui/PageHeader'
 import { PlatformBadge } from '../components/ui/PlatformBadge'
@@ -130,6 +131,7 @@ type TabKey =
   | 'changes'
   | 'timeline'
   | 'map'
+  | 'intersect'
   | 'behavior'
   | 'connections'
   | 'intelligence'
@@ -399,6 +401,7 @@ export default function EntityDetailPage() {
     { key: 'changes', label: 'Changes', badge: changelog && changelog.total_changes > 0 ? String(changelog.total_changes) : undefined },
     { key: 'timeline', label: 'Timeline' },
     { key: 'map', label: 'Map' },
+    { key: 'intersect', label: 'Intersect' },
     { key: 'behavior', label: 'Behavior' },
     { key: 'connections', label: 'Connections' },
     { key: 'intelligence', label: 'Intelligence' },
@@ -777,6 +780,11 @@ export default function EntityDetailPage() {
             description="Strava routes and Instagram places will appear here as the collector populates them."
           />
         )
+      )}
+
+      {/* ── Intersect ────────────────────────────────────────────────── */}
+      {tab === 'intersect' && (
+        <IntersectPanel entity={entity} />
       )}
 
       {/* ── Behavior ─────────────────────────────────────────────────── */}
