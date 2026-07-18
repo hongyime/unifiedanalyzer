@@ -99,6 +99,26 @@ def test_phase_list_has_new_phases():
     assert not missing, f"Missing new phases in _secondary_phases: {missing}"
 
 
+def test_health_reporting_excludes_probe_run_types():
+    """Production health must not be held open by explicit verification probes."""
+    from src.pipeline.run_reporting import (
+        is_probe_phase_name,
+        is_production_run_type,
+        probe_phase_names,
+        production_run_types,
+    )
+
+    assert production_run_types() == ["incremental", "full_resolution"]
+    assert is_production_run_type("incremental")
+    assert is_production_run_type("full_resolution")
+    assert not is_production_run_type("forced_phase_failure_probe")
+    assert not is_production_run_type("collector_down_probe_short")
+    assert not is_production_run_type("manual_verification")
+    assert probe_phase_names() == ["forced_failure"]
+    assert is_probe_phase_name("forced_failure")
+    assert not is_probe_phase_name("timeline")
+
+
 def test_face_associations_before_social_face_link():
     """Ordering matters: face_associations populates the table
     social_face_link then reads."""

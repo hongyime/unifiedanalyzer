@@ -10,6 +10,7 @@ from src.pipeline.incremental_runner import (
     get_last_run_time,
     clear_orphaned_run_locks,
 )
+from src.pipeline.run_reporting import production_run_types, probe_phase_names
 from src.notifications.alerts import (
     notify_collector_health, notify_daily_digest, notify_merge_candidate,
     notify_status,
@@ -18,6 +19,27 @@ from src.notifications.alerts import (
 logger = logging.getLogger(__name__)
 
 _running = False
+
+
+async def _fetch_failing_production_phases(conn) -> list[str]:
+    """Return phases whose latest production run status is failed.
+
+    Probe/manual run types are kept in run history, but production health should
+    be based on real scheduled run types only. The phase filter keeps synthetic
+    forced-failure probes from warning forever even if a probe row is latest.
+    """
+    rows = await conn.fetch("""
+        WITH latest AS (
+            SELECT DISTINCT ON (phase) phase, status
+            FROM run_phase_status
+            WHERE run_type = ANY($1::text[])
+              AND phase <> ALL($2::text[])
+            ORDER BY phase, created_at DESC
+        )
+        SELECT phase FROM latest WHERE status = 'failed'
+        ORDER BY phase
+    """, production_run_types(), probe_phase_names())
+    return [r["phase"] for r in rows]
 
 
 async def _check_collector_health() -> list[dict]:
@@ -69,12 +91,16 @@ async def _build_daily_digest() -> dict:
             "SELECT COUNT(*) FROM timeline_events WHERE created_at > NOW() - INTERVAL '24 hours'"
         )
         runs_24h = await conn.fetchval(
-            "SELECT COUNT(*) FROM analysis_runs WHERE started_at > NOW() - INTERVAL '24 hours'"
+            "SELECT COUNT(*) FROM analysis_runs "
+            "WHERE started_at > NOW() - INTERVAL '24 hours' "
+            "AND run_type = ANY($1::text[])",
+            production_run_types(),
         )
         failed_runs = await conn.fetchval("""
             SELECT COUNT(*) FROM analysis_runs
             WHERE started_at > NOW() - INTERVAL '24 hours' AND status = 'failed'
-        """)
+              AND run_type = ANY($1::text[])
+        """, production_run_types())
         most_active = await conn.fetchrow("""
             SELECT e.canonical_name, COUNT(*) AS cnt
             FROM timeline_events te
@@ -88,14 +114,7 @@ async def _build_daily_digest() -> dict:
         except Exception:
             faces_linked = 0
         try:
-            failing_rows = await conn.fetch("""
-                WITH latest AS (
-                    SELECT DISTINCT ON (phase) phase, status
-                    FROM run_phase_status ORDER BY phase, created_at DESC
-                )
-                SELECT phase FROM latest WHERE status = 'failed'
-            """)
-            failing_phases = [r["phase"] for r in failing_rows]
+            failing_phases = await _fetch_failing_production_phases(conn)
         except Exception:
             failing_phases = []
 
@@ -152,7 +171,10 @@ async def _build_status() -> dict:
         # Current in-progress run (if any) + its heartbeat freshness.
         running = await conn.fetchrow(
             "SELECT run_type, started_at, heartbeat_at FROM analysis_runs "
-            "WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+            "WHERE status = 'running' "
+            "AND run_type = ANY($1::text[]) "
+            "ORDER BY started_at DESC LIMIT 1",
+            production_run_types(),
         )
         last = await conn.fetchrow(
             "SELECT run_type, finished_at FROM analysis_runs "
@@ -162,18 +184,13 @@ async def _build_status() -> dict:
         )
         failed_24h = await conn.fetchval(
             "SELECT COUNT(*) FROM analysis_runs "
-            "WHERE status = 'failed' AND finished_at > NOW() - INTERVAL '24 hours'"
+            "WHERE status = 'failed' AND finished_at > NOW() - INTERVAL '24 hours' "
+            "AND run_type = ANY($1::text[])",
+            production_run_types(),
         )
         # Pipeline phases whose most-recent run failed (P2-3 run_phase_status).
         try:
-            failing_rows = await conn.fetch("""
-                WITH latest AS (
-                    SELECT DISTINCT ON (phase) phase, status
-                    FROM run_phase_status ORDER BY phase, created_at DESC
-                )
-                SELECT phase FROM latest WHERE status = 'failed'
-            """)
-            failing_phases = [r["phase"] for r in failing_rows]
+            failing_phases = await _fetch_failing_production_phases(conn)
         except Exception:
             failing_phases = []
 

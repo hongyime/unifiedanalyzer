@@ -63,6 +63,7 @@ from src.pipeline.email_breach import check_email_breaches
 from src.pipeline.handle_fanout import run_handle_fanout
 from src.pipeline.email_recognition import run_email_recognition
 from src.pipeline.geocode import geocode_step
+from src.pipeline.run_reporting import production_run_types, probe_phase_names
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
 
 logger = logging.getLogger(__name__)
@@ -414,11 +415,13 @@ async def _alert_on_repeated_phase_failures(threshold: int = 3) -> None:
                 SELECT phase, status,
                        row_number() OVER (PARTITION BY phase ORDER BY created_at DESC) AS rn
                 FROM run_phase_status
+                WHERE run_type = ANY($2::text[])
+                  AND phase <> ALL($3::text[])
             )
             SELECT phase FROM recent WHERE rn <= $1
             GROUP BY phase
             HAVING count(*) = $1 AND count(*) FILTER (WHERE status = 'failed') = $1
-        """, threshold)
+        """, threshold, production_run_types(), probe_phase_names())
     if rows:
         phases = ", ".join(r["phase"] for r in rows)
         logger.error("Phases failing %d runs in a row: %s", threshold, phases)
