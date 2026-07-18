@@ -43,6 +43,7 @@ Four independent tightenings, each env-tunable:
      TEMPORAL_HOUR_SIM_THRESHOLD and the emitted weight now reflects the
      rarity-weighted score, not a flat 100.
 """
+import asyncio
 import json
 import logging
 import os
@@ -184,48 +185,16 @@ def _date_span(start: date, end: date) -> int:
     return (end - start).days + 1
 
 
-async def correlate_activity() -> dict:
-    analyzer = get_analyzer_pool()
-
-    # --- Tier 1: posting hour distribution similarity ---
-    async with analyzer.acquire() as conn:
-        profiles = await conn.fetch("""
-            SELECT entity_id::text, posting_hour_dist, total_events
-            FROM behavioral_profiles
-            WHERE posting_hour_dist IS NOT NULL AND total_events >= $1
-        """, _MIN_EVENTS)
-
-    hour_dists: dict[str, list[float]] = {}
-    for p in profiles:
-        dist = p["posting_hour_dist"]
-        # behavioral_profiler stores as JSONB dict {"0": 5, "14": 3, ...}
-        if isinstance(dist, str):
-            try:
-                dist = json.loads(dist)
-            except (json.JSONDecodeError, TypeError):
-                continue
-        if isinstance(dist, dict):
-            hour_dists[p["entity_id"]] = [float(dist.get(str(h), 0)) for h in range(24)]
-        elif isinstance(dist, list) and len(dist) == 24:
-            hour_dists[p["entity_id"]] = [float(x) for x in dist]
-
-    # Fetch per-entity event timestamps up front — Tier 1 now needs them to
-    # gate hour-similarity on real tight co-occurrence evidence, and Tier 2
-    # reuses the same buffer.
-    async with analyzer.acquire() as conn:
-        events = await conn.fetch("""
-            SELECT entity_id::text, occurred_at, source
-            FROM timeline_events
-            WHERE entity_id IS NOT NULL
-              AND occurred_at > $1
-            ORDER BY entity_id, occurred_at
-        """, _EPOCH_FLOOR)
-
-    # Build per-entity sorted event timestamps
-    entity_events: dict[str, list[datetime]] = defaultdict(list)
-    for e in events:
-        entity_events[e["entity_id"]].append(e["occurred_at"])
-
+def _compute_temporal_candidates(
+    hour_dists: dict[str, list[float]],
+    entity_events: dict[str, list[datetime]],
+) -> tuple[
+    dict[str, int],
+    list[tuple[str, str, float]],
+    list[tuple[str, str, int, int, float, float]],
+    list[tuple[str, str, int, int, float, float]],
+    list[tuple[str, str, int, int, int, float, float, float]],
+]:
     # --- Tier 1: rarity-weighted hour similarity, GATED on tight co-occurrence ---
     # Q4: exclude hub / degenerate accounts before pairing. An entity qualifies
     # only if it is not a high-frequency hub, is active on enough distinct days,
@@ -397,6 +366,62 @@ async def correlate_activity() -> dict:
         "copresence_pairs": len(copresence_pairs),
         "coabsence_pairs": len(coabsence_pairs),
     }
+    return stats, tier1_pairs, copost_pairs, copresence_pairs, coabsence_pairs
+
+
+async def correlate_activity() -> dict:
+    analyzer = get_analyzer_pool()
+
+    # --- Tier 1: posting hour distribution similarity ---
+    async with analyzer.acquire() as conn:
+        profiles = await conn.fetch("""
+            SELECT entity_id::text, posting_hour_dist, total_events
+            FROM behavioral_profiles
+            WHERE posting_hour_dist IS NOT NULL AND total_events >= $1
+        """, _MIN_EVENTS)
+
+    hour_dists: dict[str, list[float]] = {}
+    for p in profiles:
+        dist = p["posting_hour_dist"]
+        # behavioral_profiler stores as JSONB dict {"0": 5, "14": 3, ...}
+        if isinstance(dist, str):
+            try:
+                dist = json.loads(dist)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if isinstance(dist, dict):
+            hour_dists[p["entity_id"]] = [float(dist.get(str(h), 0)) for h in range(24)]
+        elif isinstance(dist, list) and len(dist) == 24:
+            hour_dists[p["entity_id"]] = [float(x) for x in dist]
+
+    # Fetch per-entity event timestamps up front — Tier 1 now needs them to
+    # gate hour-similarity on real tight co-occurrence evidence, and Tier 2
+    # reuses the same buffer.
+    async with analyzer.acquire() as conn:
+        events = await conn.fetch("""
+            SELECT entity_id::text, occurred_at, source
+            FROM timeline_events
+            WHERE entity_id IS NOT NULL
+              AND occurred_at > $1
+            ORDER BY entity_id, occurred_at
+        """, _EPOCH_FLOOR)
+
+    # Build per-entity sorted event timestamps.
+    entity_events: dict[str, list[datetime]] = defaultdict(list)
+    for e in events:
+        entity_events[e["entity_id"]].append(e["occurred_at"])
+
+    (
+        stats,
+        tier1_pairs,
+        copost_pairs,
+        copresence_pairs,
+        coabsence_pairs,
+    ) = await asyncio.to_thread(
+        _compute_temporal_candidates,
+        hour_dists,
+        dict(entity_events),
+    )
 
     # --- Persist results ---
     async with analyzer.acquire() as conn:
