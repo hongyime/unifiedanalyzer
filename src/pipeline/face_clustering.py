@@ -582,6 +582,8 @@ async def propagate_drive_faces_via_knn() -> dict:
 
     Uses FAISS if available; if the import fails we log and return a skipped
     stats row so the phase never hard-fails on a missing optional dep."""
+    import time
+    _t = time.monotonic()
     stats = {"drive_faces_scanned": 0, "linked": 0, "clear_winner_skipped": 0,
              "below_threshold_skipped": 0, "no_anchors": 0}
     try:
@@ -621,18 +623,48 @@ async def propagate_drive_faces_via_knn() -> dict:
         return stats
 
     # Build the in-memory FAISS index over anchor embeddings. L2-normalize both
-    # sides so IndexFlatIP inner-product == cosine similarity.
+    # sides so inner-product == cosine similarity. This is CPU-heavy on full
+    # runs (thousands of drive faces x thousands of anchors), so keep the whole
+    # parse/index/search block off the event loop and use HNSW for large anchor
+    # corpora. Exact flat search is still used for small deterministic batches.
     anchor_entity_ids = [r["entity_id"] for r in anchor_rows]
-    A = _normalized_matrix([r["emb"] for r in anchor_rows])
-    D = _normalized_matrix([r["emb"] for r in drive_rows])
-    if A is None or D is None:
-        return stats
+    k = min(5, len(anchor_entity_ids))
 
-    import faiss  # confirmed importable above
-    index = faiss.IndexFlatIP(A.shape[1])
-    index.add(np.ascontiguousarray(A, dtype=np.float32))
-    k = min(5, len(A))
-    sims, idxs = index.search(np.ascontiguousarray(D, dtype=np.float32), k)
+    def _search():
+        A = _normalized_matrix([r["emb"] for r in anchor_rows])
+        D = _normalized_matrix([r["emb"] for r in drive_rows])
+        if A is None or D is None:
+            return None, None
+        import faiss
+        if _FACE_FAISS_THREADS > 0 and hasattr(faiss, "omp_set_num_threads"):
+            faiss.omp_set_num_threads(_FACE_FAISS_THREADS)
+        if len(A) <= _FACE_EXACT_SEARCH_MAX:
+            logger.info(
+                "drive_face_xref: using exact FAISS search "
+                "(anchors=%d, drive=%d)",
+                len(A), len(D),
+            )
+            index = faiss.IndexFlatIP(A.shape[1])
+        else:
+            logger.info(
+                "drive_face_xref: using FAISS HNSW search "
+                "(anchors=%d, drive=%d, exact_limit=%d, m=%d, ef_search=%d)",
+                len(A), len(D), _FACE_EXACT_SEARCH_MAX,
+                _FACE_HNSW_M, _FACE_HNSW_EF_SEARCH,
+            )
+            index = faiss.IndexHNSWFlat(A.shape[1], _FACE_HNSW_M, faiss.METRIC_INNER_PRODUCT)
+            index.hnsw.efConstruction = _FACE_HNSW_EF_CONSTRUCTION
+            index.hnsw.efSearch = _FACE_HNSW_EF_SEARCH
+        index.add(np.ascontiguousarray(A, dtype=np.float32))
+        return index.search(np.ascontiguousarray(D, dtype=np.float32), k)
+
+    try:
+        sims, idxs = await asyncio.to_thread(_search)
+    except Exception:
+        logger.warning("drive_face_xref FAISS search failed; skipping phase", exc_info=True)
+        return {**stats, "skipped": "faiss_search_failed"}
+    if sims is None or idxs is None:
+        return stats
 
     new_links: list[tuple] = []
     for i, row in enumerate(drive_rows):
@@ -664,6 +696,7 @@ async def propagate_drive_faces_via_knn() -> dict:
             """, new_links)
         stats["linked"] = len(new_links)
 
+    stats["wall_s"] = round(time.monotonic() - _t, 1)
     logger.info("Drive-face kNN xref: %s", stats)
     return stats
 
