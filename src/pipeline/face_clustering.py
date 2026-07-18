@@ -101,6 +101,7 @@ _PURITY_MIN_TIGHTNESS = float(os.getenv("FACE_PURITY_MIN_TIGHTNESS", "0.35"))
 _DRIVE_XREF_THRESHOLD = float(os.getenv("FACE_DRIVE_XREF_THRESHOLD", "0.55"))
 _DRIVE_XREF_TOP_MARGIN = float(os.getenv("FACE_DRIVE_XREF_TOP_MARGIN", "0.05"))
 _DRIVE_XREF_BATCH = int(os.getenv("FACE_DRIVE_XREF_BATCH", "5000"))
+_DRIVE_XREF_EXACT_PAIR_MAX = int(os.getenv("FACE_DRIVE_XREF_EXACT_PAIR_MAX", "250000"))
 
 # Internal gate: skip the whole pass when the face corpus hasn't grown.
 _last_face_count = -1
@@ -638,18 +639,19 @@ async def propagate_drive_faces_via_knn() -> dict:
         import faiss
         if _FACE_FAISS_THREADS > 0 and hasattr(faiss, "omp_set_num_threads"):
             faiss.omp_set_num_threads(_FACE_FAISS_THREADS)
-        if len(A) <= _FACE_EXACT_SEARCH_MAX:
+        pair_count = len(A) * len(D)
+        if len(A) <= _FACE_EXACT_SEARCH_MAX and pair_count <= _DRIVE_XREF_EXACT_PAIR_MAX:
             logger.info(
                 "drive_face_xref: using exact FAISS search "
-                "(anchors=%d, drive=%d)",
-                len(A), len(D),
+                "(anchors=%d, drive=%d, pairs=%d)",
+                len(A), len(D), pair_count,
             )
             index = faiss.IndexFlatIP(A.shape[1])
         else:
             logger.info(
                 "drive_face_xref: using FAISS HNSW search "
-                "(anchors=%d, drive=%d, exact_limit=%d, m=%d, ef_search=%d)",
-                len(A), len(D), _FACE_EXACT_SEARCH_MAX,
+                "(anchors=%d, drive=%d, pairs=%d, exact_limit=%d, pair_limit=%d, m=%d, ef_search=%d)",
+                len(A), len(D), pair_count, _FACE_EXACT_SEARCH_MAX, _DRIVE_XREF_EXACT_PAIR_MAX,
                 _FACE_HNSW_M, _FACE_HNSW_EF_SEARCH,
             )
             index = faiss.IndexHNSWFlat(A.shape[1], _FACE_HNSW_M, faiss.METRIC_INNER_PRODUCT)
