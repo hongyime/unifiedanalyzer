@@ -10,27 +10,36 @@ async def compute_behavioral_profiles() -> int:
 
     async with pool.acquire() as conn:
         count = await conn.fetchval("""
-            WITH base AS (
+            WITH per_bucket AS (
                 SELECT entity_id,
-                       count(*)::int AS total_events,
+                       extract(hour FROM occurred_at)::int::text AS hour_key,
+                       (extract(isodow FROM occurred_at)::int - 1)::text AS dow_key,
+                       count(*)::int AS n,
                        min(occurred_at) AS first_seen,
                        max(occurred_at) AS last_seen
                 FROM timeline_events
                 WHERE entity_id IS NOT NULL
                   AND occurred_at IS NOT NULL
+                GROUP BY entity_id,
+                         extract(hour FROM occurred_at)::int,
+                         extract(isodow FROM occurred_at)::int
+            ), base AS (
+                SELECT entity_id,
+                       sum(n)::int AS total_events,
+                       min(first_seen) AS first_seen,
+                       max(last_seen) AS last_seen
+                FROM per_bucket
                 GROUP BY entity_id
-                HAVING count(*) >= 2
+                HAVING sum(n) >= 2
             ), hours AS (
                 SELECT entity_id,
                        jsonb_object_agg(hour_key, n ORDER BY hour_key) AS posting_hour_dist
                 FROM (
                     SELECT entity_id,
-                           extract(hour FROM occurred_at)::int::text AS hour_key,
-                           count(*)::int AS n
-                    FROM timeline_events
-                    WHERE entity_id IS NOT NULL
-                      AND occurred_at IS NOT NULL
-                    GROUP BY entity_id, extract(hour FROM occurred_at)::int
+                           hour_key,
+                           sum(n)::int AS n
+                    FROM per_bucket
+                    GROUP BY entity_id, hour_key
                 ) h
                 GROUP BY entity_id
             ), dows AS (
@@ -38,12 +47,10 @@ async def compute_behavioral_profiles() -> int:
                        jsonb_object_agg(dow_key, n ORDER BY dow_key) AS posting_dow_dist
                 FROM (
                     SELECT entity_id,
-                           (extract(isodow FROM occurred_at)::int - 1)::text AS dow_key,
-                           count(*)::int AS n
-                    FROM timeline_events
-                    WHERE entity_id IS NOT NULL
-                      AND occurred_at IS NOT NULL
-                    GROUP BY entity_id, extract(isodow FROM occurred_at)::int
+                           dow_key,
+                           sum(n)::int AS n
+                    FROM per_bucket
+                    GROUP BY entity_id, dow_key
                 ) d
                 GROUP BY entity_id
             ), upserted AS (
@@ -70,7 +77,7 @@ async def compute_behavioral_profiles() -> int:
                 RETURNING 1
             )
             SELECT count(*) FROM upserted
-        """)
+        """, timeout=900)
 
     logger.info("Computed behavioral profiles for %d entities", count)
     return count or 0

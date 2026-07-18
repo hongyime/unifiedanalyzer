@@ -386,7 +386,9 @@ async def _run_phase(run_id: str, run_type: str, name: str, fn, *, default=None)
         result = await _call_phase(fn)
     except Exception as e:  # noqa: BLE001 — phases are intentionally non-fatal
         logger.exception("%s failed (non-fatal)", name)
-        status, err = "failed", str(e)[:2000]
+        detail = str(e).strip()
+        err = f"{type(e).__name__}: {detail}" if detail else type(e).__name__
+        status, err = "failed", err[:2000]
     duration_ms = int((time.monotonic() - start) * 1000)
     try:
         pool = get_analyzer_pool()
