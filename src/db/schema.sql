@@ -220,7 +220,7 @@ CREATE TABLE IF NOT EXISTS run_phase_status (
     run_id      UUID,
     run_type    VARCHAR(30),
     phase       VARCHAR(64) NOT NULL,
-    status      VARCHAR(20) NOT NULL,   -- ok | failed
+    status      VARCHAR(20) NOT NULL,   -- ok | skipped | failed
     duration_ms INTEGER,
     error       TEXT,
     created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()

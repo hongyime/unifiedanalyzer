@@ -15,6 +15,7 @@ install once).  If neither is present, tests skip with a clear message.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 import sys
@@ -135,6 +136,55 @@ def test_collector_quiet_health_uses_schedule_cadence():
     assert issue is not None
     assert issue["source"] == "youtube"
     assert "cadence 12h" in issue["message"]
+
+
+def test_merge_candidate_notifications_default_to_high_confidence():
+    """Weak 15% identity_signals stay in the DB, but do not page Telegram."""
+    from src.scheduler.scheduler import _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE
+
+    assert _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE == 70
+
+
+def test_collector_unavailable_phase_records_skipped(monkeypatch):
+    """A collector outage should be an intentional skipped phase, not failed."""
+    from src.db.connection import CollectorUnavailableError
+    import src.pipeline.incremental_runner as runner
+
+    captured = {}
+
+    class Conn:
+        async def execute(self, sql, *args):
+            captured["sql"] = sql
+            captured["args"] = args
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    async def phase():
+        raise CollectorUnavailableError("collector down")
+
+    monkeypatch.setattr(runner, "get_analyzer_pool", lambda: Pool())
+    result = asyncio.run(
+        runner._run_phase(
+            "00000000-0000-0000-0000-000000000000",
+            "collector_down_probe_short",
+            "timeline",
+            phase,
+            default={},
+        )
+    )
+
+    assert result["skipped"] == "collector_unavailable"
+    assert captured["args"][3] == "skipped"
+    assert "CollectorUnavailableError" in captured["args"][5]
 
 
 def test_face_associations_before_social_face_link():

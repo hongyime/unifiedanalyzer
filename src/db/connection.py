@@ -13,6 +13,10 @@ _collector_pool: asyncpg.Pool | None = None
 RETRY_DELAYS = [5, 10, 20, 40, 60]
 
 
+class CollectorUnavailableError(RuntimeError):
+    """Raised when optional collector reads cannot be performed."""
+
+
 def _get_env(key: str) -> str:
     val = os.getenv(key)
     if not val:
@@ -145,8 +149,35 @@ def get_analyzer_pool() -> asyncpg.Pool:
 
 def get_collector_pool() -> asyncpg.Pool:
     if _collector_pool is None:
-        raise RuntimeError("Collector pool not initialized — call init_pools() first")
+        raise CollectorUnavailableError("Collector pool not initialized - analyzer is running degraded")
     return _collector_pool
+
+
+def is_collector_unavailable_error(exc: BaseException) -> bool:
+    """Return True for optional-upstream connectivity failures.
+
+    SQL/query bugs such as UndefinedTableError should still fail the phase; this
+    helper is intentionally limited to missing pools and connection-layer errors.
+    """
+    if isinstance(exc, CollectorUnavailableError):
+        return True
+    if isinstance(
+        exc,
+        (OSError, ConnectionError, TimeoutError, asyncio.TimeoutError, asyncpg.InterfaceError),
+    ):
+        return True
+    name = exc.__class__.__name__.lower()
+    return any(
+        token in name
+        for token in (
+            "cannotconnect",
+            "connectiondoesnotexist",
+            "connectionfailure",
+            "connectionrejected",
+            "connectionreset",
+            "connectionrefused",
+        )
+    )
 
 
 async def check_db_connectivity() -> bool:

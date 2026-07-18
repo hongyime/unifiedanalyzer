@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from asyncpg import UniqueViolationError
 
-from src.db.connection import get_analyzer_pool
+from src.db.connection import get_analyzer_pool, is_collector_unavailable_error
 from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.beeper_bridge import bridge_beeper
 from src.pipeline.ig_geo_resolver import resolve_ig_geo_entities
@@ -377,18 +377,28 @@ async def _call_phase(fn):
 
 
 async def _run_phase(run_id: str, run_type: str, name: str, fn, *, default=None):
-    """Run one non-fatal phase; record ok/failed + duration to run_phase_status.
-    Never raises — a phase failure is logged and persisted, not fatal."""
+    """Run one non-fatal phase; record ok/skipped/failed + duration.
+
+    Collector reads are optional for analyzer uptime. When the collector DB is
+    unreachable, collector-dependent phases are marked skipped so a degraded run
+    reaches a clean terminal state while true SQL bugs still surface as failed.
+    """
     start = time.monotonic()
     status, err = "ok", None
     result = default
     try:
         result = await _call_phase(fn)
     except Exception as e:  # noqa: BLE001 — phases are intentionally non-fatal
-        logger.exception("%s failed (non-fatal)", name)
         detail = str(e).strip()
         err = f"{type(e).__name__}: {detail}" if detail else type(e).__name__
-        status, err = "failed", err[:2000]
+        if is_collector_unavailable_error(e):
+            logger.warning("%s skipped: collector unavailable: %s", name, err)
+            status = "skipped"
+            result = {"skipped": "collector_unavailable", "error": err[:500]}
+        else:
+            logger.exception("%s failed (non-fatal)", name)
+            status = "failed"
+        err = err[:2000]
     duration_ms = int((time.monotonic() - start) * 1000)
     try:
         pool = get_analyzer_pool()

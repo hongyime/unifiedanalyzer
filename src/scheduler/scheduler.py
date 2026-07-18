@@ -19,6 +19,9 @@ from src.notifications.alerts import (
 logger = logging.getLogger(__name__)
 
 _running = False
+_MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE = float(
+    os.getenv("MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE", "70")
+)
 
 
 def _collector_no_run_issue(
@@ -265,8 +268,8 @@ async def _check_merge_candidates():
             FROM identity_signals s
             JOIN entities e ON s.entity_id = e.id
             WHERE s.created_at > NOW() - INTERVAL '2 hours'
-              AND s.confidence >= 15
-        """)
+              AND s.confidence >= $1
+        """, _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE)
 
         seen = set()
         for r in rows:
