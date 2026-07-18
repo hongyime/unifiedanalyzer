@@ -1062,7 +1062,15 @@ async def bridge_faces_via_knn_propagation() -> dict:
             await conn.execute("SET LOCAL enable_seqscan = off")
             await conn.execute("SET LOCAL ivfflat.probes = 10")
             row = await conn.fetchrow("""
-                WITH targets AS (
+                WITH cluster_entity_counts AS (
+                    SELECT f.cluster_id, count(DISTINCT ef.entity_id) AS entity_count
+                    FROM facetracker.faces f
+                    JOIN public.entity_faces ef ON ef.face_id = f.id
+                    WHERE f.cluster_id IS NOT NULL
+                      AND NOT COALESCE(f.is_junk, FALSE)
+                    GROUP BY f.cluster_id
+                ),
+                targets AS (
                     SELECT f.id AS face_id,
                            f.embedding_vec,
                            CASE
@@ -1072,8 +1080,14 @@ async def bridge_faces_via_knn_propagation() -> dict:
                            END AS media_item_id
                     FROM facetracker.faces f
                     JOIN facetracker.images i ON i.id = f.image_id
+                    LEFT JOIN cluster_entity_counts target_cec
+                      ON target_cec.cluster_id = f.cluster_id
                     WHERE f.embedding_vec IS NOT NULL
                       AND NOT COALESCE(f.is_junk, FALSE)
+                      -- KNN only seeds clusters with no bridged entity yet.
+                      -- Clusters with one entity are handled by cluster_propagation;
+                      -- clusters with multiple entities are contested and unsafe.
+                      AND COALESCE(target_cec.entity_count, 0) = 0
                       AND NOT EXISTS (
                           SELECT 1 FROM public.entity_faces existing
                           WHERE existing.face_id = f.id
@@ -1092,8 +1106,12 @@ async def bridge_faces_via_knn_propagation() -> dict:
                                1 - (anchor.embedding_vec <=> t.embedding_vec) AS similarity
                         FROM public.entity_faces ef
                         JOIN facetracker.faces anchor ON anchor.id = ef.face_id
+                        LEFT JOIN cluster_entity_counts anchor_cec
+                          ON anchor_cec.cluster_id = anchor.cluster_id
                         WHERE anchor.embedding_vec IS NOT NULL
                           AND NOT COALESCE(anchor.is_junk, FALSE)
+                          -- Do not propagate from ambiguous identity neighborhoods.
+                          AND (anchor.cluster_id IS NULL OR anchor_cec.entity_count = 1)
                         ORDER BY anchor.embedding_vec <=> t.embedding_vec
                         LIMIT 1
                     ) nn
