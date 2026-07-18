@@ -33,10 +33,11 @@ import asyncio
 import json
 import logging
 import os
+from uuid import UUID
 
 import numpy as np
 
-from src.db.connection import get_analyzer_pool
+from src.db.connection import get_analyzer_pool, get_collector_pool, is_collector_unavailable_error
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,10 @@ _PURITY_2ND_NEAREST_THRESHOLD = float(os.getenv("FACE_PURITY_2ND_NEAREST_THRESHO
 _PURITY_MIN_TIGHTNESS = float(os.getenv("FACE_PURITY_MIN_TIGHTNESS", "0.35"))
 
 # Axis-3 Change-2 (drive-face kNN cross-ref):
-_DRIVE_XREF_THRESHOLD = float(os.getenv("FACE_DRIVE_XREF_THRESHOLD", "0.55"))
+_FACE_KNN_PROPAGATION_THRESHOLD = float(os.getenv("FACE_KNN_PROPAGATION_THRESHOLD", "0.62"))
+_FACE_KNN_PROPAGATION_BATCH = int(os.getenv("FACE_KNN_PROPAGATION_BATCH", "20000"))
+_FACE_MEDIA_ATTRIBUTION_MAX_FACES = int(os.getenv("FACE_MEDIA_ATTRIBUTION_MAX_FACES", "1"))
+_DRIVE_XREF_THRESHOLD = float(os.getenv("FACE_DRIVE_XREF_THRESHOLD", str(_FACE_KNN_PROPAGATION_THRESHOLD)))
 _DRIVE_XREF_TOP_MARGIN = float(os.getenv("FACE_DRIVE_XREF_TOP_MARGIN", "0.05"))
 _DRIVE_XREF_BATCH = int(os.getenv("FACE_DRIVE_XREF_BATCH", "5000"))
 _DRIVE_XREF_EXACT_PAIR_MAX = int(os.getenv("FACE_DRIVE_XREF_EXACT_PAIR_MAX", "250000"))
@@ -703,6 +707,438 @@ async def propagate_drive_faces_via_knn() -> dict:
     return stats
 
 
+def _uuid_media_ids(media_ids: list[str]) -> list[str]:
+    out: list[str] = []
+    for media_id in media_ids:
+        try:
+            out.append(str(UUID(str(media_id))))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _chunks(items: list[str], size: int = 5000):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+async def _build_entity_lookup(conn) -> dict[tuple[str, str], str]:
+    rows = await conn.fetch("""
+        SELECT entity_id::text AS eid, source, platform_id, platform_username
+        FROM entity_platform_links
+        WHERE retracted_at IS NULL
+    """)
+    lookup: dict[tuple[str, str], str] = {}
+    for row in rows:
+        source = str(row["source"] or "").lower()
+        for value in (row["platform_id"], row["platform_username"]):
+            if not value:
+                continue
+            text = str(value)
+            lookup[(source, text)] = row["eid"]
+            lookup[(source, text.lower())] = row["eid"]
+    return lookup
+
+
+def _resolve_owner_entity(
+    lookup: dict[tuple[str, str], str],
+    source: str | None,
+    owner: str | None,
+) -> str | None:
+    if not source or not owner:
+        return None
+    src = source.lower()
+    return lookup.get((src, owner)) or lookup.get((src, owner.lower()))
+
+
+async def _fetch_indexed_media_ids(*, only_unbridged: bool, max_faces: int | None = None) -> list[str]:
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        await _ensure_schema(conn)
+        rows = await conn.fetch("""
+            SELECT DISTINCT i.file_hash AS media_item_id
+            FROM facetracker.images i
+            JOIN facetracker.faces f ON f.image_id = i.id
+            WHERE i.file_hash ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+              AND f.embedding_vec IS NOT NULL
+              AND NOT COALESCE(f.is_junk, FALSE)
+              AND ($1::int IS NULL OR $1 <= 0 OR COALESCE(i.face_count, $2) <= $1)
+              AND (
+                    NOT $3::bool
+                    OR NOT EXISTS (SELECT 1 FROM public.entity_faces ef WHERE ef.face_id = f.id)
+                  )
+        """, max_faces, _UNKNOWN_FACE_COUNT, only_unbridged)
+    return [r["media_item_id"] for r in rows if r["media_item_id"]]
+
+
+async def _fetch_collector_media_owners(media_ids: list[str], *, profile_only: bool) -> list[dict]:
+    uuid_ids = _uuid_media_ids(media_ids)
+    if not uuid_ids:
+        return []
+
+    collector = get_collector_pool()
+    rows: list[dict] = []
+    profile_content_types = ["profile_photo", "avatar", "profile_pic"]
+    profile_kinds = ["profile", "profile_photo", "avatar"]
+    async with collector.acquire() as conn:
+        for chunk in _chunks(uuid_ids):
+            if profile_only:
+                records = await conn.fetch("""
+                    SELECT id::text AS media_item_id, source, entity_id, content_type, kind
+                    FROM media_items
+                    WHERE id = ANY($1::uuid[])
+                      AND NULLIF(entity_id, '') IS NOT NULL
+                      AND (
+                            content_type = ANY($2::text[])
+                            OR kind = ANY($3::text[])
+                          )
+                """, chunk, profile_content_types, profile_kinds)
+            else:
+                records = await conn.fetch("""
+                    SELECT id::text AS media_item_id, source, entity_id, content_type, kind
+                    FROM media_items
+                    WHERE id = ANY($1::uuid[])
+                      AND NULLIF(entity_id, '') IS NOT NULL
+                """, chunk)
+            rows.extend(dict(r) for r in records)
+    return rows
+
+
+async def _upsert_media_owner_face_links(
+    owner_rows: list[dict],
+    *,
+    method: str,
+    confidence: float,
+    update_existing: bool,
+) -> dict:
+    if not owner_rows:
+        return {"media_resolved": 0, "linked": 0, "updated": 0}
+
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        lookup = await _build_entity_lookup(conn)
+        records_by_media: dict[str, tuple[str, str, float]] = {}
+        for row in owner_rows:
+            entity_id = _resolve_owner_entity(
+                lookup,
+                row.get("source"),
+                row.get("entity_id"),
+            )
+            if entity_id:
+                records_by_media[str(row["media_item_id"])] = (
+                    str(row["media_item_id"]),
+                    entity_id,
+                    confidence,
+                )
+        records = list(records_by_media.values())
+        if not records:
+            return {"media_resolved": 0, "linked": 0, "updated": 0}
+
+        async with conn.transaction():
+            await conn.execute("""
+                CREATE TEMP TABLE tmp_face_media_owners (
+                    media_item_id TEXT PRIMARY KEY,
+                    entity_id     TEXT NOT NULL,
+                    confidence    FLOAT8 NOT NULL
+                ) ON COMMIT DROP
+            """)
+            await conn.copy_records_to_table(
+                "tmp_face_media_owners",
+                records=records,
+                columns=["media_item_id", "entity_id", "confidence"],
+            )
+
+            updated = 0
+            if update_existing:
+                updated = await conn.fetchval("""
+                    WITH candidates AS (
+                        SELECT DISTINCT
+                               t.entity_id::uuid AS entity_id,
+                               f.id              AS face_id,
+                               t.media_item_id,
+                               t.confidence
+                        FROM tmp_face_media_owners t
+                        JOIN facetracker.images i ON i.file_hash = t.media_item_id
+                        JOIN facetracker.faces f ON f.image_id = i.id
+                        WHERE f.embedding_vec IS NOT NULL
+                          AND NOT COALESCE(f.is_junk, FALSE)
+                    ),
+                    changed AS (
+                        UPDATE public.entity_faces ef
+                        SET method = $1,
+                            confidence = GREATEST(COALESCE(ef.confidence, 0), c.confidence),
+                            media_item_id = COALESCE(ef.media_item_id, c.media_item_id)
+                        FROM candidates c
+                        WHERE ef.entity_id = c.entity_id
+                          AND ef.face_id = c.face_id
+                          AND (
+                                ef.method IS DISTINCT FROM $1
+                                OR COALESCE(ef.confidence, 0) < c.confidence
+                              )
+                        RETURNING 1
+                    )
+                    SELECT count(*) FROM changed
+                """, method) or 0
+
+            linked = await conn.fetchval("""
+                WITH candidates AS (
+                    SELECT DISTINCT
+                           t.entity_id::uuid AS entity_id,
+                           f.id              AS face_id,
+                           t.media_item_id,
+                           t.confidence
+                    FROM tmp_face_media_owners t
+                    JOIN facetracker.images i ON i.file_hash = t.media_item_id
+                    JOIN facetracker.faces f ON f.image_id = i.id
+                    WHERE f.embedding_vec IS NOT NULL
+                      AND NOT COALESCE(f.is_junk, FALSE)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM public.entity_faces existing
+                          WHERE existing.face_id = f.id
+                      )
+                ),
+                inserted AS (
+                    INSERT INTO public.entity_faces
+                        (entity_id, face_id, media_item_id, confidence, method)
+                    SELECT entity_id, face_id, media_item_id, confidence, $1
+                    FROM candidates
+                    ON CONFLICT (entity_id, face_id) DO NOTHING
+                    RETURNING 1
+                )
+                SELECT count(*) FROM inserted
+            """, method) or 0
+
+    return {"media_resolved": len(records), "linked": int(linked), "updated": int(updated)}
+
+
+async def bridge_faces_by_cluster_propagation() -> dict:
+    """Propagate a single, uncontested entity label across each face cluster.
+
+    This is intentionally broader than the older group-photo-guarded
+    propagate_entity_faces(): once clustering has put faces in the same person
+    component, any cluster with exactly one bridged entity becomes an attribution
+    source for every still-unbridged non-junk face in that cluster. Clusters
+    already containing >1 bridged entity are left untouched and counted.
+    """
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        await _ensure_schema(conn)
+        row = await conn.fetchrow("""
+            WITH cluster_entities AS (
+                SELECT f.cluster_id,
+                       count(DISTINCT ef.entity_id) AS entity_count,
+                       min(ef.entity_id::text)      AS entity_id
+                FROM facetracker.faces f
+                JOIN public.entity_faces ef ON ef.face_id = f.id
+                WHERE f.cluster_id IS NOT NULL
+                  AND NOT COALESCE(f.is_junk, FALSE)
+                GROUP BY f.cluster_id
+            ),
+            eligible AS (
+                SELECT cluster_id, entity_id
+                FROM cluster_entities
+                WHERE entity_count = 1
+            ),
+            contested AS (
+                SELECT cluster_id
+                FROM cluster_entities
+                WHERE entity_count > 1
+            ),
+            dominant AS (
+                UPDATE facetracker.face_clusters fc
+                SET dominant_entity_id = e.entity_id::uuid
+                FROM eligible e
+                WHERE fc.cluster_id = e.cluster_id
+                RETURNING fc.cluster_id
+            ),
+            candidates AS (
+                SELECT DISTINCT
+                       e.entity_id::uuid AS entity_id,
+                       f.id              AS face_id,
+                       CASE
+                         WHEN i.file_hash ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                         THEN i.file_hash
+                         ELSE NULL
+                       END AS media_item_id
+                FROM eligible e
+                JOIN facetracker.faces f ON f.cluster_id = e.cluster_id
+                JOIN facetracker.images i ON i.id = f.image_id
+                WHERE f.embedding_vec IS NOT NULL
+                  AND NOT COALESCE(f.is_junk, FALSE)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM public.entity_faces existing
+                      WHERE existing.face_id = f.id
+                  )
+            ),
+            inserted AS (
+                INSERT INTO public.entity_faces
+                    (entity_id, face_id, media_item_id, confidence, method)
+                SELECT entity_id, face_id, media_item_id, 0.90, 'cluster_propagation'
+                FROM candidates
+                ON CONFLICT (entity_id, face_id) DO NOTHING
+                RETURNING 1
+            )
+            SELECT
+                (SELECT count(*) FROM eligible)   AS clusters_with_single_entity,
+                (SELECT count(*) FROM contested)  AS contested_clusters,
+                (SELECT count(*) FROM candidates) AS candidate_faces,
+                (SELECT count(*) FROM inserted)   AS linked
+        """)
+    stats = dict(row)
+    logger.info("face bridge cluster_propagation: %s", stats)
+    return stats
+
+
+async def bridge_profile_photo_faces() -> dict:
+    try:
+        media_ids = await _fetch_indexed_media_ids(only_unbridged=False)
+        owner_rows = await _fetch_collector_media_owners(media_ids, profile_only=True)
+    except Exception as exc:  # noqa: BLE001 - collector owner context is optional
+        if is_collector_unavailable_error(exc):
+            logger.warning("face bridge profile_photo skipped: collector unavailable (%s)", exc)
+            return {"collector_skipped": True, "linked": 0, "updated": 0}
+        raise
+
+    stats = await _upsert_media_owner_face_links(
+        owner_rows,
+        method="profile_photo",
+        confidence=0.95,
+        update_existing=True,
+    )
+    stats["media_candidates"] = len(media_ids)
+    stats["collector_rows"] = len(owner_rows)
+    logger.info("face bridge profile_photo: %s", stats)
+    return stats
+
+
+async def bridge_media_owner_faces() -> dict:
+    try:
+        media_ids = await _fetch_indexed_media_ids(
+            only_unbridged=True,
+            max_faces=_FACE_MEDIA_ATTRIBUTION_MAX_FACES,
+        )
+        owner_rows = await _fetch_collector_media_owners(media_ids, profile_only=False)
+    except Exception as exc:  # noqa: BLE001 - collector owner context is optional
+        if is_collector_unavailable_error(exc):
+            logger.warning("face bridge media_attribution skipped: collector unavailable (%s)", exc)
+            return {"collector_skipped": True, "linked": 0, "updated": 0}
+        raise
+
+    stats = await _upsert_media_owner_face_links(
+        owner_rows,
+        method="media_attribution",
+        confidence=0.65,
+        update_existing=False,
+    )
+    stats["media_candidates"] = len(media_ids)
+    stats["collector_rows"] = len(owner_rows)
+    stats["max_faces_per_media"] = _FACE_MEDIA_ATTRIBUTION_MAX_FACES
+    logger.info("face bridge media_attribution: %s", stats)
+    return stats
+
+
+async def bridge_faces_via_knn_propagation() -> dict:
+    analyzer = get_analyzer_pool()
+    stats = {
+        "threshold": _FACE_KNN_PROPAGATION_THRESHOLD,
+        "faces_scanned": 0,
+        "linked": 0,
+        "no_anchors": 0,
+    }
+    async with analyzer.acquire() as conn:
+        await _ensure_schema(conn)
+        anchor_count = await conn.fetchval("""
+            SELECT count(*)
+            FROM public.entity_faces ef
+            JOIN facetracker.faces f ON f.id = ef.face_id
+            WHERE f.embedding_vec IS NOT NULL
+              AND NOT COALESCE(f.is_junk, FALSE)
+        """) or 0
+        if anchor_count == 0:
+            stats["no_anchors"] = 1
+            return stats
+
+        async with conn.transaction():
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            await conn.execute("SET LOCAL ivfflat.probes = 10")
+            row = await conn.fetchrow("""
+                WITH targets AS (
+                    SELECT f.id AS face_id,
+                           f.embedding_vec,
+                           CASE
+                             WHEN i.file_hash ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                             THEN i.file_hash
+                             ELSE NULL
+                           END AS media_item_id
+                    FROM facetracker.faces f
+                    JOIN facetracker.images i ON i.id = f.image_id
+                    WHERE f.embedding_vec IS NOT NULL
+                      AND NOT COALESCE(f.is_junk, FALSE)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM public.entity_faces existing
+                          WHERE existing.face_id = f.id
+                      )
+                    ORDER BY f.quality_score DESC NULLS LAST
+                    LIMIT $2
+                ),
+                nearest AS (
+                    SELECT t.face_id,
+                           t.media_item_id,
+                           nn.entity_id,
+                           nn.similarity
+                    FROM targets t
+                    CROSS JOIN LATERAL (
+                        SELECT ef.entity_id,
+                               1 - (anchor.embedding_vec <=> t.embedding_vec) AS similarity
+                        FROM public.entity_faces ef
+                        JOIN facetracker.faces anchor ON anchor.id = ef.face_id
+                        WHERE anchor.embedding_vec IS NOT NULL
+                          AND NOT COALESCE(anchor.is_junk, FALSE)
+                        ORDER BY anchor.embedding_vec <=> t.embedding_vec
+                        LIMIT 1
+                    ) nn
+                    WHERE nn.similarity >= $1
+                ),
+                inserted AS (
+                    INSERT INTO public.entity_faces
+                        (entity_id, face_id, media_item_id, confidence, method)
+                    SELECT entity_id, face_id, media_item_id, similarity, 'knn_propagation'
+                    FROM nearest
+                    ON CONFLICT (entity_id, face_id) DO NOTHING
+                    RETURNING 1
+                )
+                SELECT
+                    (SELECT count(*) FROM targets)  AS faces_scanned,
+                    (SELECT count(*) FROM inserted) AS linked
+            """, _FACE_KNN_PROPAGATION_THRESHOLD, _FACE_KNN_PROPAGATION_BATCH)
+    stats.update(dict(row))
+    logger.info("face bridge knn_propagation: %s", stats)
+    return stats
+
+
+async def bridge_faces_to_entities() -> dict:
+    cluster = await bridge_faces_by_cluster_propagation()
+    profile = await bridge_profile_photo_faces()
+    media = await bridge_media_owner_faces()
+    knn = await bridge_faces_via_knn_propagation()
+
+    linked_total = (
+        int(cluster.get("linked") or 0)
+        + int(profile.get("linked") or 0)
+        + int(media.get("linked") or 0)
+        + int(knn.get("linked") or 0)
+    )
+    updated_total = int(profile.get("updated") or 0) + int(media.get("updated") or 0)
+    return {
+        "bridge_cluster_propagation": cluster,
+        "bridge_profile_photo": profile,
+        "bridge_media_attribution": media,
+        "bridge_knn_propagation": knn,
+        "bridge_linked_total": linked_total,
+        "bridge_updated_total": updated_total,
+    }
+
+
 # ── Q2: cluster -> identity materialization ──
 
 # A cluster must have at least this many non-junk faces to become an identity.
@@ -842,7 +1278,19 @@ async def run_face_clustering() -> dict:
             "SELECT count(*) FROM facetracker.faces WHERE embedding_vec IS NOT NULL"
         )
     if face_count == _last_face_count:
-        return {"skipped": "no_new_faces", "faces": face_count}
+        bridge_stats = await bridge_faces_to_entities()
+        if bridge_stats.get("bridge_linked_total") or bridge_stats.get("bridge_updated_total"):
+            ident_stats = await build_identities_from_clusters()
+            stats = {
+                "cluster_skipped": "no_new_faces",
+                "faces": face_count,
+                **bridge_stats,
+                "identities": ident_stats.get("identities"),
+                "identities_named": ident_stats.get("named"),
+            }
+            logger.info("Face clustering bridge-only refresh: %s", stats)
+            return stats
+        return {"skipped": "no_new_faces", "faces": face_count, **bridge_stats}
 
     # Q3: flag obvious non-faces BEFORE clustering so junk never joins a cluster
     # or bridges to an entity. Cheap idempotent UPDATE; re-runs each growth tick.
@@ -852,13 +1300,13 @@ async def run_face_clustering() -> dict:
     if cluster_stats.get("skipped"):
         _last_face_count = face_count
         return cluster_stats
-    prop_stats = await propagate_entity_faces()
+    bridge_stats = await bridge_faces_to_entities()
     # Q2: materialize identities from the (now-propagated) clusters. Runs after
     # propagation so newly-bridged entities can name their identity.
     ident_stats = await build_identities_from_clusters()
     _last_face_count = face_count
 
-    stats = {**cluster_stats, **prop_stats,
+    stats = {**cluster_stats, **bridge_stats,
              "junk_flagged": junk_stats.get("junk_after"),
              "identities": ident_stats.get("identities"),
              "identities_named": ident_stats.get("named")}
