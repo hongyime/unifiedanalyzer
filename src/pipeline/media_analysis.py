@@ -579,6 +579,23 @@ _PDF_CONTENT_TYPES = [(None, "pdf")]
 _MAX_PDF_TEXT_LEN = 200_000
 
 
+def _extract_pdf_text(path) -> str:
+    text = ""
+    try:
+        reader = pypdf.PdfReader(str(path))
+        parts, total = [], 0
+        for page in reader.pages:
+            t = page.extract_text() or ""
+            parts.append(t)
+            total += len(t)
+            if total >= _MAX_PDF_TEXT_LEN:
+                break
+        text = "\n".join(parts)[:_MAX_PDF_TEXT_LEN]
+    except Exception:
+        logger.debug("PDF text extraction failed for %s", path, exc_info=True)
+    return text
+
+
 async def analyze_media_pdf_text(limit: int | None = None) -> dict:
     stats: dict = {"processed": 0}
     if not _drive_available():
@@ -594,19 +611,7 @@ async def analyze_media_pdf_text(limit: int | None = None) -> dict:
         path = resolve_media_path(item["file_path"])
         if path is None:
             continue
-        text = ""
-        try:
-            reader = pypdf.PdfReader(str(path))
-            parts, total = [], 0
-            for page in reader.pages:
-                t = page.extract_text() or ""
-                parts.append(t)
-                total += len(t)
-                if total >= _MAX_PDF_TEXT_LEN:
-                    break
-            text = "\n".join(parts)[:_MAX_PDF_TEXT_LEN]
-        except Exception:
-            logger.debug("PDF text extraction failed for %s", path, exc_info=True)
+        text = await asyncio.to_thread(_extract_pdf_text, path)
 
         rows.append({
             "media_item_id": item["id"], "source": item["source"],
