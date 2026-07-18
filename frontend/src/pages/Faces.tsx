@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { ScanFace, Users, Images, Film } from 'lucide-react'
+import { ScanFace, Users, Images, Film, Search, Upload } from 'lucide-react'
 import { useFaceStats, useFaceIdentities } from '../hooks'
-import { api } from '../api'
+import { api, FaceSearchResponse } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
+import { PlatformBadge } from '../components/ui/PlatformBadge'
 import { LABELS } from '../lib/labels'
 
 // The "face bridge" is the mechanism this page powers: same face across
@@ -50,13 +51,29 @@ export default function FacesPage() {
     api.getFaceGallery(gPage, 64).then(setGallery).catch(() => setGallery(null))
   }, [hasFaces, gPage])
 
-  // "Who is this?" face search: click a face -> kNN similar matches.
-  type Sim = Awaited<ReturnType<typeof api.getSimilarFaces>>
-  const [simFor, setSimFor] = useState<number | null>(null)
-  const [sim, setSim] = useState<Sim | null>(null)
+  // Click a face or upload an image -> pgvector kNN over the corpus.
+  const [searchFor, setSearchFor] = useState<string | null>(null)
+  const [searchResult, setSearchResult] = useState<FaceSearchResponse | null>(null)
+  const [searchError, setSearchError] = useState('')
+  const [uploading, setUploading] = useState(false)
   const openSimilar = (faceId: number) => {
-    setSimFor(faceId); setSim(null)
-    api.getSimilarFaces(faceId, 48).then(setSim).catch(() => setSim({ matches: [] }))
+    setSearchFor(`face #${faceId}`)
+    setSearchResult(null)
+    setSearchError('')
+    api.searchFacesByFaceId(faceId, 48)
+      .then(setSearchResult)
+      .catch((e) => setSearchError(e.message || 'Search failed'))
+  }
+  const uploadSearch = (file: File | null | undefined) => {
+    if (!file) return
+    setSearchFor(file.name)
+    setSearchResult(null)
+    setSearchError('')
+    setUploading(true)
+    api.searchFacesByImage(file, 48)
+      .then(setSearchResult)
+      .catch((e) => setSearchError(e.message || 'Search failed'))
+      .finally(() => setUploading(false))
   }
 
   if (stats.isError) {
@@ -87,6 +104,31 @@ export default function FacesPage() {
         <StatTile label="Videos" value={s?.total_videos ?? 0} icon={Film} />
       </div>
 
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-3">
+        <div className="flex items-center gap-2 text-sm font-medium">
+          <Search size={16} />
+          Face search
+          {searchResult && (
+            <span className="text-xs font-normal text-muted">
+              {searchResult.count} matches · {searchResult.took_ms.toFixed(1)} ms · {searchResult.index.method}
+            </span>
+          )}
+        </div>
+        <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-hover">
+          <Upload size={15} />
+          {uploading ? 'Searching...' : 'Upload image'}
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(event) => {
+              uploadSearch(event.target.files?.[0])
+              event.currentTarget.value = ''
+            }}
+          />
+        </label>
+      </div>
+
       {!hasFaces ? (
         <EmptyState
           icon={<ScanFace className="h-10 w-10" />}
@@ -95,25 +137,45 @@ export default function FacesPage() {
         />
       ) : (
         <>
-          {simFor != null && (
+          {searchFor && (
             <div className="mb-3 rounded-lg border border-accent bg-card p-3">
               <div className="mb-2 flex items-center justify-between text-sm font-medium">
-                <span>Similar to face #{simFor} <span className="text-muted">— who is this?</span></span>
-                <button onClick={() => setSimFor(null)} className="text-xs text-muted">close ✕</button>
+                <span>Matches for {searchFor}</span>
+                <button onClick={() => setSearchFor(null)} className="text-xs text-muted">close</button>
               </div>
-              {!sim ? (
+              {!searchResult && !searchError ? (
                 <div className="text-sm text-muted">Searching…</div>
-              ) : sim.matches.length === 0 ? (
+              ) : searchError ? (
+                <div className="text-sm text-error">{searchError}</div>
+              ) : searchResult?.matches.length === 0 ? (
                 <div className="text-sm text-muted">No matches.</div>
               ) : (
-                <div className="grid grid-cols-4 gap-2 sm:grid-cols-8 md:grid-cols-12">
-                  {sim.matches.map((m) => (
-                    <a key={m.face_id} href={m.entity_id ? `/entities/${m.entity_id}` : undefined}
-                      title={`${Math.round(m.similarity * 100)}% · cluster ${m.cluster_id ?? '—'}${m.entity_name ? ' · ' + m.entity_name : ''}`}
-                      className="relative block aspect-square overflow-hidden rounded border border-border">
-                      <img src={m.crop_url} loading="lazy" className="h-full w-full object-cover"
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {searchResult?.matches.map((m) => (
+                    <a key={m.face_id}
+                      href={m.entity?.id ? `/entities/${m.entity.id}` : (m.source.url || undefined)}
+                      title={`${Math.round(m.similarity * 100)}% · cluster ${m.cluster_id ?? '—'}`}
+                      className="grid grid-cols-[76px_minmax(0,1fr)] gap-2 rounded border border-border bg-background p-2 hover:bg-hover">
+                      <div className="relative aspect-square overflow-hidden rounded border border-border">
+                        <img src={m.crop_url} loading="lazy" className="h-full w-full object-cover"
                         onError={(e) => { const t = e.currentTarget.closest('a') as HTMLElement | null; if (t) t.style.display = 'none' }} />
-                      <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-center text-[9px] text-white">{Math.round(m.similarity * 100)}%</span>
+                        <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-center text-[9px] text-white">{Math.round(m.similarity * 100)}%</span>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="mb-1 flex items-center gap-1">
+                          <PlatformBadge source={m.source.platform || 'unknown'} />
+                          <span className="text-xs text-muted">face #{m.face_id}</span>
+                        </div>
+                        <div className="truncate text-sm font-medium">
+                          {m.entity?.name || m.entity?.id || 'Unlinked face'}
+                        </div>
+                        <div className="truncate text-xs text-muted">
+                          {m.source.filename || m.source.media_item_id || m.source.file_path || 'source unavailable'}
+                        </div>
+                        <div className="mt-1 text-xs text-muted">
+                          cluster {m.cluster_id ?? '—'} · q{m.quality.toFixed(2)}
+                        </div>
+                      </div>
                     </a>
                   ))}
                 </div>
@@ -123,7 +185,7 @@ export default function FacesPage() {
           <div className="mb-2 text-sm font-medium">
             Detected faces{' '}
             <span className="text-muted">({(gallery?.total ?? 0).toLocaleString()})</span>
-            <span className="text-muted"> — click a face to find similar</span>
+            <span className="text-muted"> — click a face to search</span>
           </div>
           <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10">
             {gallery?.faces.map((f) => (

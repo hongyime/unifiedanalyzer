@@ -376,6 +376,16 @@ CREATE TABLE IF NOT EXISTS entity_faces (
 CREATE INDEX IF NOT EXISTS idx_entity_faces_entity ON entity_faces(entity_id);
 CREATE INDEX IF NOT EXISTS idx_entity_faces_face   ON entity_faces(face_id);
 
+DO $$
+BEGIN
+    IF to_regclass('facetracker.faces') IS NOT NULL THEN
+        CREATE INDEX IF NOT EXISTS idx_faces_embedding_vec_ivfflat
+            ON facetracker.faces USING ivfflat (embedding_vec vector_cosine_ops)
+            WITH (lists = 100)
+            WHERE embedding_vec IS NOT NULL AND COALESCE(is_junk, FALSE) = FALSE;
+    END IF;
+END $$;
+
 -- Calibration labels: ground-truth same/different decisions captured straight
 -- from the dashboard (entity merge = same person; "not same" dismiss =
 -- different). Drives src/pipeline/identity_calibration.py — no CSV needed.

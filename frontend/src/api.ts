@@ -465,6 +465,36 @@ export interface FaceIdentityList {
   page_size: number
 }
 
+export interface FaceSearchMatch {
+  face_id: number
+  cluster_id: number | null
+  similarity: number
+  quality: number
+  detection_confidence: number
+  crop_url: string
+  entity: { id: string; name: string | null; confidence: number } | null
+  source: {
+    media_item_id: string | null
+    platform: string | null
+    content_type: string | null
+    content_id: string | null
+    filename: string | null
+    file_path: string | null
+    url: string | null
+    date: string | null
+    metadata: Record<string, unknown> | null
+  }
+}
+
+export interface FaceSearchResponse {
+  query: Record<string, unknown>
+  matches: FaceSearchMatch[]
+  count: number
+  took_ms: number
+  index: { method: string; name: string; operator: string }
+  collector_skipped: boolean
+}
+
 // ── Live health (websocket /ws/health) ──
 export interface LiveHealth {
   status: string
@@ -502,6 +532,15 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json()
+}
+
+async function postForm<T>(path: string, body: FormData): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    body,
   })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json()
@@ -707,6 +746,16 @@ export const api = {
     get<{ matches: { face_id: number; cluster_id: number | null; similarity: number; crop_url: string; entity_id: string | null; entity_name: string | null }[] }>(
       `/face/gallery/faces/${faceId}/similar?k=${k}`,
     ),
+
+  searchFacesByFaceId: (faceId: number, k = 48) =>
+    post<FaceSearchResponse>('/faces/search', { face_id: faceId, k }),
+
+  searchFacesByImage: (file: File, k = 48) => {
+    const form = new FormData()
+    form.set('image', file)
+    form.set('k', String(k))
+    return postForm<FaceSearchResponse>('/faces/search', form)
+  },
 
   setWatch: (entityId: string, status: string | null) =>
     patch<{ ok: boolean; watch_status: string | null }>(`/entities/${entityId}/watch`, { status }),
