@@ -14,6 +14,7 @@ import json
 from fastapi import APIRouter, HTTPException
 
 from src.db.connection import get_analyzer_pool
+from src.merge_candidates import merge_candidate_min_weight
 from src.api.face_lookup import representative_faces, face_crop_url
 
 router = APIRouter(tags=["intelligence"])
@@ -34,6 +35,7 @@ def _decode_meta(raw):
 @router.get("/entities/{entity_id}/intelligence")
 async def get_intelligence(entity_id: str):
     pool = get_analyzer_pool()
+    min_weight = merge_candidate_min_weight()
     async with pool.acquire() as conn:
         entity = await conn.fetchrow(
             "SELECT id, canonical_name, tier, first_event_at, last_event_at "
@@ -69,8 +71,9 @@ async def get_intelligence(entity_id: str):
             LEFT JOIN entities eb ON r.entity_b_id = eb.id
             WHERE r.relationship_type = 'same_person_probability'
               AND (r.entity_a_id = $1::uuid OR r.entity_b_id = $1::uuid)
+              AND r.weight >= $2
             ORDER BY r.weight DESC
-        """, entity_id)
+        """, entity_id, min_weight)
 
         relationship_rows = await conn.fetch("""
             SELECT r.relationship_type, r.entity_a_id, r.entity_b_id, r.weight, r.cross_platform,

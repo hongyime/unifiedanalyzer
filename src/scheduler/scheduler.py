@@ -15,13 +15,12 @@ from src.notifications.alerts import (
     notify_collector_health, notify_daily_digest, notify_merge_candidate,
     notify_status,
 )
+from src.merge_candidates import merge_candidate_notify_min_confidence
 
 logger = logging.getLogger(__name__)
 
 _running = False
-_MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE = float(
-    os.getenv("MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE", "70")
-)
+_MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE = merge_candidate_notify_min_confidence()
 
 
 def _collector_no_run_issue(

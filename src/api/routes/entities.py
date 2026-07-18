@@ -3,6 +3,7 @@ from fastapi import APIRouter, Query, HTTPException
 
 from src.db.connection import get_analyzer_pool
 from src.api.face_lookup import representative_faces, face_crop_url
+from src.merge_candidates import merge_candidate_min_weight
 
 router = APIRouter(tags=["entities"])
 
@@ -190,6 +191,7 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
     thumbnail for each side — powers the Review queue. Defined BEFORE the
     /entities/{entity_id} route so 'candidates' isn't swallowed as an id."""
     pool = get_analyzer_pool()
+    min_weight = merge_candidate_min_weight()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT r.entity_a_id, r.entity_b_id, r.weight, r.cross_platform, r.sources,
@@ -198,9 +200,10 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
             JOIN entities ea ON r.entity_a_id = ea.id
             JOIN entities eb ON r.entity_b_id = eb.id
             WHERE r.relationship_type = 'same_person_probability'
+              AND r.weight >= $2
             ORDER BY r.cross_platform DESC, jsonb_array_length(r.sources->'contributing_signals') DESC, r.weight DESC
             LIMIT $1
-        """, limit)
+        """, limit, min_weight)
         ids: list[str] = []
         for r in rows:
             ids.append(str(r["entity_a_id"]))

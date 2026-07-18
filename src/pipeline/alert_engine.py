@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from src.db.connection import get_analyzer_pool
+from src.merge_candidates import merge_candidate_min_weight
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +324,7 @@ async def _detect_new_identity_links() -> int:
     pipeline run — a 1-cycle lag is accepted by design (see Phase 5B spec).
     """
     pool = get_analyzer_pool()
-    threshold_weight = _env_int("NEW_IDENTITY_LINK_MIN_WEIGHT", 70)
+    threshold_weight = merge_candidate_min_weight()
     count = 0
 
     async with pool.acquire() as conn:

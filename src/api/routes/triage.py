@@ -17,6 +17,7 @@ from fastapi import APIRouter
 
 from src.db.connection import get_analyzer_pool
 from src.api.face_lookup import representative_faces, face_crop_url
+from src.merge_candidates import merge_candidate_min_weight
 
 router = APIRouter(tags=["triage"])
 
@@ -34,6 +35,7 @@ def _decode(raw) -> dict:
 @router.get("/triage")
 async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 12):
     pool = get_analyzer_pool()
+    min_weight = merge_candidate_min_weight()
     async with pool.acquire() as conn:
         total = await conn.fetchval("SELECT count(*) FROM entities") or 0
         with_face = await conn.fetchval("SELECT count(DISTINCT entity_id) FROM entity_faces") or 0
@@ -42,7 +44,8 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
             "GROUP BY entity_id HAVING count(*) > 1) t"
         ) or 0
         backlog = await conn.fetchval(
-            "SELECT count(*) FROM entity_relationships WHERE relationship_type = 'same_person_probability'"
+            "SELECT count(*) FROM entity_relationships WHERE relationship_type = 'same_person_probability' AND weight >= $1",
+            min_weight,
         ) or 0
         unread = await conn.fetchval("SELECT count(*) FROM alerts WHERE is_read = false") or 0
 
@@ -53,9 +56,10 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
             JOIN entities ea ON r.entity_a_id = ea.id
             JOIN entities eb ON r.entity_b_id = eb.id
             WHERE r.relationship_type = 'same_person_probability'
+              AND r.weight >= $2
             ORDER BY r.weight DESC
             LIMIT $1
-        """, merge_limit)
+        """, merge_limit, min_weight)
 
         alert_rows = await conn.fetch("""
             SELECT a.id, a.alert_type, a.severity, a.title, a.detail, a.entity_id,
