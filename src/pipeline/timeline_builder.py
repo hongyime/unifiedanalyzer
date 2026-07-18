@@ -669,7 +669,10 @@ async def build_timeline(
         params: list = []
         if since:
             where_clause = f"AND {pq['time_col']} > $1"
-            params.append(since)
+            if pq.get("db") == "analyzer" or since.tzinfo is None:
+                params.append(since)
+            else:
+                params.append(since.astimezone(timezone.utc).replace(tzinfo=None))
 
         query = pq["query"].format(where_clause=where_clause)
         source_name = f"{pq['source']}/{pq['event_type']}"
