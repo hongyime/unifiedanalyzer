@@ -44,7 +44,17 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
             "GROUP BY entity_id HAVING count(*) > 1) t"
         ) or 0
         backlog = await conn.fetchval(
-            "SELECT count(*) FROM entity_relationships WHERE relationship_type = 'same_person_probability' AND weight >= $1",
+            """
+            SELECT count(*)
+            FROM entity_relationships
+            WHERE relationship_type = 'same_person_probability'
+              AND COALESCE(
+                    CASE WHEN jsonb_typeof(sources->'score') = 'number'
+                         THEN (sources->>'score')::float8 * 100
+                    END,
+                    weight
+                  ) >= $1
+            """,
             min_weight,
         ) or 0
         unread = await conn.fetchval("SELECT count(*) FROM alerts WHERE is_read = false") or 0
@@ -56,7 +66,12 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
             JOIN entities ea ON r.entity_a_id = ea.id
             JOIN entities eb ON r.entity_b_id = eb.id
             WHERE r.relationship_type = 'same_person_probability'
-              AND r.weight >= $2
+              AND COALESCE(
+                    CASE WHEN jsonb_typeof(r.sources->'score') = 'number'
+                         THEN (r.sources->>'score')::float8 * 100
+                    END,
+                    r.weight
+                  ) >= $2
             ORDER BY r.weight DESC
             LIMIT $1
         """, merge_limit, min_weight)

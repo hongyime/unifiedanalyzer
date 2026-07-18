@@ -71,7 +71,12 @@ async def get_intelligence(entity_id: str):
             LEFT JOIN entities eb ON r.entity_b_id = eb.id
             WHERE r.relationship_type = 'same_person_probability'
               AND (r.entity_a_id = $1::uuid OR r.entity_b_id = $1::uuid)
-              AND r.weight >= $2
+              AND COALESCE(
+                    CASE WHEN jsonb_typeof(r.sources->'score') = 'number'
+                         THEN (r.sources->>'score')::float8 * 100
+                    END,
+                    r.weight
+                  ) >= $2
             ORDER BY r.weight DESC
         """, entity_id, min_weight)
 

@@ -336,7 +336,12 @@ async def _detect_new_identity_links() -> int:
             JOIN entities ea ON ea.id = er.entity_a_id
             JOIN entities eb ON eb.id = er.entity_b_id
             WHERE er.relationship_type = 'same_person_probability'
-              AND er.weight >= $1
+              AND COALESCE(
+                    CASE WHEN jsonb_typeof(er.sources->'score') = 'number'
+                         THEN (er.sources->>'score')::float8 * 100
+                    END,
+                    er.weight
+                  ) >= $1
         """, threshold_weight)
 
         for pair in pairs:

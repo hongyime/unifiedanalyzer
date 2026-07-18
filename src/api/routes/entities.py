@@ -200,7 +200,12 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
             JOIN entities ea ON r.entity_a_id = ea.id
             JOIN entities eb ON r.entity_b_id = eb.id
             WHERE r.relationship_type = 'same_person_probability'
-              AND r.weight >= $2
+              AND COALESCE(
+                    CASE WHEN jsonb_typeof(r.sources->'score') = 'number'
+                         THEN (r.sources->>'score')::float8 * 100
+                    END,
+                    r.weight
+                  ) >= $2
             ORDER BY r.cross_platform DESC, jsonb_array_length(r.sources->'contributing_signals') DESC, r.weight DESC
             LIMIT $1
         """, limit, min_weight)
