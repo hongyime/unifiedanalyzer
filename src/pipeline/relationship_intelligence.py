@@ -137,6 +137,8 @@ async def refresh_relationship_intelligence() -> dict:
                 rel_type = "shared_home_or_gym"
 
             by_pair[rel_type][_sorted_pair(entity_id, target_entity_id)].append({
+                "from_entity_id": entity_id,
+                "to_entity_id": target_entity_id,
                 "signal_type": signal_type,
                 "source_platform": row["source_platform"],
                 "source_table": row["source_table"],
@@ -150,6 +152,12 @@ async def refresh_relationship_intelligence() -> dict:
         for pair, rows in by_pair["self_declared_link"].items():
             counts: dict[str, int] = defaultdict(int)
             examples: list[str] = []
+            bio_directions = {
+                (row["from_entity_id"], row["to_entity_id"])
+                for row in rows
+                if row["signal_type"] == "bio_mention"
+            }
+            mutual_bio_mention = any((b, a) in bio_directions for a, b in bio_directions)
             for row in rows:
                 counts[row["signal_type"]] += 1
                 if row["signal_type"] == "shared_website":
@@ -158,6 +166,8 @@ async def refresh_relationship_intelligence() -> dict:
                     examples.append(f"linked profile {row['value']}")
                 elif row["signal_type"] == "bio_mention":
                     examples.append(f"bio mention @{row['value']}")
+            if mutual_bio_mention:
+                examples.insert(0, "mutual bio mentions")
             examples = list(dict.fromkeys(examples))[:5]
             weight = min(
                 100,
@@ -165,6 +175,8 @@ async def refresh_relationship_intelligence() -> dict:
                 + counts.get("shared_website", 0) * 30
                 + counts.get("bio_mention", 0) * 20,
             )
+            if mutual_bio_mention:
+                weight = min(100, weight + 25)
             payloads.append((
                 pair[0],
                 pair[1],
@@ -175,6 +187,7 @@ async def refresh_relationship_intelligence() -> dict:
                     "why": "Human-authored cross-reference in a bio, link, or personal website.",
                     "signal_counts": counts,
                     "examples": examples,
+                    "mutual_bio_mention": mutual_bio_mention,
                 }),
                 None,
             ))
