@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query
 
 from src.db.connection import get_analyzer_pool, get_collector_pool
 from src.api.face_lookup import representative_faces, face_crop_url
+from src.merge_candidates import merge_candidate_min_weight
 
 router = APIRouter(tags=["graph"])
 logger = logging.getLogger(__name__)
@@ -443,6 +444,7 @@ async def entity_network(entity_id: str, limit: int = Query(30, ge=1, le=80)):
     entity_relationships, any type), each with a face. The client lays this out
     radially; clicking a neighbour recenters the investigation."""
     pool = get_analyzer_pool()
+    min_merge_weight = merge_candidate_min_weight()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT r.relationship_type, r.entity_a_id, r.entity_b_id, r.weight, r.sources,
@@ -450,10 +452,19 @@ async def entity_network(entity_id: str, limit: int = Query(30, ge=1, le=80)):
             FROM entity_relationships r
             LEFT JOIN entities ea ON r.entity_a_id = ea.id
             LEFT JOIN entities eb ON r.entity_b_id = eb.id
-            WHERE r.entity_a_id = $1::uuid OR r.entity_b_id = $1::uuid
+            WHERE (r.entity_a_id = $1::uuid OR r.entity_b_id = $1::uuid)
+              AND (
+                    r.relationship_type != 'same_person_probability'
+                    OR COALESCE(
+                        CASE WHEN jsonb_typeof(r.sources->'score') = 'number'
+                             THEN (r.sources->>'score')::float8 * 100
+                        END,
+                        r.weight
+                    ) >= $3
+                  )
             ORDER BY r.weight DESC
             LIMIT $2
-        """, entity_id, limit)
+        """, entity_id, limit, min_merge_weight)
 
         neighbors: dict[str, dict] = {}
         for r in rows:
@@ -484,6 +495,7 @@ async def entity_network(entity_id: str, limit: int = Query(30, ge=1, le=80)):
 @router.get("/entities/{entity_id}/relationships")
 async def get_relationships(entity_id: str):
     pool = get_analyzer_pool()
+    min_merge_weight = merge_candidate_min_weight()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT r.id, r.entity_a_id, r.entity_b_id, r.relationship_type,
@@ -492,9 +504,18 @@ async def get_relationships(entity_id: str):
             FROM entity_relationships r
             LEFT JOIN entities ea ON r.entity_a_id = ea.id
             LEFT JOIN entities eb ON r.entity_b_id = eb.id
-            WHERE r.entity_a_id = $1::uuid OR r.entity_b_id = $1::uuid
+            WHERE (r.entity_a_id = $1::uuid OR r.entity_b_id = $1::uuid)
+              AND (
+                    r.relationship_type != 'same_person_probability'
+                    OR COALESCE(
+                        CASE WHEN jsonb_typeof(r.sources->'score') = 'number'
+                             THEN (r.sources->>'score')::float8 * 100
+                        END,
+                        r.weight
+                    ) >= $2
+                  )
             ORDER BY r.weight DESC
-        """, entity_id)
+        """, entity_id, min_merge_weight)
 
     return {
         "data": [
@@ -598,6 +619,7 @@ async def get_interactions(
 @router.get("/graph/overview")
 async def graph_overview():
     pool = get_analyzer_pool()
+    min_merge_weight = merge_candidate_min_weight()
     async with pool.acquire() as conn:
         stats = await conn.fetchrow("""
             SELECT COUNT(*) AS total_relationships,
@@ -618,8 +640,17 @@ async def graph_overview():
             FROM entity_relationships r
             LEFT JOIN entities ea ON r.entity_a_id = ea.id
             LEFT JOIN entities eb ON r.entity_b_id = eb.id
+            WHERE (
+                    r.relationship_type != 'same_person_probability'
+                    OR COALESCE(
+                        CASE WHEN jsonb_typeof(r.sources->'score') = 'number'
+                             THEN (r.sources->>'score')::float8 * 100
+                        END,
+                        r.weight
+                    ) >= $1
+                  )
             ORDER BY r.weight DESC LIMIT 20
-        """)
+        """, min_merge_weight)
         bridges = await conn.fetch("""
             SELECT bp.entity_id::text AS entity_id,
                    e.canonical_name,

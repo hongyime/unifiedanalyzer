@@ -139,12 +139,12 @@ def test_collector_quiet_health_uses_schedule_cadence():
 
 
 def test_merge_candidate_notifications_default_to_requested_floor():
-    """Weak <55 identity_signals stay in the DB, but do not page Telegram."""
+    """Weak <70 identity_signals stay in the DB, but do not page Telegram."""
     from src.merge_candidates import merge_candidate_min_weight
     from src.scheduler.scheduler import _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE
 
-    assert merge_candidate_min_weight() == 55
-    assert _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE == 55
+    assert merge_candidate_min_weight() == 70
+    assert _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE == 70
 
 
 def test_collector_unavailable_phase_records_skipped(monkeypatch):

@@ -1,7 +1,7 @@
 import os
 
 
-DEFAULT_MERGE_CANDIDATE_MIN_WEIGHT = 55
+DEFAULT_MERGE_CANDIDATE_MIN_WEIGHT = 70
 
 
 def merge_candidate_min_weight() -> int:
