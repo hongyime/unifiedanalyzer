@@ -59,12 +59,32 @@ def main():
         # Standalone scheduler process: runs the heavy Phase-6 pipeline off the
         # API's event loop so the dashboard stays responsive during runs. Mirrors
         # the face_worker split. start_scheduler() is a long-lived loop.
-        from src.db.connection import init_pools, close_pools
-        from src.scheduler.scheduler import start_scheduler
+        from src.db.connection import init_pools, close_pools, get_analyzer_pool
+
+        async def _clear_stale_run_locks_before_heavy_import() -> int:
+            stale_minutes = int(os.getenv("STALE_RUN_HEARTBEAT_MINUTES", "30"))
+            pool = get_analyzer_pool()
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("""
+                    UPDATE analysis_runs
+                    SET status = 'failed', finished_at = NOW(),
+                        error_message = 'Stale run lock (heartbeat silent) - cleared before scheduler pipeline import'
+                    WHERE status = 'running'
+                      AND COALESCE(heartbeat_at, started_at) < NOW() - make_interval(mins => $1)
+                    RETURNING id::text
+                """, stale_minutes)
+            return len(rows)
 
         async def _run():
-            await init_pools()
+            await init_pools(apply_schema_ddl=False)
             try:
+                cleared = await _clear_stale_run_locks_before_heavy_import()
+                if cleared:
+                    logger.warning(
+                        "Cleared %d stale run lock(s) before scheduler pipeline import",
+                        cleared,
+                    )
+                from src.scheduler.scheduler import start_scheduler
                 await start_scheduler()
             finally:
                 await close_pools()

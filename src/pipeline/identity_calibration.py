@@ -114,19 +114,24 @@ def predict_proba(model, features: list[float]) -> float:
 async def _aggregate_pairs() -> list[dict]:
     """Replicate the scorer's per-pair signal aggregation (so export features
     match what the scorer will feed the model). Returns rows with names + vector."""
-    from src.db.connection import init_pools, close_pools, get_analyzer_pool
+    from src.db.connection import init_pools, close_pools, get_analyzer_pool, has_analyzer_pool
 
-    await init_pools(apply_schema_ddl=False)
-    analyzer = get_analyzer_pool()
-    async with analyzer.acquire() as conn:
-        sigs = await conn.fetch("""
-            SELECT entity_id::text, signal_type, target_platform, target_record_id, confidence
-            FROM identity_signals WHERE signal_type = ANY($1::text[])
-        """, FEATURE_ORDER)
-        links = await conn.fetch(
-            "SELECT entity_id::text, source, platform_id FROM entity_platform_links")
-        names = await conn.fetch("SELECT id::text, canonical_name FROM entities")
-    await close_pools()
+    owns_pool = not has_analyzer_pool()
+    if owns_pool:
+        await init_pools(apply_schema_ddl=False)
+    try:
+        analyzer = get_analyzer_pool()
+        async with analyzer.acquire() as conn:
+            sigs = await conn.fetch("""
+                SELECT entity_id::text, signal_type, target_platform, target_record_id, confidence
+                FROM identity_signals WHERE signal_type = ANY($1::text[])
+            """, FEATURE_ORDER)
+            links = await conn.fetch(
+                "SELECT entity_id::text, source, platform_id FROM entity_platform_links")
+            names = await conn.fetch("SELECT id::text, canonical_name FROM entities")
+    finally:
+        if owns_pool:
+            await close_pools()
 
     pid_to_entity = {(l["source"], l["platform_id"]): l["entity_id"] for l in links}
     name_of = {n["id"]: n["canonical_name"] for n in names}
@@ -284,13 +289,18 @@ def _rows_to_xy(rows) -> tuple[list[list[float]], list[int]]:
 
 async def train_from_db(model_out: str | None = None) -> dict:
     """Train from the identity_labels table (the dashboard-driven path)."""
-    from src.db.connection import init_pools, close_pools, get_analyzer_pool
+    from src.db.connection import init_pools, close_pools, get_analyzer_pool, has_analyzer_pool
     model_out = model_out or _MODEL_PATH
-    await init_pools(apply_schema_ddl=False)
-    pool = get_analyzer_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT features, label, source FROM identity_labels")
-    await close_pools()
+    owns_pool = not has_analyzer_pool()
+    if owns_pool:
+        await init_pools(apply_schema_ddl=False)
+    try:
+        pool = get_analyzer_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT features, label, source FROM identity_labels")
+    finally:
+        if owns_pool:
+            await close_pools()
     X, y = _rows_to_xy(rows)
     return _fit_and_save(X, y, model_out)
 
@@ -360,12 +370,17 @@ async def validate_calibration() -> dict:
     compute AUC over the full held-out set. Noisy-OR uses the hand-set weights
     on the same rows (no fitting needed) as the baseline. Positive delta means
     the LR beats noisy-OR on this labeled set."""
-    from src.db.connection import init_pools, close_pools, get_analyzer_pool
-    await init_pools(apply_schema_ddl=False)
-    pool = get_analyzer_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT features, label, source FROM identity_labels")
-    await close_pools()
+    from src.db.connection import init_pools, close_pools, get_analyzer_pool, has_analyzer_pool
+    owns_pool = not has_analyzer_pool()
+    if owns_pool:
+        await init_pools(apply_schema_ddl=False)
+    try:
+        pool = get_analyzer_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT features, label, source FROM identity_labels")
+    finally:
+        if owns_pool:
+            await close_pools()
 
     if len(rows) < 2:
         return {"error": "not_enough_labels", "n_labels": len(rows)}

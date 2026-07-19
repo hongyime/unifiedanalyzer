@@ -147,6 +147,10 @@ def get_analyzer_pool() -> asyncpg.Pool:
     return _analyzer_pool
 
 
+def has_analyzer_pool() -> bool:
+    return _analyzer_pool is not None
+
+
 def get_collector_pool() -> asyncpg.Pool:
     if _collector_pool is None:
         raise CollectorUnavailableError("Collector pool not initialized - analyzer is running degraded")
