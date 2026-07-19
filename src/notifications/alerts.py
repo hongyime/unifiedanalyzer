@@ -1,5 +1,6 @@
 """Notification dispatchers for all 7 alert types."""
 
+import html
 import logging
 from datetime import datetime, timezone
 
@@ -12,6 +13,21 @@ _SEVERITY_ICON = {
     "warning": "\U0001f7e1",     # yellow circle
     "info": "ℹ️",       # info
 }
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _num(value) -> str:
+    try:
+        return f"{int(value or 0):,}"
+    except Exception:
+        return "0"
+
+
+def _esc(value) -> str:
+    return html.escape(str(value))
 
 
 async def notify_startup():
@@ -128,32 +144,83 @@ async def notify_status(s: dict):
     when nothing eventful happened. Built by scheduler._build_status.
     """
     url = telegram.get_dashboard_url()
-    # Warn-icon the header if anything is actually wrong (DB down, a run failed in
-    # the last 24h, or a pipeline phase is failing) — not just a fixed ✅.
+    actionable_failures = int(s.get("failed_runs_24h", 0) or 0)
+    interrupted_runs = int(s.get("interrupted_runs_24h", 0) or 0)
+
+    # Warn-icon the header if anything is actually wrong: DB down, an actionable
+    # production run failed in the last 24h, or a pipeline phase is failing.
+    # Scheduler restart/stale-lock cleanup rows are reported separately below.
     healthy = (
         s.get("db_ok")
-        and not s.get("failed_runs_24h")
+        and not actionable_failures
         and not s.get("failing_phases")
     )
     icon = "✅" if healthy else "⚠️"
-    lines = [f"{icon} <b>UnifiedAnalyzer status</b>"]
+    lines = [
+        f"{icon} <b>UnifiedAnalyzer status</b>",
+        f"<i>{_now()}</i>",
+        "",
+        "<b>People and identity graph</b>",
+    ]
     lines.append(
-        f"Entities: {s.get('entity_count', 0)} "
-        f"({s.get('primary', 0)} primary, {s.get('secondary', 0)} secondary)"
+        f"Tracking {_num(s.get('entity_count'))} entities: "
+        f"{_num(s.get('primary'))} primary identity records and "
+        f"{_num(s.get('secondary'))} secondary/supporting records."
     )
     # Faces: detected corpus vs actually linked to a tracked entity.
     lines.append(
-        f"Faces: {s.get('faces_detected', 0)} detected, "
-        f"{s.get('faces_linked', 0)} linked to entities"
+        f"Faces: {_num(s.get('faces_detected'))} detected in media; "
+        f"{_num(s.get('faces_linked'))} linked to known entities."
     )
-    lines.append(f"Alerts: {s.get('alerts_24h', 0)} (24h), {s.get('unread', 0)} unread")
+    lines.append(
+        f"Alerts: {_num(s.get('alerts_24h'))} new in the last 24h; "
+        f"{_num(s.get('unread'))} still unread."
+    )
+    lines.append("")
+    lines.append("<b>Pipeline</b>")
     if s.get("run_state"):
-        lines.append(f"Pipeline: {s['run_state']}")
-    if s.get("failed_runs_24h"):
-        lines.append(f"⚠️ Failed runs (24h): {s['failed_runs_24h']}")
+        run_state = str(s["run_state"]).replace(" · ", "; ")
+        lines.append(f"Current state: {run_state}.")
+    else:
+        lines.append("Current state: unknown; scheduler has not reported a run state yet.")
+
+    if actionable_failures:
+        lines.append(
+            f"Actionable failed production runs in the last 24h: {actionable_failures}."
+        )
+        for failure in (s.get("recent_failed_runs") or [])[:3]:
+            finished_at = failure.get("finished_at")
+            if hasattr(finished_at, "strftime"):
+                when = finished_at.strftime("%Y-%m-%d %H:%M UTC")
+            else:
+                when = str(finished_at or "unknown time")
+            run_type = str(failure.get("run_type") or "unknown run").replace("_", " ")
+            error = str(failure.get("error_message") or "no error captured").replace("\n", " ")
+            lines.append(f"• {_esc(run_type)} at {_esc(when)}: <code>{_esc(error[:240])}</code>")
+    else:
+        lines.append("Actionable failed production runs in the last 24h: 0.")
+
+    if interrupted_runs:
+        lines.append(
+            f"Restart/stale-lock cleanup rows in the last 24h: {interrupted_runs}. "
+            f"These are kept for audit history, but they are not counted as active pipeline failures."
+        )
     if s.get("failing_phases"):
-        lines.append(f"⚠️ Failing phases: {', '.join(s['failing_phases'])}")
+        lines.append(f"Failing phases: {', '.join(s['failing_phases'])}.")
+    else:
+        lines.append("Failing phases: none currently reported.")
+
+    lines.append("")
+    lines.append("<b>Collector signals</b>")
     if s.get("collectors_down"):
-        lines.append(f"⚠️ Collectors quiet: {', '.join(s['collectors_down'])}")
-    lines.append(f"\n{url}")
+        lines.append(
+            "Quiet sources flagged by analyzer: "
+            + ", ".join(s["collectors_down"])
+            + "."
+        )
+    else:
+        lines.append("No collector source is currently quiet enough for analyzer to flag.")
+
+    lines.append("")
+    lines.append(f"Dashboard: {url}")
     await telegram.send("\n".join(lines))

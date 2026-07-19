@@ -217,11 +217,42 @@ async def _build_status() -> dict:
             "AND run_type IN ('incremental', 'full_resolution') "
             "ORDER BY finished_at DESC LIMIT 1"
         )
-        failed_24h = await conn.fetchval(
-            "SELECT COUNT(*) FROM analysis_runs "
-            "WHERE status = 'failed' AND finished_at > NOW() - INTERVAL '24 hours' "
-            "AND run_type = ANY($1::text[])",
+        operational_failure_patterns = [
+            "Interrupted by scheduler restart%",
+            "Stale run lock%",
+            "Stale lock%",
+            "orphaned run lock%",
+        ]
+        failed_counts = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE NOT (COALESCE(error_message, '') ILIKE ANY($2::text[]))
+                )::int AS actionable,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(error_message, '') ILIKE ANY($2::text[])
+                )::int AS operational
+            FROM analysis_runs
+            WHERE status = 'failed'
+              AND finished_at > NOW() - INTERVAL '24 hours'
+              AND run_type = ANY($1::text[])
+            """,
             production_run_types(),
+            operational_failure_patterns,
+        )
+        recent_failed = await conn.fetch(
+            """
+            SELECT run_type, finished_at, LEFT(COALESCE(error_message, 'no error captured'), 240) AS error_message
+            FROM analysis_runs
+            WHERE status = 'failed'
+              AND finished_at > NOW() - INTERVAL '24 hours'
+              AND run_type = ANY($1::text[])
+              AND NOT (COALESCE(error_message, '') ILIKE ANY($2::text[]))
+            ORDER BY finished_at DESC
+            LIMIT 3
+            """,
+            production_run_types(),
+            operational_failure_patterns,
         )
         # Pipeline phases whose most-recent run failed (P2-3 run_phase_status).
         try:
@@ -251,7 +282,9 @@ async def _build_status() -> dict:
         "alerts_24h": alerts_24h or 0,
         "unread": unread or 0,
         "run_state": run_state,
-        "failed_runs_24h": failed_24h or 0,
+        "failed_runs_24h": (failed_counts["actionable"] if failed_counts else 0) or 0,
+        "interrupted_runs_24h": (failed_counts["operational"] if failed_counts else 0) or 0,
+        "recent_failed_runs": [dict(r) for r in recent_failed],
         "failing_phases": failing_phases,
         "collectors_down": [i["source"] for i in issues],
     }

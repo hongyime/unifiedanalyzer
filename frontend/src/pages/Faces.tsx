@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ScanFace, Users, Images, Film, Search, Upload } from 'lucide-react'
+import { ScanFace, Users, Images, Film, Search, Upload, ImageOff } from 'lucide-react'
 import { useFaceStats, useFaceIdentities } from '../hooks'
 import { api, FaceSearchResponse } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
@@ -35,6 +35,26 @@ function StatTile({ label, value, icon: Icon }: { label: string; value: number |
 }
 
 type Gallery = Awaited<ReturnType<typeof api.getFaceGallery>>
+
+function FaceCrop({ src, alt, className }: { src: string; alt: string; className?: string }) {
+  const [failed, setFailed] = useState(false)
+  if (failed) {
+    return (
+      <div className="flex h-full w-full items-center justify-center bg-background text-muted">
+        <ImageOff size={18} />
+      </div>
+    )
+  }
+  return (
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      className={className}
+      onError={() => setFailed(true)}
+    />
+  )
+}
 
 export default function FacesPage() {
   const [page, setPage] = useState(1)
@@ -157,8 +177,7 @@ export default function FacesPage() {
                       title={`${Math.round(m.similarity * 100)}% · cluster ${m.cluster_id ?? '—'}`}
                       className="grid grid-cols-[76px_minmax(0,1fr)] gap-2 rounded border border-border bg-background p-2 hover:bg-hover">
                       <div className="relative aspect-square overflow-hidden rounded border border-border">
-                        <img src={m.crop_url} loading="lazy" className="h-full w-full object-cover"
-                        onError={(e) => { const t = e.currentTarget.closest('a') as HTMLElement | null; if (t) t.style.display = 'none' }} />
+                        <FaceCrop src={m.crop_url} alt={`face ${m.face_id}`} className="h-full w-full object-cover" />
                         <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-center text-[9px] text-white">{Math.round(m.similarity * 100)}%</span>
                       </div>
                       <div className="min-w-0">
@@ -195,12 +214,10 @@ export default function FacesPage() {
                 title={`face #${f.face_id} · cluster ${f.cluster_id ?? '—'} · q${f.quality}`}
                 className="group relative aspect-square cursor-pointer overflow-hidden rounded-lg border border-border bg-card"
               >
-                <img
+                <FaceCrop
                   src={f.crop_url}
                   alt={`face ${f.face_id}`}
-                  loading="lazy"
                   className="h-full w-full object-cover transition group-hover:scale-105"
-                  onError={(e) => { const t = e.currentTarget.closest('div') as HTMLElement | null; if (t) t.style.display = 'none' }}
                 />
                 {f.cluster_id != null && (
                   <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1 text-[10px] leading-tight text-white">

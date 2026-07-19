@@ -357,6 +357,24 @@ CREATE INDEX IF NOT EXISTS idx_media_analysis_type   ON media_analysis (analysis
 CREATE INDEX IF NOT EXISTS idx_media_analysis_phash  ON media_analysis (perceptual_hash);
 CREATE INDEX IF NOT EXISTS idx_media_analysis_gps    ON media_analysis (gps_lat, gps_lon);
 CREATE INDEX IF NOT EXISTS idx_media_analysis_parent ON media_analysis (parent_media_item_id);
+CREATE INDEX IF NOT EXISTS idx_media_analysis_processed_at
+    ON media_analysis (processed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_analysis_type_processed
+    ON media_analysis (analysis_type, processed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_analysis_source_processed
+    ON media_analysis (source, processed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_analysis_content_processed
+    ON media_analysis (content_type, processed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_analysis_has_text
+    ON media_analysis (id) WHERE extracted_text IS NOT NULL AND extracted_text <> '';
+CREATE INDEX IF NOT EXISTS idx_media_analysis_has_face
+    ON media_analysis (id) WHERE face_embedding IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_analysis_has_gps
+    ON media_analysis (id) WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_analysis_is_derived
+    ON media_analysis (id) WHERE parent_media_item_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_analysis_has_phash
+    ON media_analysis (id) WHERE perceptual_hash IS NOT NULL;
 
 -- facetracker merge (Stage 2): bridge linking analyzer entities to faces in the
 -- facetracker face engine. face_id references facetracker.faces.id by value —

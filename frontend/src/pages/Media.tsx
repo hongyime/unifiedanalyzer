@@ -53,6 +53,8 @@ function badgeRow(item: MediaItem) {
 }
 
 function DetailModal({ item, onClose }: { item: MediaItem; onClose: () => void }) {
+  const [failed, setFailed] = useState(false)
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
@@ -75,12 +77,18 @@ function DetailModal({ item, onClose }: { item: MediaItem; onClose: () => void }
           </button>
         </div>
 
-        <img
-          src={item.thumbnail_url}
-          alt={item.analysis_type}
-          className="mb-4 max-h-72 rounded border border-border object-contain"
-          onError={(e) => ((e.target as HTMLImageElement).style.display = 'none')}
-        />
+        {failed ? (
+          <div className="mb-4 flex h-48 items-center justify-center rounded border border-border bg-bg text-muted">
+            <ImageOff size={28} />
+          </div>
+        ) : (
+          <img
+            src={item.thumbnail_url}
+            alt={item.analysis_type}
+            className="mb-4 max-h-72 rounded border border-border object-contain"
+            onError={() => setFailed(true)}
+          />
+        )}
 
         <dl className="grid grid-cols-2 gap-2 text-sm">
           {item.gps_lat != null && (

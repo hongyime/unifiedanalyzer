@@ -53,6 +53,9 @@ services:
       # Live-mount src so code edits apply on recreate (no image rebuild — the
       # shared Docker vhdx must not grow). Mirrors the collector's pattern.
       - "../src:/app/src"
+      # Live-built dashboard assets. The image still includes a baked dist, but
+      # this bind lets local UI fixes go live without rebuilding the large image.
+      - "../frontend/dist:/app/frontend/dist:ro"
       # Collector media (read-only) for thumbnails of real media items.
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       # Derived artifacts (PDF images / video frames / ONNX models) on Z:.

@@ -36,6 +36,67 @@ router = APIRouter(tags=["media"])
 _THUMB_MAX = 256
 
 
+def _parse_pg_array_text(raw: str | None) -> list[str]:
+    if not raw or raw == "{}":
+        return []
+    body = raw.strip("{}")
+    if not body:
+        return []
+    return [part.strip().strip('"') for part in body.split(",")]
+
+
+def _estimated_rollup(rows_total: int, vals: str | None, freqs: str | None, key: str) -> list[dict]:
+    names = _parse_pg_array_text(vals)
+    weights = []
+    for value in _parse_pg_array_text(freqs):
+        try:
+            weights.append(float(value))
+        except ValueError:
+            weights.append(0.0)
+    rows = [
+        {key: name, "n": int(round(rows_total * weight))}
+        for name, weight in zip(names, weights)
+    ]
+    return sorted(rows, key=lambda r: r["n"], reverse=True)
+
+
+async def _estimated_media_totals(conn) -> dict:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            (SELECT GREATEST(c.reltuples, 0)::bigint
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = 'public' AND c.relname = 'media_analysis') AS rows_total,
+            (SELECT GREATEST(
+                CASE
+                    WHEN s.n_distinct < 0 THEN (-s.n_distinct * c.reltuples)
+                    ELSE s.n_distinct
+                END,
+                0
+             )::bigint
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             LEFT JOIN pg_stats s
+               ON s.schemaname = n.nspname
+              AND s.tablename = c.relname
+              AND s.attname = 'media_item_id'
+             WHERE n.nspname = 'public' AND c.relname = 'media_analysis') AS items_total,
+            (SELECT GREATEST(reltuples, 0)::bigint FROM pg_class
+             WHERE relname = 'idx_media_analysis_has_gps') AS with_gps,
+            (SELECT GREATEST(reltuples, 0)::bigint FROM pg_class
+             WHERE relname = 'idx_media_analysis_has_text') AS with_text,
+            (SELECT GREATEST(reltuples, 0)::bigint FROM pg_class
+             WHERE relname = 'idx_media_analysis_has_face') AS with_face,
+            (SELECT GREATEST(reltuples, 0)::bigint FROM pg_class
+             WHERE relname = 'idx_media_analysis_is_derived') AS derived,
+            (SELECT GREATEST(reltuples, 0)::bigint FROM pg_class
+             WHERE relname = 'idx_media_analysis_has_phash') AS with_phash
+        """
+    )
+    return {k: int(row[k] or 0) for k in row.keys()}
+
+
 def _row_to_dict(r) -> dict:
     rj = r["result_json"]
     if isinstance(rj, str):
@@ -75,33 +136,44 @@ def _row_to_dict(r) -> dict:
 async def media_stats():
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
-        by_type = await conn.fetch(
-            "SELECT analysis_type, COUNT(*) AS n FROM media_analysis GROUP BY analysis_type ORDER BY n DESC"
-        )
-        by_source = await conn.fetch(
-            "SELECT source, COUNT(*) AS n FROM media_analysis GROUP BY source ORDER BY n DESC"
-        )
-        by_content = await conn.fetch(
-            "SELECT content_type, COUNT(*) AS n FROM media_analysis GROUP BY content_type ORDER BY n DESC"
-        )
-        totals = await conn.fetchrow(
+        # Dashboard rollups must stay responsive while full-resolution is busy.
+        # Exact COUNT(*) / GROUP BY over this wide table can block the UI for
+        # seconds under IO pressure, so use planner/index stats for dashboard
+        # tiles. The media grid itself still returns exact page rows.
+        totals = await _estimated_media_totals(conn)
+        rollup_rows = await conn.fetch(
             """
-            SELECT
-                COUNT(*) AS rows_total,
-                COUNT(DISTINCT media_item_id) AS items_total,
-                COUNT(*) FILTER (WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL) AS with_gps,
-                COUNT(*) FILTER (WHERE extracted_text IS NOT NULL AND extracted_text <> '') AS with_text,
-                COUNT(*) FILTER (WHERE face_embedding IS NOT NULL) AS with_face,
-                COUNT(*) FILTER (WHERE parent_media_item_id IS NOT NULL) AS derived,
-                COUNT(*) FILTER (WHERE perceptual_hash IS NOT NULL) AS with_phash
-            FROM media_analysis
+            SELECT attname, most_common_vals::text AS vals, most_common_freqs::text AS freqs
+            FROM pg_stats
+            WHERE schemaname = 'public'
+              AND tablename = 'media_analysis'
+              AND attname = ANY($1::text[])
             """
+            , ["analysis_type", "source", "content_type"]
         )
+        by_att = {r["attname"]: dict(r) for r in rollup_rows}
+        totals["estimated"] = True
+        rows_total = totals["rows_total"]
     return {
-        "totals": dict(totals),
-        "by_analysis_type": [dict(r) for r in by_type],
-        "by_source": [dict(r) for r in by_source],
-        "by_content_type": [dict(r) for r in by_content],
+        "totals": totals,
+        "by_analysis_type": _estimated_rollup(
+            rows_total,
+            by_att.get("analysis_type", {}).get("vals"),
+            by_att.get("analysis_type", {}).get("freqs"),
+            "analysis_type",
+        ),
+        "by_source": _estimated_rollup(
+            rows_total,
+            by_att.get("source", {}).get("vals"),
+            by_att.get("source", {}).get("freqs"),
+            "source",
+        ),
+        "by_content_type": _estimated_rollup(
+            rows_total,
+            by_att.get("content_type", {}).get("vals"),
+            by_att.get("content_type", {}).get("freqs"),
+            "content_type",
+        ),
     }
 
 
@@ -168,7 +240,10 @@ async def media_browse(
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     async with pool.acquire() as conn:
-        total = await conn.fetchval(f"SELECT COUNT(*) FROM media_analysis {where}", *params)
+        if conditions:
+            total = await conn.fetchval(f"SELECT COUNT(*) FROM media_analysis {where}", *params)
+        else:
+            total = (await _estimated_media_totals(conn))["rows_total"]
         rows = await conn.fetch(
             f"""
             SELECT id, media_item_id, parent_media_item_id, source, content_type,

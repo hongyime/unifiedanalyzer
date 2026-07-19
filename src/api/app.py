@@ -8,7 +8,6 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from src.db.connection import init_pools, close_pools
-from src.scheduler.scheduler import start_scheduler, stop_scheduler
 from src.notifications.alerts import notify_startup, notify_shutdown
 from src.api.routes.entities import router as entities_router
 from src.api.routes.timeline import router as timeline_router
@@ -82,11 +81,12 @@ from src.api.face_mount import mount_face_api
 mount_face_api(app)
 
 _scheduler_task: asyncio.Task | None = None
+_stop_scheduler = None
 
 
 @app.on_event("startup")
 async def startup():
-    global _scheduler_task
+    global _scheduler_task, _stop_scheduler
     apply_schema = os.getenv("ANALYZER_APPLY_SCHEMA_ON_STARTUP", "1") != "0"
     await init_pools(apply_schema_ddl=apply_schema)
     # The scheduler runs the heavy Phase-6 pipeline (cv2 / ffmpeg / pypdf) whose
@@ -95,6 +95,8 @@ async def startup():
     # (the `scheduler` compose service / `python -m src.main scheduler`). Set
     # RUN_SCHEDULER=1 to co-host it in-process (single-process / dev fallback).
     if os.getenv("RUN_SCHEDULER", "0") == "1":
+        from src.scheduler.scheduler import start_scheduler, stop_scheduler
+        _stop_scheduler = stop_scheduler
         _scheduler_task = asyncio.create_task(start_scheduler())
         logging.getLogger(__name__).info("UnifiedAnalyzer started (scheduler in-process)")
     else:
@@ -105,7 +107,8 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     await notify_shutdown()
-    stop_scheduler()
+    if _stop_scheduler:
+        _stop_scheduler()
     if _scheduler_task:
         _scheduler_task.cancel()
     await close_pools()
