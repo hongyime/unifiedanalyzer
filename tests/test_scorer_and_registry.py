@@ -189,6 +189,18 @@ def test_collector_unavailable_phase_records_skipped(monkeypatch):
     assert "CollectorUnavailableError" in captured["args"][5]
 
 
+def test_skipped_alert_metadata_does_not_break_alert_count():
+    """Skipped alert phases return metadata strings, not only numeric counters."""
+    from src.pipeline.incremental_runner import _sum_numeric_stats
+
+    assert _sum_numeric_stats({
+        "silence_gap": 2,
+        "new_identity_link": 1,
+        "skipped": "collector_unavailable",
+        "error": "TimeoutError",
+    }) == 3
+
+
 def test_face_associations_before_social_face_link():
     """Ordering matters: face_associations populates the table
     social_face_link then reads."""

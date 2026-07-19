@@ -376,6 +376,14 @@ async def _call_phase(fn):
     return result
 
 
+def _sum_numeric_stats(stats: dict) -> int:
+    """Sum phase counters while ignoring skip/error metadata."""
+    return int(sum(
+        value for value in stats.values()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ))
+
+
 async def _run_phase(run_id: str, run_type: str, name: str, fn, *, default=None):
     """Run one non-fatal phase; record ok/skipped/failed + duration.
 
@@ -510,7 +518,7 @@ async def run_incremental() -> dict:
         alert_stats = await _run_phase(
             run_id, "incremental", "alerts", run_alerts, default={}
         )
-        stats["alerts"] = sum(alert_stats.values())
+        stats["alerts"] = _sum_numeric_stats(alert_stats)
 
         # Non-fatal: behavioral profiling scans entities x timeline_events and can
         # time out under heavy concurrent collector write load. It must not abort
@@ -660,7 +668,7 @@ async def run_full_resolution() -> dict:
         alert_stats = await _run_phase(
             run_id, "full_resolution", "alerts", run_alerts, default={}
         )
-        stats["alerts"] = sum(alert_stats.values())
+        stats["alerts"] = _sum_numeric_stats(alert_stats)
 
         # Non-fatal: behavioral profiling scans entities x timeline_events and can
         # time out under heavy concurrent collector write load. It must not abort

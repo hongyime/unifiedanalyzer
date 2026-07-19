@@ -39,6 +39,12 @@ services:
       # API only — the scheduler runs as a SEPARATE process (the `scheduler`
       # service below) so its blocking Phase-6 work never freezes the dashboard.
       RUN_SCHEDULER: "0"
+      # API restarts must not run DDL while the scheduler is writing. Run
+      # `python -m src.main schema` explicitly for schema maintenance.
+      ANALYZER_APPLY_SCHEMA_ON_STARTUP: "0"
+      # Shared Postgres can be busy during analyzer/scheduler/face-worker overlap;
+      # give optional collector-pool init enough time before degrading.
+      COLLECTOR_DB_INIT_TIMEOUT_SECONDS: "60"
       # P2-1: cap this process's asyncpg pool so the three analyzer processes
       # (analyzer/scheduler/face_worker) can't collectively exhaust the shared
       # collector Postgres. The API serves many concurrent requests -> 10.
