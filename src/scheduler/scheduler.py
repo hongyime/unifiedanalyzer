@@ -3,6 +3,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from src.db.backup import BackupConfig, BackupError, run_due_backups
 from src.db.connection import check_db_connectivity, get_analyzer_pool, get_collector_pool
 from src.pipeline.incremental_runner import (
     run_incremental,
@@ -21,6 +22,50 @@ logger = logging.getLogger(__name__)
 
 _running = False
 _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE = merge_candidate_notify_min_confidence()
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        logger.warning("Invalid %s; using default %d", name, default)
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _backup_window_open(now: datetime, backup_hour_utc: int) -> bool:
+    return now.astimezone(timezone.utc).hour >= backup_hour_utc
+
+
+async def _run_db_backup_check(now: datetime) -> None:
+    try:
+        config = BackupConfig.from_env()
+        result = await asyncio.to_thread(run_due_backups, config, now=now)
+    except BackupError as exc:
+        logger.error("Analyzer DB backup failed: %s", exc)
+        return
+    except Exception:
+        logger.exception("Analyzer DB backup failed")
+        return
+
+    if result.created:
+        logger.info(
+            "Analyzer DB backup created: %s",
+            ", ".join(str(path) for path in result.created),
+        )
+    if result.deleted:
+        logger.info(
+            "Analyzer DB backup retention pruned: %s",
+            ", ".join(str(path) for path in result.deleted),
+        )
 
 
 def _collector_no_run_issue(
@@ -387,14 +432,23 @@ async def start_scheduler() -> None:
     digest_hour = int(os.getenv("DAILY_DIGEST_HOUR", "8"))
     # Recurring status heartbeat to the group chat (hours; 0 disables).
     status_interval_h = int(os.getenv("STATUS_HEARTBEAT_INTERVAL_HOURS", "6"))
+    backup_enabled = _env_flag("ANALYZER_DB_BACKUP_ENABLED")
+    backup_hour = _env_int("ANALYZER_DB_BACKUP_HOUR_UTC", 2, minimum=0, maximum=23)
+    backup_check_interval = _env_int(
+        "ANALYZER_DB_BACKUP_CHECK_INTERVAL_SECONDS",
+        3600,
+        minimum=300,
+    )
 
     logger.info("Scheduler started: incremental every %d min, full resolution every %s, "
-                "digest at %02d:00 UTC, status heartbeat every %dh",
-                interval // 60, full_interval, digest_hour, status_interval_h)
+                "digest at %02d:00 UTC, status heartbeat every %dh, DB backups %s",
+                interval // 60, full_interval, digest_hour, status_interval_h,
+                "enabled" if backup_enabled else "disabled")
 
     last_digest_date: str | None = None
     last_health_check: datetime | None = None
     last_status: datetime | None = None
+    last_backup_check: datetime | None = None
     was_offline = False
 
     while _running:
@@ -440,6 +494,13 @@ async def start_scheduler() -> None:
                 last_status = now
             except Exception:
                 logger.exception("Status heartbeat failed")
+
+        if backup_enabled and _backup_window_open(now, backup_hour) and (
+            last_backup_check is None
+            or (now - last_backup_check).total_seconds() >= backup_check_interval
+        ):
+            await _run_db_backup_check(now)
+            last_backup_check = now
 
         last_full_run = await get_last_run_time("full_resolution")
         if last_full_run is None or (now - last_full_run) >= full_interval:

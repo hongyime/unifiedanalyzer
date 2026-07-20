@@ -3,6 +3,7 @@ import sys
 import asyncio
 import logging
 import argparse
+import json
 
 from dotenv import load_dotenv
 
@@ -23,6 +24,29 @@ def main():
     sub.add_parser("scheduler", help="Run the analysis scheduler loop (separate process)")
     sub.add_parser("run", help="Run one incremental analysis cycle")
     sub.add_parser("full", help="Run full identity resolution")
+    backup = sub.add_parser("backup-db", help="Create/list analyzer DB backups")
+    backup.add_argument("--kind", choices=["auto", "daily", "weekly", "monthly"],
+                        default="daily", help="Backup cadence bucket (default: daily)")
+    backup.add_argument("--backup-dir", type=str, default=None,
+                        help="Backup root (default: ANALYZER_DB_BACKUP_DIR or Z:/unifiedanalyzer/backups/db)")
+    backup.add_argument("--database-url", type=str, default=None,
+                        help="Override ANALYZER_DATABASE_URL")
+    backup.add_argument("--pg-dump-bin", type=str, default=None,
+                        help="pg_dump binary path/name (default: PG_DUMP_BIN or pg_dump)")
+    backup.add_argument("--dry-run", action="store_true",
+                        help="Show create/prune plan without writing or deleting files")
+    backup.add_argument("--list", action="store_true",
+                        help="List known backup files as JSON and exit")
+    backup.add_argument("--retention-only", action="store_true",
+                        help="Only apply retention pruning")
+    backup.add_argument("--skip-retention", action="store_true",
+                        help="Create the backup without pruning old backups")
+    backup.add_argument("--retention-daily", type=int, default=None,
+                        help="Daily backups to keep (default: 7)")
+    backup.add_argument("--retention-weekly", type=int, default=None,
+                        help="Weekly backups to keep (default: 4)")
+    backup.add_argument("--retention-monthly", type=int, default=None,
+                        help="Monthly backups to keep (default: 3)")
     hard_reset = sub.add_parser(
         "hard-reset-entities",
         help="DESTRUCTIVE: wipe all entities+links (CASCADE wipes faces/signals) then rebuild",
@@ -116,6 +140,52 @@ def main():
                 await close_pools()
 
         asyncio.run(_run())
+
+    elif args.command == "backup-db":
+        from src.db.backup import (
+            BackupConfig,
+            BackupError,
+            backups_to_json,
+            list_backups,
+            prune_backups,
+            run_backup_kinds,
+            run_due_backups,
+        )
+
+        try:
+            config = BackupConfig.from_env(
+                database_url=args.database_url,
+                root=args.backup_dir,
+                pg_dump_bin=args.pg_dump_bin,
+                retention_daily=args.retention_daily,
+                retention_weekly=args.retention_weekly,
+                retention_monthly=args.retention_monthly,
+                allow_missing_database_url=args.list or args.retention_only,
+            )
+            if args.list:
+                print(backups_to_json(list_backups(config.root)))
+            elif args.retention_only:
+                stale = prune_backups(config, dry_run=args.dry_run)
+                key = "would_delete" if args.dry_run else "deleted"
+                print(json.dumps({key: [str(p) for p in stale]}, indent=2))
+            elif args.kind == "auto":
+                result = run_due_backups(
+                    config,
+                    dry_run=args.dry_run,
+                    apply_retention=not args.skip_retention,
+                )
+                print(json.dumps(result.to_dict(), indent=2))
+            else:
+                result = run_backup_kinds(
+                    config,
+                    (args.kind,),
+                    dry_run=args.dry_run,
+                    apply_retention=not args.skip_retention,
+                )
+                print(json.dumps(result.to_dict(), indent=2))
+        except BackupError as exc:
+            logger.error("Analyzer DB backup failed: %s", exc)
+            sys.exit(1)
 
     elif args.command == "hard-reset-entities":
         if not args.yes:

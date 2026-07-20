@@ -24,15 +24,62 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from typing import Iterable
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+DECISION_LOG_DIR = Path(os.getenv("ANALYZER_DECISION_LOG_DIR", "Z:/unifiedanalyzer/decisions"))
 
 
 def _canonical_json(obj) -> str:
     """Deterministic JSON encoding so identical payloads hash identically
     across runs (dict key order, whitespace stable)."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _append_jsonl(path: Path, event: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = _canonical_json(event) + "\n"
+    # Write-through append. A temp+replace pattern is wrong for JSONL appenders;
+    # keep each line single-write and flush it so a crash leaves either a full
+    # event line or nothing.
+    with path.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _decision_log_path(created_at) -> Path:
+    return DECISION_LOG_DIR / f"{created_at:%Y-%m}.jsonl"
+
+
+def _write_decision_event(*, audit_id: int, prev_sha256: str | None,
+                          sha256: str, action: str, actor: str | None,
+                          entity_ids: list[str] | None, payload: dict,
+                          created_at) -> None:
+    event = {
+        "schema_version": 1,
+        "audit_id": audit_id,
+        "event_type": action,
+        "actor": actor,
+        "entity_ids": entity_ids or [],
+        "payload": payload or {},
+        "created_at": created_at.isoformat(timespec="microseconds"),
+        "prev_sha256": prev_sha256,
+        "sha256": sha256,
+        "idempotency_key": hashlib.sha256(
+            _canonical_json({
+                "action": action,
+                "actor": actor,
+                "entity_ids": sorted(entity_ids or []),
+                "payload": payload or {},
+                "created_at": created_at.isoformat(timespec="microseconds"),
+            }).encode("utf-8")
+        ).hexdigest(),
+    }
+    _append_jsonl(_decision_log_path(created_at), event)
 
 
 def _hash(prev_sha256: str | None, action: str, actor: str | None,
@@ -93,10 +140,24 @@ async def append_audit(conn, *, action: str, actor: str | None = None,
             INSERT INTO audit_log (prev_sha256, sha256, action, actor,
                                     entity_ids, payload, created_at)
             VALUES ($1, $2, $3, $4, $5::uuid[], $6::jsonb, $7)
-            RETURNING id
+            RETURNING id, created_at
         """, prev_sha, sha, action, actor, entity_id_list,
              json.dumps(payload, default=str), created_at)
-        return int(row["id"])
+        audit_id = int(row["id"])
+        try:
+            _write_decision_event(
+                audit_id=audit_id,
+                prev_sha256=prev_sha,
+                sha256=sha,
+                action=action,
+                actor=actor,
+                entity_ids=entity_id_list,
+                payload=payload,
+                created_at=row["created_at"],
+            )
+        except Exception:
+            logger.exception("decision JSONL append failed (non-fatal): action=%s", action)
+        return audit_id
     except Exception:
         # Non-fatal: never let audit logging break the actual action.
         logger.exception("audit_log append failed (non-fatal): action=%s", action)

@@ -157,6 +157,14 @@ activemq-data/
 data/media_derived/
 data/
 
+# Analyzer operational artifacts, not source.
+/backups/
+/decisions/
+/exports/
+/restore_artifacts/
+*.dump
+*.dump.tmp
+
 # Environments
 .env
 .envrc

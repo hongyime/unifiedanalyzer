@@ -36,6 +36,8 @@ services:
       # Face artifacts (crops/FAISS/thumbs/InsightFace cache) under the mounted
       # derived dir — container path, not the host Z: path from .env.
       FACE_MODEL_ROOT: /app/media_derived/faces
+      # Human decisions are appended as JSONL here in addition to DB audit rows.
+      ANALYZER_DECISION_LOG_DIR: /app/decisions
       # API only — the scheduler runs as a SEPARATE process (the `scheduler`
       # service below) so its blocking Phase-6 work never freezes the dashboard.
       RUN_SCHEDULER: "0"
@@ -60,6 +62,8 @@ services:
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       # Derived artifacts (PDF images / video frames / ONNX models) on Z:.
       - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
+      # Append-only analyzer decision logs on Z:.
+      - "Z:/unifiedanalyzer/decisions:/app/decisions"
     networks:
       - unifiedcollector_default
     restart: unless-stopped
@@ -85,6 +89,14 @@ services:
       MEDIA_DERIVED_PATH: /app/media_derived
       COLLECTOR_MEDIA_ROOT: /app/collector_root
       FACE_MODEL_ROOT: /app/media_derived/faces
+      # Scheduled analyzer DB dumps land on the host at
+      # Z:/unifiedanalyzer/backups/db via the bind mount below.
+      ANALYZER_DB_BACKUP_ENABLED: "${ANALYZER_DB_BACKUP_ENABLED:-1}"
+      ANALYZER_DB_BACKUP_DIR: /app/backups/db
+      ANALYZER_DB_BACKUP_HOUR_UTC: "${ANALYZER_DB_BACKUP_HOUR_UTC:-2}"
+      ANALYZER_DB_BACKUP_RETENTION_DAILY: "${ANALYZER_DB_BACKUP_RETENTION_DAILY:-7}"
+      ANALYZER_DB_BACKUP_RETENTION_WEEKLY: "${ANALYZER_DB_BACKUP_RETENTION_WEEKLY:-4}"
+      ANALYZER_DB_BACKUP_RETENTION_MONTHLY: "${ANALYZER_DB_BACKUP_RETENTION_MONTHLY:-3}"
       # P2-1: the scheduler is a single sequential worker; a small pool suffices.
       DB_MAX_POOL_SIZE: "${SCHEDULER_DB_POOL_SIZE:-6}"
       # full_resolution has CPU-bound synchronous phases (resolver fuzzy-match of
@@ -112,6 +124,7 @@ services:
       - "../src:/app/src"
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
+      - "Z:/unifiedanalyzer/backups/db:/app/backups/db"
     networks:
       - unifiedcollector_default
     restart: unless-stopped

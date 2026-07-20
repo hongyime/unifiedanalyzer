@@ -18,8 +18,9 @@ WORKDIR /app
 #  - libglib2.0-0 libgl1 : OpenCV / Pillow runtime (thumbnails + face detect)
 #  - ffmpeg              : 6H sparse video-frame extraction
 #  - tesseract-ocr       : 6D image/PDF OCR
+#  - postgresql-client   : pg_dump for analyzer DB backups
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libgl1 ffmpeg tesseract-ocr \
+    libglib2.0-0 libgl1 ffmpeg tesseract-ocr postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

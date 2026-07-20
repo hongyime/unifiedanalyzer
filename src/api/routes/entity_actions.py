@@ -1,4 +1,3 @@
-import json
 from itertools import combinations
 
 from fastapi import APIRouter, HTTPException
@@ -6,8 +5,52 @@ from pydantic import BaseModel
 
 from src.db.connection import get_analyzer_pool
 from src.pipeline.identity_calibration import record_label
+from src.util.audit_log import append_audit
 
 router = APIRouter(tags=["entity-actions"])
+
+
+async def _entity_snapshots(conn, entity_ids: list[str]) -> list[dict]:
+    rows = await conn.fetch("""
+        SELECT e.id::text AS entity_id,
+               e.canonical_name,
+               e.tier,
+               e.confidence_score,
+               e.watch_status,
+               l.id::text AS link_id,
+               l.source,
+               l.platform_id,
+               l.platform_username,
+               l.platform_name,
+               l.link_method,
+               l.confidence AS link_confidence
+        FROM entities e
+        LEFT JOIN entity_platform_links l ON l.entity_id = e.id
+        WHERE e.id = ANY($1::uuid[])
+        ORDER BY e.id, l.source, l.platform_username NULLS LAST, l.platform_id
+    """, entity_ids)
+    by_id: dict[str, dict] = {}
+    for row in rows:
+        eid = row["entity_id"]
+        snap = by_id.setdefault(eid, {
+            "entity_id": eid,
+            "canonical_name": row["canonical_name"],
+            "tier": row["tier"],
+            "confidence_score": float(row["confidence_score"] or 0),
+            "watch_status": row["watch_status"],
+            "platform_links": [],
+        })
+        if row["link_id"]:
+            snap["platform_links"].append({
+                "link_id": row["link_id"],
+                "source": row["source"],
+                "platform_id": row["platform_id"],
+                "platform_username": row["platform_username"],
+                "platform_name": row["platform_name"],
+                "link_method": row["link_method"],
+                "confidence": float(row["link_confidence"] or 0),
+            })
+    return list(by_id.values())
 
 
 class MergeRequest(BaseModel):
@@ -30,8 +73,22 @@ async def set_watch(entity_id: str, req: WatchRequest):
     s = req.status if req.status in ("priority", "watching", "archive") else None
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
+        before = await conn.fetchrow(
+            "SELECT watch_status FROM entities WHERE id = $1::uuid", entity_id
+        )
         await conn.execute(
             "UPDATE entities SET watch_status = $1, updated_at = NOW() WHERE id = $2::uuid", s, entity_id
+        )
+        await append_audit(
+            conn,
+            action="assign_target_tier",
+            actor="dashboard",
+            entity_ids=[entity_id],
+            payload={
+                "previous_watch_status": before["watch_status"] if before else None,
+                "watch_status": s,
+                "entity_snapshot": (await _entity_snapshots(conn, [entity_id]))[0:1],
+            },
         )
     return {"ok": True, "watch_status": s}
 
@@ -64,6 +121,7 @@ async def merge_entities(req: MergeRequest):
         primary = max(entities, key=lambda e: e["confidence_score"])
         target_id = primary["id"]
         others = [e["id"] for e in entities if e["id"] != target_id]
+        snapshots_before = await _entity_snapshots(conn, req.source_entity_ids)
 
         # Capture "same person" labels (1) for every merged pair BEFORE the
         # mutations below move/delete their identity_signals — this is the
@@ -111,20 +169,20 @@ async def merge_entities(req: MergeRequest):
             VALUES ('merge', $1::uuid[], $2, $3)
         """, req.source_entity_ids, target_id, req.reason)
 
-        # Track-C: hash-chained audit entry. Non-fatal.
-        try:
-            from src.util.audit_log import append_audit
-            await append_audit(
-                conn, action="merge_entities", actor="dashboard",
-                entity_ids=req.source_entity_ids,
-                payload={
-                    "target_entity_id": str(target_id),
-                    "merged_count": len(others),
-                    "reason": req.reason or "",
-                },
-            )
-        except Exception:
-            pass  # never block a merge on audit log failure
+        # Hash-chained DB audit + append-only JSONL decision event. Non-fatal.
+        await append_audit(
+            conn, action="merge_confirmed", actor="dashboard",
+            entity_ids=req.source_entity_ids,
+            payload={
+                "target_entity_id": str(target_id),
+                "source_entity_ids": [str(x) for x in req.source_entity_ids],
+                "merged_entity_ids": [str(x) for x in others],
+                "merged_count": len(others),
+                "reason": req.reason or "",
+                "confidence": 100,
+                "entity_snapshots_before": snapshots_before,
+            },
+        )
 
     return {"ok": True, "target_entity_id": str(target_id), "merged": len(others)}
 
@@ -137,6 +195,16 @@ async def dismiss_match(req: DismissMatchRequest):
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            snapshots = await _entity_snapshots(conn, [req.entity_a, req.entity_b])
+            relationship = await conn.fetchrow("""
+                SELECT weight, cross_platform, sources
+                FROM entity_relationships
+                WHERE relationship_type = 'same_person_probability'
+                  AND ((entity_a_id = $1::uuid AND entity_b_id = $2::uuid)
+                    OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
+                ORDER BY weight DESC NULLS LAST, updated_at DESC NULLS LAST
+                LIMIT 1
+            """, req.entity_a, req.entity_b)
             try:
                 await record_label(conn, req.entity_a, req.entity_b, 0, "dashboard_dismiss")
             except Exception:
@@ -148,16 +216,21 @@ async def dismiss_match(req: DismissMatchRequest):
                     OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
             """, req.entity_a, req.entity_b)
 
-        # Track-C: hash-chained audit entry. Non-fatal.
-        try:
-            from src.util.audit_log import append_audit
             await append_audit(
-                conn, action="dismiss_match", actor="dashboard",
+                conn, action="dismiss_identity_candidate", actor="dashboard",
                 entity_ids=[req.entity_a, req.entity_b],
-                payload={},
+                payload={
+                    "confidence": "X",
+                    "entity_a": req.entity_a,
+                    "entity_b": req.entity_b,
+                    "entity_snapshots": snapshots,
+                    "candidate_evidence": {
+                        "weight": relationship["weight"] if relationship else None,
+                        "cross_platform": relationship["cross_platform"] if relationship else None,
+                        "sources": relationship["sources"] if relationship else None,
+                    },
+                },
             )
-        except Exception:
-            pass
     return {"ok": True}
 
 
@@ -206,6 +279,22 @@ async def split_entity(entity_id: str, req: SplitRequest):
             VALUES ('split', $1::uuid[], $2, $3)
         """, [entity["id"]], new_id, req.reason)
 
+        await append_audit(
+            conn,
+            action="split_person",
+            actor="dashboard",
+            entity_ids=[entity_id, str(new_id)],
+            payload={
+                "source_entity_id": entity_id,
+                "new_entity_id": str(new_id),
+                "split_link_ids": req.link_ids,
+                "split_links": [dict(link) for link in links],
+                "reason": req.reason or "",
+                "source_entity_snapshot_after": await _entity_snapshots(conn, [entity_id]),
+                "new_entity_snapshot": await _entity_snapshots(conn, [str(new_id)]),
+            },
+        )
+
     return {"ok": True, "new_entity_id": str(new_id)}
 
 
@@ -238,6 +327,17 @@ async def update_entity_settings(entity_id: str, req: AlertTuningRequest):
             await conn.execute(
                 f"UPDATE entities SET {', '.join(updates)}, updated_at = NOW() WHERE id = ${idx}::uuid",
                 *params
+            )
+            await append_audit(
+                conn,
+                action="add_note",
+                actor="dashboard",
+                entity_ids=[entity_id],
+                payload={
+                    "silence_threshold_days": req.silence_threshold_days,
+                    "notes": req.notes,
+                    "entity_snapshot": (await _entity_snapshots(conn, [entity_id]))[0:1],
+                },
             )
 
     return {"ok": True}
