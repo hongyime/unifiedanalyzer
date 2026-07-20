@@ -54,12 +54,12 @@ _HARD_SIGNALS: frozenset[str] = frozenset({
     "face_pair_knn",
 })
 
-# All cross-entity scoring signal types (mirrors identity_scorer._TYPE_WEIGHT
-# and identity_calibration.FEATURE_ORDER). Kept in sync manually — if the
-# scorer gains a new type, add it here and to FEATURE_ORDER, then retrain.
+# All live cross-entity scoring signal types (mirrors identity_scorer._TYPE_WEIGHT).
+# Historical calibration slots can exist in FEATURE_ORDER without being active
+# same-person evidence.
 _SCORING_SIGNALS: frozenset[str] = frozenset({
     "email_match", "phone_match", "bio_mention", "cross_platform_link",
-    "content_similarity", "temporal_copost", "shared_website",
+    "content_similarity", "shared_website",
     "shared_route_origin", "group_cooccurrence", "media_gps_colocation",
     "media_perceptual_match", "media_face_match", "media_device_match",
     "username_similar",

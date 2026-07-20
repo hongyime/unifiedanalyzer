@@ -35,7 +35,7 @@ bio itself (e.g. a YouTube video description with a contact email).
 
 target_record_id convention: all new types store the *other entity's
 UUID as text* directly (same convention as content_similarity /
-temporal_copost / group_cooccurrence) — no extra resolution needed in
+group_cooccurrence / content similarity) — no extra resolution needed in
 identity_scorer.
 """
 import re

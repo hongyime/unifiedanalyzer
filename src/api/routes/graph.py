@@ -45,6 +45,12 @@ def _relationship_why(relationship_type: str, sources) -> str | None:
         similarity = sources.get("similarity")
         if similarity is not None:
             return f"Hourly activity pattern similarity {similarity}."
+    if relationship_type == "temporal_copost":
+        events = sources.get("coincident_events")
+        days = sources.get("copost_days")
+        if events is not None and days is not None:
+            return f"Repeated posting-time overlap: {events} close events across {days} days. Context only; not same-person evidence."
+        return "Repeated posting-time overlap. Context only; not same-person evidence."
     if relationship_type == "same_person_probability":
         score = sources.get("score")
         signals = sources.get("contributing_signals")

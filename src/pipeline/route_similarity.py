@@ -27,7 +27,7 @@ Signal: shared_route_origin
     reasoning as cross_platform_link — a strong personal tie should not come
     from a place hundreds of people start runs from.
   - target_record_id convention: the other entity's UUID as text, consistent
-    with content_similarity, temporal_copost, email_match, etc. This lets
+    with content_similarity, email_match, group_cooccurrence, etc. This lets
     relationship_intelligence.py promote the signal into the strong
     `shared_home_or_gym` entity_relationships edge.
 

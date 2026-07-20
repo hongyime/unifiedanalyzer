@@ -466,9 +466,9 @@ async def _detect_coordinated_posting() -> int:
 
             await conn.execute("""
                 INSERT INTO alerts (entity_id, alert_type, severity, title, detail)
-                VALUES ($1::uuid, 'COORDINATED_POSTING', 'warning', $2, $3)
+                VALUES ($1::uuid, 'COORDINATED_POSTING', 'info', $2, $3)
             """, a_id,
-                f"Coordinated cross-platform posting: {name_a} <-> {name_b} ({occurrences} occurrences)",
+                f"Repeated posting-time overlap: {name_a} <-> {name_b} ({occurrences} occurrences)",
                 json.dumps({
                     "entity_a_id": a_id,
                     "entity_b_id": b_id,
@@ -477,6 +477,8 @@ async def _detect_coordinated_posting() -> int:
                     "occurrences": occurrences,
                     "window_minutes": _env_int("COORDINATED_POSTING_WINDOW_MINUTES", 10),
                     "lookback_days": lookback_days,
+                    "context_only": True,
+                    "not_identity_evidence": True,
                 }))
             count += 1
 

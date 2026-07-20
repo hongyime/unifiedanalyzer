@@ -10,9 +10,24 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { InfoTip } from '../components/ui/InfoTip'
 import { LABELS } from '../lib/labels'
 
+const RELATIONSHIP_LABELS: Record<string, string> = {
+  temporal_copost: 'activity overlap',
+  temporal_hour_similarity: 'similar active hours',
+  co_presence: 'tight co-presence',
+  co_absence: 'quiet together',
+  telegram_group_co_member: 'same Telegram group',
+  whatsapp_group_co_member: 'same WhatsApp group',
+  social_graph_overlap: 'shared network',
+  same_person_probability: 'possible same person',
+}
+
+function relationshipLabel(type: string) {
+  return RELATIONSHIP_LABELS[type] ?? type.replace(/_/g, ' ')
+}
+
 /**
  * Communities — clusters of people the graph engine has grouped together
- * (shared WhatsApp rooms, mutual connections, coordinated posting). Each is
+ * (shared WhatsApp rooms, mutual connections, repeated activity overlap). Each is
  * rendered as a Card with the members as chip-links.
  *
  * The API surface (`api.getCommunities`) is unchanged.
@@ -41,11 +56,11 @@ export default function CommunitiesPage() {
     <div>
       <PageHeader
         title="Communities"
-        description="Clusters of people who interact — shared group chats, mutual connections, or coordinated activity. Each is a group that tends to move together."
+        description="Clusters of people who interact — shared group chats, mutual connections, or repeated activity overlap. Timing overlap is context, not identity evidence."
         actions={
           <span className="inline-flex items-center gap-1 text-sm text-text-muted">
             {communities.length} communities
-            <InfoTip text="A community is a tightly-connected group of people the graph engine has clustered. Membership is inferred from shared chats, mutual links, or synchronised behaviour." />
+            <InfoTip text="A community is a tightly-connected group of people the graph engine has clustered. Membership is inferred from shared chats, mutual links, or repeated timing patterns; timing alone does not mean two accounts are the same person." />
           </span>
         }
       />
@@ -76,7 +91,7 @@ export default function CommunitiesPage() {
                 <Card>
                   <div className="text-xs text-text-muted">Top relationship type</div>
                   <div className="mt-1 text-sm font-semibold">
-                    {Object.entries(overview.relationship_type_counts)[0]?.[0] || '—'}
+                    {relationshipLabel(Object.entries(overview.relationship_type_counts)[0]?.[0] || '—')}
                   </div>
                   <div className="text-xs text-text-muted">
                     {Object.entries(overview.relationship_type_counts)[0]?.[1]?.toLocaleString() || 0} edges
@@ -125,7 +140,7 @@ export default function CommunitiesPage() {
                             <Link to={`/entities/${edge.entity_b.id}`}>{edge.entity_b.name || edge.entity_b.id.slice(0, 8)}</Link>
                           </div>
                           <div className="text-xs text-text-muted">
-                            {edge.type} · {edge.weight}
+                            {relationshipLabel(edge.type)} · {edge.weight}
                           </div>
                         </div>
                         {edge.why && <div className="mt-1 text-xs text-text-muted">{edge.why}</div>}

@@ -27,8 +27,9 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# Stable feature order — MUST match the scorer's _TYPE_WEIGHT keys. New signal
-# types: append here (retrain after) so existing models keep working.
+# Stable feature order for CSV/model compatibility. New signal types append here
+# (retrain after) so existing persisted feature snapshots keep their positions.
+# Deprecated non-identity slots remain present but are forced to 0.0 below.
 FEATURE_ORDER = [
     "email_match", "phone_match", "bio_mention", "cross_platform_link",
     "content_similarity", "temporal_copost", "shared_website",
@@ -54,6 +55,12 @@ FEATURE_ORDER = [
     "social_face_link",
 ]
 
+# Timing overlap is useful context, but not evidence that two accounts are the
+# same person. Keep the historical feature slot so old labels/models keep the
+# same shape, but never feed a non-zero value to training or inference.
+DEPRECATED_NON_IDENTITY_FEATURES: frozenset[str] = frozenset({"temporal_copost"})
+ACTIVE_FEATURE_ORDER = [t for t in FEATURE_ORDER if t not in DEPRECATED_NON_IDENTITY_FEATURES]
+
 _MODEL_PATH = os.getenv(
     "IDENTITY_MODEL_PATH",
     os.path.join(os.getenv("MEDIA_DERIVED_PATH", "/app/media_derived"),
@@ -69,9 +76,17 @@ def pair_feature_vector(contributions: list[tuple[str, float]]) -> list[float]:
     fixed-length feature vector (max confidence per signal type)."""
     by_type: dict[str, float] = {}
     for sig_type, conf in contributions:
+        if sig_type in DEPRECATED_NON_IDENTITY_FEATURES:
+            continue
         if conf > by_type.get(sig_type, 0.0):
             by_type[sig_type] = conf
     return [by_type.get(t, 0.0) for t in FEATURE_ORDER]
+
+
+def _feature_value(feats: dict, signal_type: str) -> float:
+    if signal_type in DEPRECATED_NON_IDENTITY_FEATURES:
+        return 0.0
+    return float(feats.get(signal_type, 0.0))
 
 
 def get_model():
@@ -125,7 +140,7 @@ async def _aggregate_pairs() -> list[dict]:
             sigs = await conn.fetch("""
                 SELECT entity_id::text, signal_type, target_platform, target_record_id, confidence
                 FROM identity_signals WHERE signal_type = ANY($1::text[])
-            """, FEATURE_ORDER)
+            """, ACTIVE_FEATURE_ORDER)
             links = await conn.fetch(
                 "SELECT entity_id::text, source, platform_id FROM entity_platform_links")
             names = await conn.fetch("SELECT id::text, canonical_name FROM entities")
@@ -204,7 +219,10 @@ def train_model(labeled_csv: str, model_out: str) -> dict:
             lab = (row.get("label") or "").strip()
             if lab not in ("0", "1"):
                 continue  # unlabeled — skip
-            X.append([float(row[t]) for t in FEATURE_ORDER])
+            X.append([
+                0.0 if t in DEPRECATED_NON_IDENTITY_FEATURES else float(row[t])
+                for t in FEATURE_ORDER
+            ])
             y.append(int(lab))
     return _fit_and_save(X, y, model_out)
 
@@ -234,7 +252,7 @@ async def snapshot_pair_features(conn, a: str, b: str) -> dict:
         WHERE signal_type = ANY($1::text[])
           AND ((entity_id = $2::uuid AND target_record_id = $3::text)
             OR (entity_id = $3::uuid AND target_record_id = $2::text))
-    """, FEATURE_ORDER, a, b)
+    """, ACTIVE_FEATURE_ORDER, a, b)
     d: dict[str, float] = {}
     for r in rows:
         c = float(r["confidence"] or 0.0)
@@ -270,7 +288,7 @@ def _rows_to_xy(rows) -> tuple[list[list[float]], list[int]]:
     X, y = [], []
     for r in rows:
         feats = _jsonload(r["features"])
-        base = [float(feats.get(t, 0.0)) for t in FEATURE_ORDER]
+        base = [_feature_value(feats, t) for t in FEATURE_ORDER]
         label = int(r["label"])
         source = (r["source"] if "source" in r.keys() else "") or ""
 
@@ -405,7 +423,7 @@ async def validate_calibration() -> dict:
     Xb, yb = [], []
     for r in rows:
         feats = _jsonload(r["features"])
-        Xb.append([float(feats.get(t, 0.0)) for t in FEATURE_ORDER])
+        Xb.append([_feature_value(feats, t) for t in FEATURE_ORDER])
         yb.append(int(r["label"]))
 
     lr_preds = np.zeros(len(rows))

@@ -39,16 +39,18 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def test_type_weight_matches_feature_order():
-    """Every _TYPE_WEIGHT key must appear in FEATURE_ORDER (else the calibrated
-    LR model has no feature slot for that signal) and vice versa."""
+    """Every active _TYPE_WEIGHT key must appear in FEATURE_ORDER. Historical
+    calibration slots may remain only when explicitly marked deprecated."""
     from src.pipeline.identity_scorer import _TYPE_WEIGHT
-    from src.pipeline.identity_calibration import FEATURE_ORDER
+    from src.pipeline.identity_calibration import DEPRECATED_NON_IDENTITY_FEATURES, FEATURE_ORDER
     weight_keys = set(_TYPE_WEIGHT.keys())
     feature_keys = set(FEATURE_ORDER)
-    assert weight_keys == feature_keys, (
-        f"Registry drift: in _TYPE_WEIGHT but not FEATURE_ORDER = "
-        f"{weight_keys - feature_keys}, "
-        f"in FEATURE_ORDER but not _TYPE_WEIGHT = {feature_keys - weight_keys}"
+    assert weight_keys <= feature_keys, (
+        f"Registry drift: in _TYPE_WEIGHT but not FEATURE_ORDER = {weight_keys - feature_keys}"
+    )
+    assert feature_keys - weight_keys == set(DEPRECATED_NON_IDENTITY_FEATURES), (
+        f"FEATURE_ORDER has inactive slots not marked deprecated = "
+        f"{feature_keys - weight_keys - set(DEPRECATED_NON_IDENTITY_FEATURES)}"
     )
 
 
@@ -76,6 +78,23 @@ def test_hard_signals_are_deterministic_only():
                  "username_similar", "bio_mention"}
     leaked = _HARD_SIGNALS & forbidden
     assert not leaked, f"Weak signals leaked into _HARD_SIGNALS: {leaked}"
+
+
+def test_temporal_copost_is_not_identity_evidence():
+    """Posting at the same time can be relationship context, but it must not
+    affect same-person scoring, auto-labeling, or model features."""
+    from src.pipeline.auto_labeler import _SCORING_SIGNALS
+    from src.pipeline.identity_calibration import (
+        DEPRECATED_NON_IDENTITY_FEATURES,
+        pair_feature_vector,
+    )
+    from src.pipeline.identity_scorer import _TYPE_WEIGHT
+
+    assert "temporal_copost" not in _TYPE_WEIGHT
+    assert "temporal_copost" not in _SCORING_SIGNALS
+    assert "temporal_copost" in DEPRECATED_NON_IDENTITY_FEATURES
+    features = pair_feature_vector([("temporal_copost", 0.99)])
+    assert max(features) == 0.0
 
 
 def test_track_c_signals_registered():

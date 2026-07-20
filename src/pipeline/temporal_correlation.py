@@ -5,9 +5,9 @@ Two-tier analysis:
   Tier 1 (fast): Rarity-weighted similarity of posting_hour_dist between
                  entities, GATED on real tight co-occurrence evidence.
                  Stored in entity_relationships as 'temporal_hour_similarity'.
-  Tier 2 (strong): Count of days where two entities BOTH post within a
-                   short window — potential same-person or coordination signal.
-                   Emitted as identity_signals (temporal_copost).
+  Tier 2 (context): Count of days where two entities BOTH post within a short
+                    window. This is coordination/context only, not same-person
+                    evidence, and is stored in entity_relationships.
 
 Filters out timeline_events with bogus 1970 timestamps.
 
@@ -77,7 +77,7 @@ _MIN_TIGHT_DAYS = int(os.getenv("TEMPORAL_MIN_TIGHT_DAYS", "2"))
 _COPOST_WINDOW_MIN = 60      # minutes: co-post window
 _COPOST_MIN_DAYS = 3         # minimum co-post days to flag
 _COPOST_MIN_EVENTS = 3       # minimum co-post coincidence events to consider
-_COPOST_CONFIDENCE = 0.70    # base confidence for temporal_copost signal
+_COPOST_CONFIDENCE = 0.70    # base confidence for temporal_copost relationship
 _COPRESENCE_WINDOW_SEC = 60  # sub-minute/one-minute tight co-presence window
 _COPRESENCE_MIN_EVENTS = 3
 _COPRESENCE_MIN_DAYS = 2
@@ -431,6 +431,9 @@ async def correlate_activity() -> dict:
                 "DELETE FROM entity_relationships WHERE relationship_type = 'temporal_hour_similarity'"
             )
             await conn.execute(
+                "DELETE FROM entity_relationships WHERE relationship_type = 'temporal_copost'"
+            )
+            await conn.execute(
                 "DELETE FROM entity_relationships WHERE relationship_type = 'co_presence'"
             )
             await conn.execute(
@@ -453,6 +456,31 @@ async def correlate_activity() -> dict:
                     "weighted_similarity": round(sim, 4),
                     "why": "Rarity-weighted posting-hour agreement, confirmed by "
                            "repeated statistically-improbable tight co-occurrences.",
+                }))
+
+            for eid_a, eid_b, days, k, pval, conf in copost_pairs:
+                a, b = (eid_a, eid_b) if eid_a < eid_b else (eid_b, eid_a)
+                weight = max(1, round(conf * 100) + min(30, k * 2 + days))
+                await conn.execute("""
+                    INSERT INTO entity_relationships
+                        (entity_a_id, entity_b_id, relationship_type, weight, cross_platform, sources)
+                    VALUES ($1::uuid, $2::uuid, 'temporal_copost', $3, true, $4::jsonb)
+                    ON CONFLICT (entity_a_id, entity_b_id, relationship_type)
+                    DO UPDATE SET
+                        weight = EXCLUDED.weight,
+                        cross_platform = EXCLUDED.cross_platform,
+                        sources = EXCLUDED.sources,
+                        last_seen_at = EXCLUDED.last_seen_at,
+                        updated_at = NOW()
+                """, a, b, weight, json.dumps({
+                    "window_minutes": _COPOST_WINDOW_MIN,
+                    "copost_days": days,
+                    "coincident_events": k,
+                    "p_value": float(f"{pval:.3e}"),
+                    "confidence": conf,
+                    "context_only": True,
+                    "not_identity_evidence": True,
+                    "why": "Repeated close posting windows. Context only; this does not mean the accounts are the same person.",
                 }))
 
             for eid_a, eid_b, days, k, pval, conf in copresence_pairs:
@@ -502,22 +530,11 @@ async def correlate_activity() -> dict:
                     "why": "Their active and quiet windows move together over time, including matched silence periods.",
                 }))
 
-            # Tier 2: store as identity signals (temporal_copost) — preserve across runs
+            # Historical cleanup: timing overlap is relationship/context only,
+            # not identity evidence. Remove old signal rows and do not reinsert.
             await conn.execute(
                 "DELETE FROM identity_signals WHERE signal_type = 'temporal_copost'"
             )
-            if copost_pairs:
-                signal_rows = [
-                    (eid_a, "temporal_copost", "timeline", None, None, None,
-                     "timeline", eid_b, f"copost_days:{days},events:{k},p:{pval:.2e}", conf)
-                    for eid_a, eid_b, days, k, pval, conf in copost_pairs
-                ]
-                await conn.executemany("""
-                    INSERT INTO identity_signals
-                        (entity_id, signal_type, source_platform, source_table, source_column,
-                         source_record_id, target_platform, target_record_id, value, confidence)
-                    VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                """, signal_rows)
 
     logger.info("Temporal correlation: %s", stats)
     return stats

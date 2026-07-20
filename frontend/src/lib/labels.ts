@@ -40,7 +40,7 @@ export const SIGNAL_LABELS: Record<string, string> = {
   // Content / behaviour.
   content_similarity: 'Similar writing style',
   topical_similarity: 'Talks about similar topics',
-  temporal_copost: 'Posts at the same times',
+  temporal_copost: 'Repeated timing overlap',
   group_cooccurrence: 'Members of the same groups',
   shared_route_origin: 'Starts activities from the same place',
 
@@ -70,8 +70,8 @@ export const ALERT_LABELS: Record<string, { name: string; meaning: string }> = {
     meaning: 'Posting resumed after a long quiet period.',
   },
   COORDINATED_POSTING: {
-    name: 'Posting in sync',
-    meaning: 'Two accounts repeatedly post within minutes of each other across platforms.',
+    name: 'Activity overlap',
+    meaning: 'Two accounts repeatedly post within minutes of each other. This is context only, not same-person evidence.',
   },
   NEW_IDENTITY_LINK: {
     name: 'Possible same person found',
@@ -189,8 +189,8 @@ export const GLOSSARY: { term: string; def: string }[] = [
     def: 'Alerts about someone’s posting rhythm — they stopped for longer than their normal gap, or started again after a long pause.',
   },
   {
-    term: 'Posting in sync',
-    def: 'Two accounts that repeatedly post within minutes of each other across different platforms — a hint they’re run by the same person.',
+    term: 'Activity overlap',
+    def: 'Two accounts that repeatedly post within minutes of each other. This may show shared timing or coordination, but it does not link them as the same person.',
   },
   {
     term: 'Run (incremental / full)',

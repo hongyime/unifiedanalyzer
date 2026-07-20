@@ -93,6 +93,21 @@ type Connection = {
   faceOnly?: SocialCircleEntry
 }
 
+const RELATIONSHIP_LABELS: Record<string, string> = {
+  temporal_copost: 'activity overlap',
+  temporal_hour_similarity: 'similar active hours',
+  co_presence: 'tight co-presence',
+  co_absence: 'quiet together',
+  telegram_group_co_member: 'same Telegram group',
+  whatsapp_group_co_member: 'same WhatsApp group',
+  social_graph_overlap: 'shared network',
+  same_person_probability: 'possible same person',
+}
+
+function relationshipLabel(type: string) {
+  return RELATIONSHIP_LABELS[type] ?? type.replace(/_/g, ' ')
+}
+
 function parseGroups(sources: unknown): string[] {
   // sources is a JSON string in the live API; be defensive either way.
   try {
@@ -400,7 +415,7 @@ function ConnectionRow({ c }: { c: Connection }) {
                 className="rounded-full bg-info/15 px-2 py-0.5 text-[0.7rem] font-medium text-info"
                 title={`weight ${r.weight}`}
               >
-                {r.type.replace(/_/g, ' ')}
+                {relationshipLabel(r.type)}
               </span>
             ))}
             {c.interaction && (
