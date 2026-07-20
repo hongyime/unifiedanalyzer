@@ -53,6 +53,11 @@ FEATURE_ORDER = [
     # so existing persisted feature vectors and trained models keep their
     # positions. Tolerates any additional appends by parallel subagents.
     "social_face_link",
+    # No-auto-merge resolver evidence (2026-07-20): deterministic signals that
+    # used to live inside auto-clustered entities are now emitted between two
+    # separate candidate entities for human review. Append-only.
+    "username_exact", "real_name_fuzzy", "whatsapp_phone", "commit_email",
+    "profile_photo_sha256",
 ]
 
 # Timing overlap is useful context, but not evidence that two accounts are the
@@ -148,7 +153,10 @@ async def _aggregate_pairs() -> list[dict]:
         if owns_pool:
             await close_pools()
 
-    pid_to_entity = {(l["source"], l["platform_id"]): l["entity_id"] for l in links}
+    pid_to_entity = {
+        (link["source"], link["platform_id"]): link["entity_id"]
+        for link in links
+    }
     name_of = {n["id"]: n["canonical_name"] for n in names}
 
     pairs: dict[tuple[str, str], list[tuple[str, float]]] = {}

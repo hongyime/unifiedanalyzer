@@ -54,6 +54,7 @@ class SignalMatch:
 class EntityCandidate:
     profiles: list[PlatformProfile] = field(default_factory=list)
     signals: list[SignalMatch] = field(default_factory=list)
+    merge_policy_key: tuple[str, ...] | None = None
 
 
 DEFAULT_USERNAME_RE = re.compile(r"^user\d*$", re.IGNORECASE)
@@ -392,6 +393,17 @@ VERIFIED_SIGNAL_TYPES = {
     "whatsapp_phone", "commit_email", "email_match", "phone_match", "profile_photo_sha256",
 }
 
+_CROSS_ENTITY_SIGNAL_CONFIDENCE = {
+    "username_exact": 0.95,
+    "whatsapp_phone": 0.98,
+    "commit_email": 0.98,
+    "email_match": 0.98,
+    "phone_match": 0.98,
+    "profile_photo_sha256": 0.95,
+    "media_face_match": 0.90,
+    "real_name_fuzzy": 0.65,
+}
+
 
 def compute_confidence(signals: list[SignalMatch]) -> tuple[float, int, bool]:
     """Return (normalized_confidence, independent_strong_count, is_confirmed).
@@ -414,6 +426,78 @@ def compute_confidence(signals: list[SignalMatch]) -> tuple[float, int, bool]:
     normalized = min(score / max_possible, 1.0) if max_possible > 0 else 0.0
     is_confirmed = len(strong_types) >= 1
     return normalized, len(strong_types), is_confirmed
+
+
+def _policy_group_key(
+    profile: PlatformProfile,
+    existing_links: dict[tuple[str, str], object],
+) -> tuple[str, ...]:
+    entity_id = existing_links.get((profile.source, profile.platform_id))
+    if entity_id:
+        return ("existing", str(entity_id))
+    return ("new", profile.source, profile.platform_id)
+
+
+def _cross_entity_confidence(signal: SignalMatch) -> float:
+    if signal.signal_type in _CROSS_ENTITY_SIGNAL_CONFIDENCE:
+        return _CROSS_ENTITY_SIGNAL_CONFIDENCE[signal.signal_type]
+    try:
+        raw = float(signal.confidence)
+    except (TypeError, ValueError):
+        return 0.55
+    if raw > 1:
+        raw = raw / 100.0
+    return min(max(raw, 0.0), 1.0)
+
+
+def _apply_no_auto_merge_policy(
+    candidates: list[EntityCandidate],
+    existing_links: dict[tuple[str, str], object],
+) -> tuple[list[EntityCandidate], list[tuple[tuple[str, ...], tuple[str, ...], SignalMatch]], dict[str, int]]:
+    """Split resolver clusters into persistence units without creating merges.
+
+    Existing entity groups stay intact, because they reflect prior persisted
+    state or human decisions. Newly discovered accounts become singleton
+    entities. Evidence that would have joined two groups is emitted later as a
+    cross-entity signal so Review can rank it without silently merging people.
+    """
+    split_candidates: list[EntityCandidate] = []
+    cross_signals: list[tuple[tuple[str, ...], tuple[str, ...], SignalMatch]] = []
+    stats = {"auto_merge_candidates_split": 0, "cross_entity_signals": 0}
+
+    for candidate in candidates:
+        if not candidate.profiles:
+            continue
+        groups: dict[tuple[str, ...], list[PlatformProfile]] = {}
+        profile_groups: dict[tuple[str, str], tuple[str, ...]] = {}
+        for profile in candidate.profiles:
+            key = _policy_group_key(profile, existing_links)
+            groups.setdefault(key, []).append(profile)
+            profile_groups[(profile.source, profile.platform_id)] = key
+
+        if len(groups) > 1:
+            stats["auto_merge_candidates_split"] += 1
+
+        intra_signals: dict[tuple[str, ...], list[SignalMatch]] = {
+            key: [] for key in groups
+        }
+        for signal in candidate.signals:
+            source_key = profile_groups.get((signal.source_platform, signal.source_record_id))
+            target_key = profile_groups.get((signal.target_platform, signal.target_record_id))
+            if source_key and target_key and source_key == target_key:
+                intra_signals[source_key].append(signal)
+            elif source_key and target_key:
+                cross_signals.append((source_key, target_key, signal))
+
+        for key, profiles in groups.items():
+            split_candidates.append(EntityCandidate(
+                profiles=profiles,
+                signals=intra_signals.get(key, []),
+                merge_policy_key=key,
+            ))
+
+    stats["cross_entity_signals"] = len(cross_signals)
+    return split_candidates, cross_signals, stats
 
 
 async def resolve_entities() -> dict:
@@ -778,6 +862,13 @@ async def resolve_entities() -> dict:
         ):
             existing_links[(row["source"], row["platform_id"])] = row["entity_id"]
 
+        entities, pending_cross_signals, no_auto_stats = _apply_no_auto_merge_policy(
+            entities, existing_links,
+        )
+        stats.update({k: v for k, v in no_auto_stats.items() if v})
+        if no_auto_stats["auto_merge_candidates_split"]:
+            logger.info("No-auto-merge policy: %s", no_auto_stats)
+
         # Pre-compute all entity attributes and assign IDs in Python
         resolved: list[tuple] = []
         seen_entity_ids: set = set()
@@ -949,6 +1040,26 @@ async def resolve_entities() -> dict:
                     eid, s.signal_type, s.source_platform, s.source_record_id,
                     s.target_platform, s.target_record_id, s.value, s.confidence,
                 ))
+        policy_entity_ids = {
+            candidate.merge_policy_key: str(eid)
+            for candidate, eid, *_ in resolved
+            if candidate.merge_policy_key is not None
+        }
+        for source_key, target_key, signal in pending_cross_signals:
+            source_entity_id = policy_entity_ids.get(source_key)
+            target_entity_id = policy_entity_ids.get(target_key)
+            if not source_entity_id or not target_entity_id or source_entity_id == target_entity_id:
+                continue
+            signal_rows.append((
+                source_entity_id,
+                signal.signal_type,
+                signal.source_platform,
+                signal.source_record_id,
+                "entity",
+                target_entity_id,
+                signal.value,
+                _cross_entity_confidence(signal),
+            ))
         if signal_rows:
             await conn.executemany("""
                 INSERT INTO identity_signals

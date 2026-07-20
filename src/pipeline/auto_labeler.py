@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 # Signals where a SINGLE fire is close to same-person ground truth (still
 # require corroboration to avoid feature-leak in LR training).
 _HARD_SIGNALS: frozenset[str] = frozenset({
+    "username_exact", "whatsapp_phone", "commit_email", "profile_photo_sha256",
     "phone_match", "email_match",
     "cross_platform_link", "shared_website",
     "media_face_match", "media_perceptual_match",
@@ -58,6 +59,8 @@ _HARD_SIGNALS: frozenset[str] = frozenset({
 # Historical calibration slots can exist in FEATURE_ORDER without being active
 # same-person evidence.
 _SCORING_SIGNALS: frozenset[str] = frozenset({
+    "username_exact", "real_name_fuzzy", "whatsapp_phone", "commit_email",
+    "profile_photo_sha256",
     "email_match", "phone_match", "bio_mention", "cross_platform_link",
     "content_similarity", "shared_website",
     "shared_route_origin", "group_cooccurrence", "media_gps_colocation",

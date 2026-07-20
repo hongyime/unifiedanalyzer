@@ -30,23 +30,16 @@ from src.pipeline.identity_calibration import pair_feature_vector, get_model, pr
 
 logger = logging.getLogger(__name__)
 
-# P1-1 (identity_system_review_plan.md): these are BETWEEN-entity association
-# weights. The resolver's deterministic signals (username_exact, real_name_fuzzy,
-# whatsapp_phone, commit_email, profile_photo_sha256) are deliberately NOT listed
-# here, and must not be naively added: they are stored INTRA-entity (both
-# endpoints resolve to the same entity, and their target_record_id is a
-# platform_id, not an entity UUID). The scorer keys pairs on target_record_id and
-# casts entity_b to ::uuid, so pulling those rows in would either self-cancel
-# (tgt_eid == src_eid, skipped) or crash the insert. Genuinely unifying the two
-# identity heads requires computing deterministic overlap BETWEEN candidate entity
-# pairs (do entity_a and entity_b share a normalized username / distinctive full
-# name / phone / commit email / profile-photo hash?) and emitting those as
-# cross-entity signals — i.e. the candidate-generation work staged under P2. Until
-# then the resolver stays the authoritative merge head and this stays the advisory
-# association head; real_name_fuzzy is demoted at the source in entity_resolver
-# (name_is_distinctive + stricter name-only threshold).
-# TODO(P1-1/P2): emit cross-entity deterministic signals + add demoted weights here.
+# Resolver deterministic signals are now emitted BETWEEN entities when the
+# no-auto-merge policy splits an unconfirmed candidate cluster. Older intra-entity
+# rows may still exist during a rebuild; those self-cancel or fail the UUID check
+# below, so only UUID-targeted rows affect Review.
 _TYPE_WEIGHT = {
+    "username_exact": 0.70,
+    "real_name_fuzzy": 0.20,
+    "whatsapp_phone": 0.70,
+    "commit_email": 0.70,
+    "profile_photo_sha256": 0.65,
     "email_match": 0.60,
     "phone_match": 0.60,
     "bio_mention": 0.40,
