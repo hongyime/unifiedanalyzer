@@ -25,12 +25,26 @@ import hashlib
 import json
 import logging
 import os
-from typing import Iterable
+from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
 DECISION_LOG_DIR = Path(os.getenv("ANALYZER_DECISION_LOG_DIR", "Z:/unifiedanalyzer/decisions"))
+DECISION_EVENT_SCHEMA_VERSION = 1
+_DECISION_EVENT_FIELDS = {
+    "schema_version",
+    "audit_id",
+    "event_type",
+    "actor",
+    "entity_ids",
+    "payload",
+    "created_at",
+    "prev_sha256",
+    "sha256",
+    "idempotency_key",
+}
 
 
 def _canonical_json(obj) -> str:
@@ -51,6 +65,64 @@ def _append_jsonl(path: Path, event: dict) -> None:
         os.fsync(f.fileno())
 
 
+def _is_sha256_hex(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def _validate_decision_event(event: dict) -> None:
+    missing = _DECISION_EVENT_FIELDS - event.keys()
+    if missing:
+        raise ValueError(f"decision event missing fields: {sorted(missing)}")
+
+    unexpected = event.keys() - _DECISION_EVENT_FIELDS
+    if unexpected:
+        raise ValueError(f"decision event has unexpected fields: {sorted(unexpected)}")
+
+    if event["schema_version"] != DECISION_EVENT_SCHEMA_VERSION:
+        raise ValueError("decision event schema_version must be 1")
+
+    audit_id = event["audit_id"]
+    if isinstance(audit_id, bool) or not isinstance(audit_id, int) or audit_id <= 0:
+        raise ValueError("decision event audit_id must be a positive integer")
+
+    event_type = event["event_type"]
+    if not isinstance(event_type, str) or not event_type:
+        raise ValueError("decision event event_type must be a non-empty string")
+
+    actor = event["actor"]
+    if actor is not None and not isinstance(actor, str):
+        raise ValueError("decision event actor must be a string or null")
+
+    entity_ids = event["entity_ids"]
+    if not isinstance(entity_ids, list) or not all(isinstance(x, str) and x for x in entity_ids):
+        raise ValueError("decision event entity_ids must be a list of non-empty strings")
+
+    if not isinstance(event["payload"], dict):
+        raise ValueError("decision event payload must be an object")
+
+    created_at = event["created_at"]
+    if not isinstance(created_at, str):
+        raise ValueError("decision event created_at must be an ISO timestamp string")
+    try:
+        datetime.fromisoformat(created_at)
+    except ValueError as exc:
+        raise ValueError("decision event created_at must be an ISO timestamp string") from exc
+
+    prev_sha256 = event["prev_sha256"]
+    if prev_sha256 is not None and not _is_sha256_hex(prev_sha256):
+        raise ValueError("decision event prev_sha256 must be null or a sha256 hex string")
+
+    if not _is_sha256_hex(event["sha256"]):
+        raise ValueError("decision event sha256 must be a sha256 hex string")
+
+    if not _is_sha256_hex(event["idempotency_key"]):
+        raise ValueError("decision event idempotency_key must be a sha256 hex string")
+
+
 def _decision_log_path(created_at) -> Path:
     return DECISION_LOG_DIR / f"{created_at:%Y-%m}.jsonl"
 
@@ -60,7 +132,7 @@ def _write_decision_event(*, audit_id: int, prev_sha256: str | None,
                           entity_ids: list[str] | None, payload: dict,
                           created_at) -> None:
     event = {
-        "schema_version": 1,
+        "schema_version": DECISION_EVENT_SCHEMA_VERSION,
         "audit_id": audit_id,
         "event_type": action,
         "actor": actor,
@@ -79,6 +151,7 @@ def _write_decision_event(*, audit_id: int, prev_sha256: str | None,
             }).encode("utf-8")
         ).hexdigest(),
     }
+    _validate_decision_event(event)
     _append_jsonl(_decision_log_path(created_at), event)
 
 
