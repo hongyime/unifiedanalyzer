@@ -17,6 +17,7 @@ wrote (result_json->>'derived_path'); resolve_media_path() enforces the same
 path-confinement safety the collector dashboard uses.
 """
 import asyncio
+import html
 import io
 import json
 import logging
@@ -34,6 +35,24 @@ router = APIRouter(tags=["media"])
 # Cap thumbnail dimension. 256px keeps the gallery light over the wire while
 # staying crisp on hi-dpi grid tiles.
 _THUMB_MAX = 256
+
+
+def _thumbnail_placeholder(label: str, detail: str = "") -> Response:
+    safe_label = html.escape((label or "media").upper()[:24])
+    safe_detail = html.escape((detail or "preview unavailable")[:64])
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="{safe_label}">
+<rect width="256" height="256" fill="#111111"/>
+<rect x="16" y="16" width="224" height="224" rx="8" fill="#1f2937" stroke="#374151" stroke-width="2"/>
+<circle cx="128" cy="104" r="28" fill="#4b5563"/>
+<path d="M122 88 L146 104 L122 120 Z" fill="#e5e7eb"/>
+<text x="128" y="164" text-anchor="middle" fill="#f9fafb" font-family="Arial, sans-serif" font-size="20" font-weight="700">{safe_label}</text>
+<text x="128" y="190" text-anchor="middle" fill="#9ca3af" font-family="Arial, sans-serif" font-size="12">{safe_detail}</text>
+</svg>"""
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
 def _parse_pg_array_text(raw: str | None) -> list[str]:
@@ -312,7 +331,7 @@ async def _resolve_thumbnail_path(analysis_id: str):
             analysis_id,
         )
         if not row:
-            return None
+            raise HTTPException(404, "Media analysis row not found")
 
         # Case 1: own derived_path.
         derived = _derived_path_from_json(row["result_json"])
@@ -418,14 +437,14 @@ def _render_thumbnail(path: Path) -> bytes | None:
 async def media_thumbnail(analysis_id: str):
     path = await _resolve_thumbnail_path(analysis_id)
     if path is None:
-        raise HTTPException(404, "No thumbnail available")
+        return _thumbnail_placeholder("media", "no thumbnail")
 
     # Pillow decode/encode is CPU-bound and blocking; offload to a thread so a
     # large image (or a slow network-mounted collector file) doesn't stall the
     # event loop — which also serves /ws/health and every other request.
     data = await asyncio.to_thread(_render_thumbnail, path)
     if data is None:
-        raise HTTPException(404, "Cannot render thumbnail")
+        return _thumbnail_placeholder(path.suffix.lstrip(".") or "media", "cannot render")
 
     return Response(
         content=data,
