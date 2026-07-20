@@ -202,6 +202,28 @@ def _write_decision_event(*, audit_id: int, prev_sha256: str | None,
     return path
 
 
+def _jsonl_contains_event(path: Path, *, audit_id: int, idempotency_key: str | None) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                if event.get("audit_id") == audit_id:
+                    return True
+                if idempotency_key and event.get("idempotency_key") == idempotency_key:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def _hash(prev_sha256: str | None, action: str, actor: str | None,
           entity_ids: list[str] | None, payload: dict, created_at_iso: str) -> str:
     """SHA-256 over the canonical serialization of the row plus the previous
@@ -353,7 +375,7 @@ async def retry_pending_decision_jsonl(conn, *, limit: int = 100) -> dict[str, i
         """,
         limit,
     )
-    stats = {"pending": len(rows), "written": 0, "failed": 0}
+    stats = {"pending": len(rows), "already_present": 0, "written": 0, "failed": 0}
     for row in rows:
         audit_id = int(row["id"])
         entity_id_list = [str(x) for x in (_row_value(row, "entity_ids") or [])] or None
@@ -361,7 +383,7 @@ async def retry_pending_decision_jsonl(conn, *, limit: int = 100) -> dict[str, i
         if isinstance(payload, str):
             payload = json.loads(payload)
         try:
-            path = _write_decision_event(
+            event = _decision_event(
                 audit_id=audit_id,
                 prev_sha256=_row_value(row, "prev_sha256"),
                 sha256=_row_value(row, "sha256"),
@@ -372,6 +394,16 @@ async def retry_pending_decision_jsonl(conn, *, limit: int = 100) -> dict[str, i
                 created_at=_row_value(row, "created_at"),
                 idempotency_key=_row_value(row, "idempotency_key"),
             )
+            path = _decision_log_path(_row_value(row, "created_at"))
+            if _jsonl_contains_event(
+                path,
+                audit_id=audit_id,
+                idempotency_key=event["idempotency_key"],
+            ):
+                await _mark_decision_jsonl_written(conn, audit_id, path)
+                stats["already_present"] += 1
+                continue
+            _append_jsonl(path, event)
             await _mark_decision_jsonl_written(conn, audit_id, path)
             stats["written"] += 1
         except Exception as exc:

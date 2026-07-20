@@ -156,8 +156,57 @@ def test_retry_pending_decision_jsonl_writes_and_clears_error(tmp_path, monkeypa
     conn = Conn()
     stats = asyncio.run(audit_log.retry_pending_decision_jsonl(conn))
 
-    assert stats == {"pending": 1, "written": 1, "failed": 0}
+    assert stats == {"pending": 1, "already_present": 0, "written": 1, "failed": 0}
     event = json.loads((tmp_path / "2026-07.jsonl").read_text(encoding="utf-8"))
     assert event["audit_id"] == 44
     assert event["idempotency_key"] == idem
+    assert any("decision_jsonl_written_at = NOW()" in sql for sql, _ in conn.executed)
+
+
+def test_retry_pending_decision_jsonl_marks_existing_event_without_duplicate(tmp_path, monkeypatch):
+    import src.util.audit_log as audit_log
+
+    monkeypatch.setattr(audit_log, "DECISION_LOG_DIR", tmp_path)
+    now = datetime(2026, 7, 20, 2, 0, 0, 123456, tzinfo=timezone.utc)
+    existing = {
+        "schema_version": 1,
+        "audit_id": 45,
+        "event_type": "add_note",
+        "actor": "dashboard",
+        "entity_ids": ["00000000-0000-0000-0000-000000000001"],
+        "payload": {"notes": "keep"},
+        "created_at": now.isoformat(timespec="microseconds"),
+        "prev_sha256": None,
+        "sha256": "c" * 64,
+        "idempotency_key": "d" * 64,
+    }
+    path = tmp_path / "2026-07.jsonl"
+    path.write_text(json.dumps(existing) + "\n", encoding="utf-8")
+
+    class Conn:
+        def __init__(self):
+            self.executed = []
+
+        async def fetch(self, sql, *args):
+            return [{
+                "id": 45,
+                "prev_sha256": None,
+                "sha256": "c" * 64,
+                "action": "add_note",
+                "actor": "dashboard",
+                "entity_ids": ["00000000-0000-0000-0000-000000000001"],
+                "payload": {"notes": "keep"},
+                "created_at": now,
+                "idempotency_key": "d" * 64,
+            }]
+
+        async def execute(self, sql, *args):
+            self.executed.append((sql, args))
+            return "UPDATE 1"
+
+    conn = Conn()
+    stats = asyncio.run(audit_log.retry_pending_decision_jsonl(conn))
+
+    assert stats == {"pending": 1, "already_present": 1, "written": 0, "failed": 0}
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
     assert any("decision_jsonl_written_at = NOW()" in sql for sql, _ in conn.executed)

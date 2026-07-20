@@ -67,6 +67,9 @@ def main():
                         help="Exit non-zero if replay finds unresolved, ambiguous, or invalid events")
     replay.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     replay.add_argument("--limit", type=int, default=None, help="Limit decision events scanned")
+    outbox = sub.add_parser("decision-outbox", help="Retry pending audit_log -> decision JSONL writes")
+    outbox.add_argument("--limit", type=int, default=100, help="Maximum pending rows to retry")
+    outbox.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     priority_hints = sub.add_parser(
         "priority-hints",
         help="Preview or write analyzer-owned collector priority hints",
@@ -273,6 +276,31 @@ def main():
         except BackupRequiredError as exc:
             logger.error("%s", exc)
             sys.exit(2)
+
+    elif args.command == "decision-outbox":
+        from src.db.connection import init_pools, close_pools, get_analyzer_pool
+        from src.util.audit_log import retry_pending_decision_jsonl
+
+        async def _run():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                pool = get_analyzer_pool()
+                async with pool.acquire() as conn:
+                    stats = await retry_pending_decision_jsonl(conn, limit=args.limit)
+                if args.json:
+                    print(json.dumps(stats, indent=2, sort_keys=True))
+                else:
+                    print(
+                        "Decision JSONL outbox: "
+                        f"{stats['pending']} pending, "
+                        f"{stats['already_present']} already present, "
+                        f"{stats['written']} written, "
+                        f"{stats['failed']} failed"
+                    )
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
 
     elif args.command == "priority-hints":
         from src.db.connection import init_pools, close_pools, get_analyzer_pool
