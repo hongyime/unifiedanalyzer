@@ -225,17 +225,30 @@ async def _build_status() -> dict:
         ]
         failed_counts = await conn.fetchrow(
             """
+            WITH failed AS (
+                SELECT f.id, f.run_type, f.finished_at, f.error_message,
+                       COALESCE(f.error_message, '') ILIKE ANY($2::text[]) AS operational,
+                       EXISTS (
+                           SELECT 1
+                           FROM analysis_runs s
+                           WHERE s.status = 'completed'
+                             AND s.run_type = f.run_type
+                             AND s.finished_at > f.finished_at
+                       ) AS recovered
+                FROM analysis_runs f
+                WHERE f.status = 'failed'
+                  AND f.finished_at > NOW() - INTERVAL '24 hours'
+                  AND f.run_type = ANY($1::text[])
+            )
             SELECT
                 COUNT(*) FILTER (
-                    WHERE NOT (COALESCE(error_message, '') ILIKE ANY($2::text[]))
+                    WHERE NOT operational AND NOT recovered
                 )::int AS actionable,
                 COUNT(*) FILTER (
-                    WHERE COALESCE(error_message, '') ILIKE ANY($2::text[])
-                )::int AS operational
-            FROM analysis_runs
-            WHERE status = 'failed'
-              AND finished_at > NOW() - INTERVAL '24 hours'
-              AND run_type = ANY($1::text[])
+                    WHERE NOT operational AND recovered
+                )::int AS recovered,
+                COUNT(*) FILTER (WHERE operational)::int AS operational
+            FROM failed
             """,
             production_run_types(),
             operational_failure_patterns,
@@ -243,12 +256,40 @@ async def _build_status() -> dict:
         recent_failed = await conn.fetch(
             """
             SELECT run_type, finished_at, LEFT(COALESCE(error_message, 'no error captured'), 240) AS error_message
-            FROM analysis_runs
-            WHERE status = 'failed'
-              AND finished_at > NOW() - INTERVAL '24 hours'
-              AND run_type = ANY($1::text[])
-              AND NOT (COALESCE(error_message, '') ILIKE ANY($2::text[]))
+            FROM analysis_runs f
+            WHERE f.status = 'failed'
+              AND f.finished_at > NOW() - INTERVAL '24 hours'
+              AND f.run_type = ANY($1::text[])
+              AND NOT (COALESCE(f.error_message, '') ILIKE ANY($2::text[]))
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM analysis_runs s
+                  WHERE s.status = 'completed'
+                    AND s.run_type = f.run_type
+                    AND s.finished_at > f.finished_at
+              )
             ORDER BY finished_at DESC
+            LIMIT 3
+            """,
+            production_run_types(),
+            operational_failure_patterns,
+        )
+        recovered_failed = await conn.fetch(
+            """
+            SELECT f.run_type, f.finished_at,
+                   MIN(s.finished_at) AS recovered_at,
+                   LEFT(COALESCE(f.error_message, 'no error captured'), 160) AS error_message
+            FROM analysis_runs f
+            JOIN analysis_runs s
+              ON s.status = 'completed'
+             AND s.run_type = f.run_type
+             AND s.finished_at > f.finished_at
+            WHERE f.status = 'failed'
+              AND f.finished_at > NOW() - INTERVAL '24 hours'
+              AND f.run_type = ANY($1::text[])
+              AND NOT (COALESCE(f.error_message, '') ILIKE ANY($2::text[]))
+            GROUP BY f.run_type, f.finished_at, f.error_message
+            ORDER BY f.finished_at DESC
             LIMIT 3
             """,
             production_run_types(),
@@ -283,8 +324,10 @@ async def _build_status() -> dict:
         "unread": unread or 0,
         "run_state": run_state,
         "failed_runs_24h": (failed_counts["actionable"] if failed_counts else 0) or 0,
+        "recovered_failed_runs_24h": (failed_counts["recovered"] if failed_counts else 0) or 0,
         "interrupted_runs_24h": (failed_counts["operational"] if failed_counts else 0) or 0,
         "recent_failed_runs": [dict(r) for r in recent_failed],
+        "recent_recovered_failed_runs": [dict(r) for r in recovered_failed],
         "failing_phases": failing_phases,
         "collectors_down": [i["source"] for i in issues],
     }

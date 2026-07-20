@@ -144,15 +144,16 @@ async def notify_status(s: dict):
     when nothing eventful happened. Built by scheduler._build_status.
     """
     url = telegram.get_dashboard_url()
-    actionable_failures = int(s.get("failed_runs_24h", 0) or 0)
+    unrecovered_failures = int(s.get("failed_runs_24h", 0) or 0)
+    recovered_failures = int(s.get("recovered_failed_runs_24h", 0) or 0)
     interrupted_runs = int(s.get("interrupted_runs_24h", 0) or 0)
 
-    # Warn-icon the header if anything is actually wrong: DB down, an actionable
-    # production run failed in the last 24h, or a pipeline phase is failing.
-    # Scheduler restart/stale-lock cleanup rows are reported separately below.
+    # Warn-icon the header only for current/actionable breakage: DB down, an
+    # unrecovered production failure, or a pipeline phase whose latest status
+    # failed. Recovered failures and restart cleanup rows stay visible below.
     healthy = (
         s.get("db_ok")
-        and not actionable_failures
+        and not unrecovered_failures
         and not s.get("failing_phases")
     )
     icon = "✅" if healthy else "⚠️"
@@ -184,9 +185,9 @@ async def notify_status(s: dict):
     else:
         lines.append("Current state: unknown; scheduler has not reported a run state yet.")
 
-    if actionable_failures:
+    if unrecovered_failures:
         lines.append(
-            f"Actionable failed production runs in the last 24h: {actionable_failures}."
+            f"Unrecovered failed production runs in the last 24h: {unrecovered_failures}."
         )
         for failure in (s.get("recent_failed_runs") or [])[:3]:
             finished_at = failure.get("finished_at")
@@ -198,7 +199,23 @@ async def notify_status(s: dict):
             error = str(failure.get("error_message") or "no error captured").replace("\n", " ")
             lines.append(f"• {_esc(run_type)} at {_esc(when)}: <code>{_esc(error[:240])}</code>")
     else:
-        lines.append("Actionable failed production runs in the last 24h: 0.")
+        lines.append("Unrecovered failed production runs in the last 24h: 0.")
+
+    if recovered_failures:
+        lines.append(
+            f"Recovered production failures still in the 24h audit window: {recovered_failures}."
+        )
+        for failure in (s.get("recent_recovered_failed_runs") or [])[:2]:
+            failed_at = failure.get("finished_at")
+            recovered_at = failure.get("recovered_at")
+            failed_when = failed_at.strftime("%Y-%m-%d %H:%M UTC") if hasattr(failed_at, "strftime") else str(failed_at or "unknown time")
+            recovered_when = recovered_at.strftime("%Y-%m-%d %H:%M UTC") if hasattr(recovered_at, "strftime") else str(recovered_at or "unknown time")
+            run_type = str(failure.get("run_type") or "unknown run").replace("_", " ")
+            error = str(failure.get("error_message") or "no error captured").replace("\n", " ")
+            lines.append(
+                f"• {_esc(run_type)} failed at {_esc(failed_when)}, "
+                f"then recovered at {_esc(recovered_when)}: <code>{_esc(error[:160])}</code>"
+            )
 
     if interrupted_runs:
         lines.append(
