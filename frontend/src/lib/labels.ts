@@ -8,8 +8,8 @@
  * ─────────
  * • `LABELS.signalType[key]`  — friendly name for an identity-signal type
  * • `LABELS.alertType[key]`   — friendly name for an alert type (just the name)
- * • `LABELS.tier[key]`        — 'Confirmed' / 'Unconfirmed' for entity tier
- * • `LABELS.confidence(score)`— {word, pct, tone} for a 0..1 same-person score
+ * • `LABELS.tier[key]`        — friendly name for entity tier
+ * • `LABELS.confidence(score)`— {word, pct, tone} for a 0..1 same-person probability
  *
  * The legacy helper exports (`signalLabel`, `alertLabel`, `alertMeaning`,
  * `tierLabel`, `confidenceWords`) are preserved so existing pages keep working
@@ -19,7 +19,7 @@
 // ── Signals ("evidence") ────────────────────────────────────────────────────
 export const SIGNAL_LABELS: Record<string, string> = {
   // The composite score itself (surfaces in metrics + tooltips, not a raw signal).
-  same_person_probability: 'Possible same person',
+  same_person_probability: 'Review needed: probable same person',
 
   // Contact-level matches.
   phone_match: 'Same phone number',
@@ -74,8 +74,8 @@ export const ALERT_LABELS: Record<string, { name: string; meaning: string }> = {
     meaning: 'Two accounts repeatedly post within minutes of each other. This is context only, not same-person evidence.',
   },
   NEW_IDENTITY_LINK: {
-    name: 'Possible same person found',
-    meaning: 'The system found new evidence that two accounts may be the same person.',
+    name: 'Review needed: probable same person',
+    meaning: 'The system found evidence that two accounts may be the same person. No automatic merge occurred.',
   },
   PROFILE_CHANGE: {
     name: 'Profile changed',
@@ -104,8 +104,8 @@ export function alertMeaning(type: string): string | undefined {
 
 // ── Tiers ───────────────────────────────────────────────────────────────────
 const TIER_LABELS: Record<string, string> = {
-  primary: 'Confirmed',
-  secondary: 'Unconfirmed',
+  primary: 'Primary identity record',
+  secondary: 'Secondary/supporting record',
 }
 
 /** Entity tier in plain words. */
@@ -124,22 +124,22 @@ export interface ConfidenceReading {
 }
 
 /**
- * A same-person score (0–1) as a word + the raw %.
+ * A same-person probability (0–1) as a word + the raw %.
  *
  * Bands (from plan doc):
- *   <0.30           → Weak         (muted)
- *   0.30 – 0.60     → Possible     (warning)
- *   0.60 – 0.85     → Likely       (success)
- *   >= 0.85         → Very likely  (success)
+ *   <0.30           → Low probability      (muted)
+ *   0.30 – 0.60     → Possible             (warning)
+ *   0.60 – 0.85     → Probable             (success)
+ *   >= 0.85         → Very probable        (success)
  *
  * The `ConfidencePill` colour bar maps to (red<0.30, amber<0.60, green>=0.60).
  */
 export function confidenceWords(score: number | null | undefined): ConfidenceReading {
   const pct = Math.round((score ?? 0) * 100)
-  if (pct >= 85) return { word: 'Very likely', pct, tone: 'success' }
-  if (pct >= 60) return { word: 'Likely', pct, tone: 'success' }
+  if (pct >= 85) return { word: 'Very probable', pct, tone: 'success' }
+  if (pct >= 60) return { word: 'Probable', pct, tone: 'success' }
   if (pct >= 30) return { word: 'Possible', pct, tone: 'warning' }
-  return { word: 'Weak', pct, tone: 'muted' }
+  return { word: 'Low probability', pct, tone: 'muted' }
 }
 
 // ── Canonical exported map ──────────────────────────────────────────────────
@@ -166,19 +166,19 @@ export const GLOSSARY: { term: string; def: string }[] = [
   },
   {
     term: 'Evidence (signal)',
-    def: 'A single clue that two accounts belong to the same person — e.g. the same phone number, a similar name, or the same face in photos. More independent clues = higher confidence.',
+    def: 'A single clue that two accounts belong to the same person — e.g. the same phone number, a similar name, or the same face in photos. More independent clues = higher probability.',
   },
   {
-    term: 'Confirmed vs Unconfirmed',
-    def: 'Confirmed people have strong, multiple pieces of evidence. Unconfirmed ones (often lone WhatsApp numbers) are kept but flagged as lower-certainty.',
+    term: 'Primary vs secondary records',
+    def: 'Primary identity records have stronger supporting evidence. Secondary records (often lone WhatsApp numbers) are kept but flagged as lower-certainty.',
   },
   {
-    term: 'Possible same person',
-    def: 'A pair of accounts the system thinks might be one person. You confirm or reject these in Review — each decision also trains the system.',
+    term: 'Review needed: probable same person',
+    def: 'A pair of accounts the system thinks might be one person. No automatic merge occurs; a reviewer must merge or reject the pair in Review.',
   },
   {
-    term: 'Confidence / score',
-    def: 'How sure the system is, shown as Very likely / Likely / Possible / Weak with a percentage. It combines all the evidence for a pair.',
+    term: 'Probability / score',
+    def: 'How sure the system is, shown as Very probable / Probable / Possible / Low probability with a percentage. It combines all the evidence for a pair.',
   },
   {
     term: 'Face bridge',

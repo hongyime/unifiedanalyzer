@@ -121,9 +121,10 @@ async def notify_merge_candidate(entity_a_name: str, entity_b_name: str,
                                   confidence: float, shared_signal: str):
     url = telegram.get_dashboard_url()
     await telegram.send(
-        f"\U0001f517 <b>Merge candidate detected</b>\n"
+        f"\U0001f517 <b>Review needed: probable same person</b>\n"
         f"<b>{entity_a_name}</b> ↔ <b>{entity_b_name}</b>\n"
-        f"Confidence: {confidence:.0%} via {shared_signal}\n"
+        f"Probability: {confidence:.0%} via {shared_signal}\n"
+        f"No automatic merge occurred; review this pair before merging.\n"
         f"{url}/entities"
     )
 

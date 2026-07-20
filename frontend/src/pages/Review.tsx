@@ -26,8 +26,8 @@ function extraHandles(name: string | null, handles: string[], display: string): 
 
 /**
  * Review queue — the triage home for identity resolution. Lists global
- * same-person merge candidates (highest confidence first) with both faces side
- * by side. Each Merge / Not-same decision both acts AND trains the calibrated
+ * same-person review candidates (highest probability first) with both faces side
+ * by side. Each user Merge / Not-same decision both acts and trains the calibrated
  * scorer (captured server-side into identity_labels).
  */
 export default function ReviewPage() {
@@ -43,8 +43,8 @@ export default function ReviewPage() {
 
   const confirm = async (c: ReviewCandidate) => {
     try {
-      await api.mergeEntities([c.entity_a, c.entity_b], 'Confirmed from Review queue')
-      setMsg('Merged — labeled as same person'); load()
+      await api.mergeEntities([c.entity_a, c.entity_b], 'Same person from Review queue')
+      setMsg('Merged by reviewer; labeled as same person'); load()
     } catch (e: any) { setMsg(`Merge failed: ${e.message}`) }
   }
   const dismiss = async (c: ReviewCandidate) => {
@@ -58,7 +58,7 @@ export default function ReviewPage() {
     <div>
       <PageHeader
         title="Review"
-        description="Pairs of accounts that might be the same person, most likely first. Confirm or reject each — every choice also teaches the system to get better."
+        description="Review needed: probable same-person pairs, highest probability first. No automatic merge occurred; merge or reject each pair to teach the system."
       />
       {msg && <div className="mb-3 text-sm text-text-secondary">{msg}</div>}
 
@@ -67,7 +67,7 @@ export default function ReviewPage() {
       ) : candidates.length === 0 ? (
         <EmptyState
           title="Nothing to review right now"
-          description="Candidate pairs appear here as the pipeline finds accounts that might be the same person."
+          description="Probable same-person pairs appear here when the pipeline finds accounts that need human review before any merge."
         />
       ) : (
         <div className="flex flex-col gap-2">
@@ -138,7 +138,7 @@ export default function ReviewPage() {
                   </div>
                 </div>
                 <div className="flex shrink-0 gap-1">
-                  <button className="primary" onClick={() => confirm(c)}>Same person</button>
+                  <button className="primary" onClick={() => confirm(c)}>Merge as same person</button>
                   <button onClick={() => dismiss(c)} style={{ borderColor: 'var(--color-orange)', color: 'var(--color-orange)' }}>
                     Not same
                   </button>
@@ -172,7 +172,7 @@ export default function ReviewPage() {
                   
                   {c.signals.length > 0 && (
                     <div className="rounded-md bg-surface p-3">
-                      <h4 className="mb-2 font-medium text-text-secondary text-xs uppercase tracking-wider">Signals Evidence</h4>
+                      <h4 className="mb-2 font-medium text-text-secondary text-xs uppercase tracking-wider">Evidence signals</h4>
                       <ul className="flex flex-col gap-2">
                         {c.signals.map((s, idx) => (
                           <li key={idx} className="flex justify-between items-center bg-background rounded px-3 py-2 text-xs">
