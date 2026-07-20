@@ -126,20 +126,26 @@ export interface ConfidenceReading {
 /**
  * A same-person probability (0–1) as a word + the raw %.
  *
- * Bands (from plan doc):
- *   <0.30           → Low probability      (muted)
- *   0.30 – 0.60     → Possible             (warning)
- *   0.60 – 0.85     → Probable             (success)
- *   >= 0.85         → Very probable        (success)
+ * Bands (analyzer-world-model PRD):
+ *   rejected / X    → Rejected             (error)
+ *   <0.55           → Context only         (muted)
+ *   0.55 – 0.70     → Weak candidate       (warning)
+ *   0.70 – 0.95     → Probable             (success)
+ *   0.95 – 1.00     → Very strong          (success)
+ *   1.00            → Confirmed            (success)
  *
- * The `ConfidencePill` colour bar maps to (red<0.30, amber<0.60, green>=0.60).
+ * The `ConfidencePill` colour bar follows these bands; context-only scores are
+ * not shown as merge candidates.
  */
-export function confidenceWords(score: number | null | undefined): ConfidenceReading {
-  const pct = Math.round((score ?? 0) * 100)
-  if (pct >= 85) return { word: 'Very probable', pct, tone: 'success' }
-  if (pct >= 60) return { word: 'Probable', pct, tone: 'success' }
-  if (pct >= 30) return { word: 'Possible', pct, tone: 'warning' }
-  return { word: 'Low probability', pct, tone: 'muted' }
+export function confidenceWords(score: number | string | null | undefined): ConfidenceReading {
+  if (score === 'X') return { word: 'Rejected', pct: 0, tone: 'error' }
+  const numeric = typeof score === 'number' ? score : Number(score ?? 0)
+  const pct = Number.isFinite(numeric) ? Math.round(numeric * 100) : 0
+  if (pct >= 100) return { word: 'Confirmed', pct, tone: 'success' }
+  if (pct >= 95) return { word: 'Very strong', pct, tone: 'success' }
+  if (pct >= 70) return { word: 'Probable', pct, tone: 'success' }
+  if (pct >= 55) return { word: 'Weak candidate', pct, tone: 'warning' }
+  return { word: 'Context only', pct, tone: 'muted' }
 }
 
 // ── Canonical exported map ──────────────────────────────────────────────────
@@ -178,7 +184,7 @@ export const GLOSSARY: { term: string; def: string }[] = [
   },
   {
     term: 'Probability / score',
-    def: 'How sure the system is, shown as Very probable / Probable / Possible / Low probability with a percentage. It combines all the evidence for a pair.',
+    def: 'How sure the system is, shown as Confirmed / Very strong / Probable / Weak candidate / Context only with a percentage. Rejected pairs are marked X.',
   },
   {
     term: 'Face bridge',

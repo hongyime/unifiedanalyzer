@@ -37,7 +37,7 @@ export default function ReviewPage() {
   const [expandedCandidate, setExpandedCandidate] = useState<string | null>(null)
 
   const load = useCallback(() => {
-    api.getReviewCandidates(60).then((d) => setCandidates(d.candidates)).catch(() => setCandidates([]))
+    api.getReviewCandidates(55).then((d) => setCandidates(d.candidates)).catch(() => setCandidates([]))
   }, [])
   useEffect(() => { load() }, [load])
 

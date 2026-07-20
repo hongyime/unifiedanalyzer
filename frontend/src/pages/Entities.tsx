@@ -122,7 +122,7 @@ export default function EntitiesPage() {
         actions={
           <span className="inline-flex items-center gap-1 text-sm text-text-muted">
             {total} people
-            <InfoTip text="A person (entity) groups the platform accounts we think belong to one real human. New accounts are auto-linked when evidence — same phone/email/face/handle — is strong enough." />
+            <InfoTip text="A person (entity) groups platform accounts that are confirmed or under review as one real human. Strong evidence can raise a review candidate or collection priority; it does not silently merge people." />
           </span>
         }
       />
