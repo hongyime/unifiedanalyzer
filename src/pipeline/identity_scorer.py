@@ -22,6 +22,7 @@ temporal_correlation.correlate_activity() for 'temporal_hour_similarity'.
 """
 import json
 import logging
+import os as _os_scorer
 from uuid import UUID
 
 from src.db.connection import get_analyzer_pool
@@ -90,13 +91,23 @@ _TYPE_WEIGHT = {
     "shared_life_context": 0.35,
 }
 
+# These signals describe proximity, relationship, audience overlap, or weak
+# contextual similarity. They may help explain an already identity-backed
+# candidate, but they must not create a same-person probability on their own.
+_CONTEXT_ONLY_SIGNALS = frozenset({
+    "bio_mention",
+    "group_cooccurrence",
+    "topical_similarity",
+    "social_face_link",
+    "shared_life_context",
+})
+
 _MIN_SCORE = 0.10
 _HIGH_CONFIDENCE = 0.70
 # 2026-07-08: penalty multiplier for same-platform candidate pairs. Cross-platform
 # pairs are unpenalised (multiplier=1.0). Same-platform pairs get score * this,
 # which by design dims them in the review queue while keeping them discoverable
 # for the rare burner-account case. Tune with env SCORER_SAME_PLATFORM_MULTIPLIER.
-import os as _os_scorer
 _SAME_PLATFORM_MULTIPLIER = float(_os_scorer.getenv("SCORER_SAME_PLATFORM_MULTIPLIER", "0.3"))
 _CROSS_PLATFORM_MULTIPLIER = float(_os_scorer.getenv("SCORER_CROSS_PLATFORM_MULTIPLIER", "1.5"))
 
@@ -111,6 +122,10 @@ def _is_uuid(value: str | None) -> bool:
         return True
     except Exception:
         return False
+
+
+def _has_identity_evidence(contributions: list[tuple[str, float]]) -> bool:
+    return any(sig_type not in _CONTEXT_ONLY_SIGNALS for sig_type, _ in contributions)
 
 
 async def compute_identity_scores() -> dict:
@@ -129,7 +144,7 @@ async def compute_identity_scores() -> dict:
             "SELECT entity_id::text, source, platform_id FROM entity_platform_links"
         )
         pid_to_entity: dict[tuple[str, str], str] = {
-            (l["source"], l["platform_id"]): l["entity_id"] for l in link_rows
+            (link["source"], link["platform_id"]): link["entity_id"] for link in link_rows
         }
         valid_entities = {
             r["id"] for r in await conn.fetch("SELECT id::text AS id FROM entities")
@@ -137,8 +152,8 @@ async def compute_identity_scores() -> dict:
 
         # entity_id -> set of platforms it has links on (for cross_platform calc)
         entity_platforms: dict[str, set[str]] = {}
-        for l in link_rows:
-            entity_platforms.setdefault(l["entity_id"], set()).add(l["source"])
+        for link in link_rows:
+            entity_platforms.setdefault(link["entity_id"], set()).add(link["source"])
 
         # Pairs the user dismissed in the dashboard ("not the same person").
         # Stored normalized (entity_a < entity_b) just like _pair_key, so a
@@ -200,6 +215,8 @@ async def compute_identity_scores() -> dict:
     for (a, b), contributions in pair_contributions.items():
         if (a, b) in dismissed:
             continue  # user said these are different people
+        if not _has_identity_evidence(contributions):
+            continue
         breakdown = [{"type": t, "confidence": round(c, 4)} for t, c in contributions]
 
         if model is not None:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -27,9 +28,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-try:
-    import pytest
-except ImportError:
+if importlib.util.find_spec("pytest") is None:
     print("pytest not installed; skip: `pip install pytest pytest-asyncio`")
     sys.exit(0)
 
@@ -95,6 +94,23 @@ def test_temporal_copost_is_not_identity_evidence():
     assert "temporal_copost" in DEPRECATED_NON_IDENTITY_FEATURES
     features = pair_feature_vector([("temporal_copost", 0.99)])
     assert max(features) == 0.0
+
+
+def test_context_only_signals_do_not_create_same_person_probability():
+    """Relationship/context signals can explain a candidate but cannot create one
+    without at least one identity-backed signal."""
+    from src.pipeline.identity_scorer import _has_identity_evidence
+
+    context_only = [
+        ("bio_mention", 0.9),
+        ("group_cooccurrence", 0.9),
+        ("topical_similarity", 0.99),
+        ("social_face_link", 0.8),
+        ("shared_life_context", 0.8),
+    ]
+
+    assert not _has_identity_evidence(context_only)
+    assert _has_identity_evidence([*context_only, ("email_match", 0.6)])
 
 
 def test_track_c_signals_registered():

@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.pipeline.decision_replay import dry_run_decision_replay, stable_refs_from_event
+from src.pipeline.decision_replay import (
+    BackupRequiredError,
+    DERIVED_REBUILD_BY_EVENT,
+    apply_decision_replay,
+    dry_run_decision_replay,
+    stable_refs_from_event,
+)
 
 
 def _event(event_type: str = "merge_confirmed", payload: dict | None = None) -> dict:
@@ -44,11 +51,31 @@ def _write_event(root: Path, event: dict, name: str = "2026-07.jsonl") -> None:
 
 
 class FakeConn:
-    def __init__(self, rows_by_source: dict[str, list[dict]]):
+    def __init__(
+        self,
+        rows_by_source: dict[str, list[dict]],
+        *,
+        backup_row: dict | None = None,
+        execute_result: str = "INSERT 0 1",
+    ):
         self.rows_by_source = rows_by_source
+        self.backup_row = backup_row
+        self.execute_result = execute_result
+        self.executed: list[tuple[str, tuple]] = []
 
     async def fetch(self, _sql, source, _platform_id, _username):
         return self.rows_by_source.get(source, [])
+
+    async def fetchrow(self, sql, *args):
+        if "FROM analyzer_backup_runs" in sql:
+            return self.backup_row
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+    async def execute(self, sql, *args):
+        self.executed.append((sql, args))
+        if "setval" in sql:
+            return "SELECT 1"
+        return self.execute_result
 
 
 def test_stable_refs_from_event_extracts_platform_links():
@@ -110,3 +137,162 @@ def test_decision_replay_marks_invalid_jsonl_event(tmp_path):
 
     assert report.invalid == 1
     assert report.events[0].status == "invalid"
+
+
+def test_decision_replay_unresolved_only_output_filters_restorable_events(tmp_path):
+    _write_event(tmp_path, _event(payload={"entity_snapshots_before": [_snapshot()]}))
+    _write_event(
+        tmp_path,
+        _event(event_type="add_note", payload={"notes": "manual note"}),
+        name="2026-08.jsonl",
+    )
+    conn = FakeConn({"instagram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}]})
+
+    report = asyncio.run(dry_run_decision_replay(conn, log_dir=tmp_path))
+    data = report.to_dict(unresolved_only=True)
+
+    assert report.scanned == 2
+    assert [event["status"] for event in data["events"]] == ["unresolved"]
+
+
+def test_apply_decision_replay_requires_backup_guard(tmp_path):
+    _write_event(tmp_path, _event(payload={"entity_snapshots_before": [_snapshot()]}))
+
+    try:
+        asyncio.run(apply_decision_replay(FakeConn({}), log_dir=tmp_path))
+    except BackupRequiredError as exc:
+        assert "requires a successful analyzer DB backup" in str(exc)
+    else:
+        raise AssertionError("backup guard did not stop replay apply")
+
+
+def test_apply_decision_replay_rejects_stale_backup_guard(tmp_path):
+    _write_event(tmp_path, _event(payload={"entity_snapshots_before": [_snapshot()]}))
+    conn = FakeConn(
+        {},
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 100,
+            "finished_at": datetime.now(timezone.utc) - timedelta(hours=49),
+            "restore_validation": "ok",
+        },
+    )
+
+    try:
+        asyncio.run(apply_decision_replay(conn, log_dir=tmp_path, backup_max_age_hours=24))
+    except BackupRequiredError:
+        pass
+    else:
+        raise AssertionError("stale backup guard did not stop replay apply")
+
+
+def test_apply_decision_replay_rejects_failed_restore_validation(tmp_path):
+    _write_event(tmp_path, _event(payload={"entity_snapshots_before": [_snapshot()]}))
+    conn = FakeConn(
+        {},
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 100,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "failed: pg_restore --list failed",
+        },
+    )
+
+    try:
+        asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+    except BackupRequiredError:
+        pass
+    else:
+        raise AssertionError("failed restore validation did not stop replay apply")
+
+
+def test_apply_decision_replay_restores_audit_log_rows(tmp_path):
+    event = _event(payload={"entity_snapshots_before": [_snapshot()]})
+    _write_event(tmp_path, event)
+    conn = FakeConn(
+        {"instagram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}]},
+        backup_row={
+            "path": "/app/backups/db/unifiedanalyzer_daily_20260720T020000Z.dump",
+            "size_bytes": 1234,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "ok",
+        },
+    )
+
+    report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+
+    assert report.applied == 1
+    assert report.skipped_existing == 0
+    insert_sql, insert_args = next(item for item in conn.executed if "INSERT INTO audit_log" in item[0])
+    assert "ON CONFLICT (id) DO NOTHING" in insert_sql
+    assert insert_args[0] == event["audit_id"]
+    assert insert_args[3] == event["event_type"]
+    assert report.replay.restorable == 1
+    assert report.effect_unsupported == 1
+
+
+def test_apply_decision_replay_can_skip_existing_rows(tmp_path):
+    _write_event(tmp_path, _event(payload={"entity_snapshots_before": [_snapshot()]}))
+    conn = FakeConn(
+        {"instagram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}]},
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 1,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "ok",
+        },
+        execute_result="INSERT 0 0",
+    )
+
+    report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+
+    assert report.applied == 0
+    assert report.skipped_existing == 1
+
+
+def test_apply_decision_replay_skips_effects_for_unresolved_events(tmp_path):
+    _write_event(tmp_path, _event(event_type="add_note", payload={"notes": "manual note"}))
+    conn = FakeConn(
+        {},
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 1,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "ok",
+        },
+    )
+
+    report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+
+    assert report.audit_applied == 1
+    assert report.effect_skipped_unresolved == 1
+
+
+def test_apply_decision_replay_applies_dismiss_effect(tmp_path):
+    _write_event(tmp_path, _event(
+        event_type="dismiss_identity_candidate",
+        payload={"entity_snapshots": [_snapshot("telegram", "1", "a"), _snapshot("instagram", "2", "b")]},
+    ))
+    conn = FakeConn(
+        {
+            "telegram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}],
+            "instagram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000002"}],
+        },
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 1,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "ok",
+        },
+    )
+
+    report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+
+    assert report.effect_applied == 1
+    assert any("INSERT INTO identity_labels" in sql for sql, _ in conn.executed)
+    assert any("DELETE FROM entity_relationships" in sql for sql, _ in conn.executed)
+
+
+def test_reject_media_decisions_have_rebuild_mapping():
+    assert DERIVED_REBUILD_BY_EVENT["reject_media_owner"] == ("media_attribution", "timeline_events")
+    assert DERIVED_REBUILD_BY_EVENT["reject_person_in_photo"] == ("face_links", "timeline_events")

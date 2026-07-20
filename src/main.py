@@ -47,11 +47,24 @@ def main():
                         help="Weekly backups to keep (default: 4)")
     backup.add_argument("--retention-monthly", type=int, default=None,
                         help="Monthly backups to keep (default: 3)")
-    replay = sub.add_parser("decision-replay", help="Dry-run replay coverage for analyzer decision JSONL")
-    replay.add_argument("--dry-run", action="store_true", default=True,
-                        help="Only report replay status; mutations are not implemented")
+    replay = sub.add_parser("decision-replay", help="Replay coverage for analyzer decision JSONL")
+    replay_mode = replay.add_mutually_exclusive_group()
+    replay_mode.add_argument("--dry-run", action="store_true",
+                             help="Only report replay status (default)")
+    replay_mode.add_argument("--apply", action="store_true",
+                             help="Restore audit_log rows from decision JSONL; requires a successful backup by default")
     replay.add_argument("--log-dir", type=str, default=None,
                         help="Decision log directory (default: ANALYZER_DECISION_LOG_DIR)")
+    replay.add_argument("--backup-dir", type=str, default=None,
+                        help="Backup root to inspect for --apply guard when analyzer_backup_runs has no success row")
+    replay.add_argument("--backup-max-age-hours", type=int, default=24,
+                        help="Maximum age for a backup accepted by --apply (default: 24)")
+    replay.add_argument("--allow-no-backup", action="store_true",
+                        help="Allow --apply without a backup guard; intended only for scratch restore drills")
+    replay.add_argument("--unresolved-only", action="store_true",
+                        help="Print only unresolved, ambiguous, and invalid event details")
+    replay.add_argument("--fail-on-unresolved", action="store_true",
+                        help="Exit non-zero if replay finds unresolved, ambiguous, or invalid events")
     replay.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     replay.add_argument("--limit", type=int, default=None, help="Limit decision events scanned")
     priority_hints = sub.add_parser(
@@ -212,26 +225,54 @@ def main():
 
     elif args.command == "decision-replay":
         from src.db.connection import init_pools, close_pools, get_analyzer_pool
-        from src.pipeline.decision_replay import dry_run_decision_replay
+        from src.pipeline.decision_replay import (
+            BackupRequiredError,
+            apply_decision_replay,
+            dry_run_decision_replay,
+        )
 
         async def _run():
             await init_pools(apply_schema_ddl=False)
             try:
                 pool = get_analyzer_pool()
                 async with pool.acquire() as conn:
-                    report = await dry_run_decision_replay(
-                        conn,
-                        log_dir=args.log_dir,
-                        limit=args.limit,
-                    )
+                    if args.apply:
+                        report = await apply_decision_replay(
+                            conn,
+                            log_dir=args.log_dir,
+                            limit=args.limit,
+                            require_backup=not args.allow_no_backup,
+                            backup_dir=args.backup_dir,
+                            backup_max_age_hours=args.backup_max_age_hours,
+                        )
+                    else:
+                        report = await dry_run_decision_replay(
+                            conn,
+                            log_dir=args.log_dir,
+                            limit=args.limit,
+                        )
                 if args.json:
-                    print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+                    print(json.dumps(
+                        report.to_dict(unresolved_only=args.unresolved_only),
+                        indent=2,
+                        sort_keys=True,
+                        default=str,
+                    ))
                 else:
-                    print(report.to_text())
+                    print(report.to_text(unresolved_only=args.unresolved_only))
+                replay_report = report.replay if args.apply else report
+                if args.fail_on_unresolved and (
+                    replay_report.unresolved or replay_report.ambiguous or replay_report.invalid
+                ):
+                    sys.exit(3)
             finally:
                 await close_pools()
 
-        asyncio.run(_run())
+        try:
+            asyncio.run(_run())
+        except BackupRequiredError as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
 
     elif args.command == "priority-hints":
         from src.db.connection import init_pools, close_pools, get_analyzer_pool

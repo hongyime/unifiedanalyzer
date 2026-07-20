@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from src.util.audit_log import DECISION_LOG_DIR, _validate_decision_event
 
@@ -18,11 +20,19 @@ DERIVED_REBUILD_BY_EVENT = {
     "confirm_location": ("location_claims", "map_layers"),
     "reject_location": ("location_claims", "map_layers"),
     "assign_media_owner": ("media_attribution", "timeline_events"),
+    "reject_media_owner": ("media_attribution", "timeline_events"),
     "assign_person_in_photo": ("face_links", "timeline_events"),
+    "reject_person_in_photo": ("face_links", "timeline_events"),
     "assign_target_tier": ("priority_hints", "watch_views"),
     "add_note": ("person_views",),
     "adjust_source_confidence": ("identity_scores", "relationship_views", "location_claims"),
 }
+
+DEFAULT_BACKUP_MAX_AGE_HOURS = 24
+
+
+class BackupRequiredError(RuntimeError):
+    """Raised when replay apply is blocked because no fresh backup is available."""
 
 
 @dataclass
@@ -36,6 +46,7 @@ class DecisionReplayEvent:
     resolved_entity_ids: list[str] = field(default_factory=list)
     stable_refs: list[dict[str, str | None]] = field(default_factory=list)
     derived_rebuild_required: list[str] = field(default_factory=list)
+    payload_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +59,7 @@ class DecisionReplayEvent:
             "resolved_entity_ids": self.resolved_entity_ids,
             "stable_refs": self.stable_refs,
             "derived_rebuild_required": self.derived_rebuild_required,
+            "payload_summary": self.payload_summary,
         }
 
 
@@ -79,7 +91,13 @@ class DecisionReplayReport:
             self.derived_rebuild_required[item] += 1
         self.events.append(event)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, unresolved_only: bool = False) -> dict[str, Any]:
+        events = self.events
+        if unresolved_only:
+            events = [
+                event for event in events
+                if event.status in {"unresolved", "ambiguous", "invalid"}
+            ]
         return {
             "log_dir": str(self.log_dir),
             "scanned": self.scanned,
@@ -89,10 +107,10 @@ class DecisionReplayReport:
             "invalid": self.invalid,
             "by_event_type": dict(sorted(self.by_event_type.items())),
             "derived_rebuild_required": dict(sorted(self.derived_rebuild_required.items())),
-            "events": [event.to_dict() for event in self.events],
+            "events": [event.to_dict() for event in events],
         }
 
-    def to_text(self) -> str:
+    def to_text(self, *, unresolved_only: bool = False) -> str:
         lines = [
             f"Decision log: {self.log_dir}",
             f"Events scanned: {self.scanned}",
@@ -105,12 +123,66 @@ class DecisionReplayReport:
             lines.append("")
             lines.append("Derived rebuilds required:")
             lines.extend(f"  {name}: {count}" for name, count in sorted(self.derived_rebuild_required.items()))
-        if self.events:
+        events = self.events
+        if unresolved_only:
+            events = [
+                event for event in events
+                if event.status in {"unresolved", "ambiguous", "invalid"}
+            ]
+        if events:
             lines.append("")
-            lines.append("Events:")
-            for event in self.events[:50]:
+            lines.append("Unresolved events:" if unresolved_only else "Events:")
+            for event in events[:50]:
                 suffix = f" ({event.reason})" if event.reason else ""
                 lines.append(f"  {event.status}: {event.event_type or 'unknown'} audit={event.audit_id}{suffix}")
+        return "\n".join(lines)
+
+
+@dataclass
+class DecisionReplayApplyReport:
+    replay: DecisionReplayReport
+    audit_applied: int = 0
+    audit_skipped_existing: int = 0
+    skipped_invalid: int = 0
+    effect_applied: int = 0
+    effect_skipped_unresolved: int = 0
+    effect_unsupported: int = 0
+    backup_guard: str | None = None
+
+    @property
+    def applied(self) -> int:
+        return self.audit_applied
+
+    @property
+    def skipped_existing(self) -> int:
+        return self.audit_skipped_existing
+
+    def to_dict(self, *, unresolved_only: bool = False) -> dict[str, Any]:
+        return {
+            "audit_applied": self.audit_applied,
+            "audit_skipped_existing": self.audit_skipped_existing,
+            "skipped_invalid": self.skipped_invalid,
+            "effect_applied": self.effect_applied,
+            "effect_skipped_unresolved": self.effect_skipped_unresolved,
+            "effect_unsupported": self.effect_unsupported,
+            "backup_guard": self.backup_guard,
+            "replay": self.replay.to_dict(unresolved_only=unresolved_only),
+        }
+
+    def to_text(self, *, unresolved_only: bool = False) -> str:
+        lines = [
+            "Decision replay apply",
+            f"Applied audit rows: {self.audit_applied}",
+            f"Skipped existing audit rows: {self.audit_skipped_existing}",
+            f"Skipped invalid events: {self.skipped_invalid}",
+            f"Applied safe effects: {self.effect_applied}",
+            f"Skipped effects due unresolved refs: {self.effect_skipped_unresolved}",
+            f"Unsupported effects needing rebuild/manual replay: {self.effect_unsupported}",
+        ]
+        if self.backup_guard:
+            lines.append(f"Backup guard: {self.backup_guard}")
+        lines.append("")
+        lines.append(self.replay.to_text(unresolved_only=unresolved_only))
         return "\n".join(lines)
 
 
@@ -136,6 +208,225 @@ async def dry_run_decision_replay(conn, *, log_dir: str | Path | None = None, li
     return report
 
 
+async def apply_decision_replay(
+    conn,
+    *,
+    log_dir: str | Path | None = None,
+    limit: int | None = None,
+    require_backup: bool = True,
+    backup_dir: str | Path | None = None,
+    backup_max_age_hours: int = DEFAULT_BACKUP_MAX_AGE_HOURS,
+) -> DecisionReplayApplyReport:
+    """Restore durable audit rows from decision JSONL.
+
+    This intentionally does not mutate derived entity/link/location tables yet.
+    It restores the tamper-evident decision ledger, reports unresolved stable
+    references, and tells the operator which derived tables need rebuilds.
+    """
+    backup_guard = None
+    if require_backup:
+        backup_guard = await assert_backup_guard(
+            conn,
+            backup_dir=backup_dir,
+            max_age_hours=backup_max_age_hours,
+        )
+
+    root = Path(log_dir) if log_dir else DECISION_LOG_DIR
+    apply_report = DecisionReplayApplyReport(
+        replay=DecisionReplayReport(log_dir=root),
+        backup_guard=backup_guard,
+    )
+    for path, line_no, line in iter_decision_events(root) or ():
+        if limit is not None and apply_report.replay.scanned >= limit:
+            break
+        replay_event = await inspect_decision_line(conn, root, path, line_no, line)
+        apply_report.replay.add(replay_event)
+        if replay_event.status == "invalid":
+            apply_report.skipped_invalid += 1
+            continue
+
+        payload = json.loads(line)
+        inserted = await restore_audit_event(conn, payload)
+        if inserted:
+            apply_report.audit_applied += 1
+        else:
+            apply_report.audit_skipped_existing += 1
+
+        effect = await apply_decision_effect(conn, payload, replay_event)
+        if effect == "applied":
+            apply_report.effect_applied += 1
+        elif effect == "skipped_unresolved":
+            apply_report.effect_skipped_unresolved += 1
+        else:
+            apply_report.effect_unsupported += 1
+
+    await _reset_audit_log_sequence(conn)
+    return apply_report
+
+
+async def assert_backup_guard(
+    conn,
+    *,
+    backup_dir: str | Path | None = None,
+    max_age_hours: int = DEFAULT_BACKUP_MAX_AGE_HOURS,
+) -> str:
+    """Require a successful analyzer DB backup before replay apply."""
+    max_age = timedelta(hours=max(1, int(max_age_hours)))
+    db_status = await _latest_successful_backup_run(conn, max_age=max_age)
+    if db_status:
+        return db_status
+
+    root = Path(backup_dir) if backup_dir else None
+    if root is not None:
+        files = sorted(root.rglob("unifiedanalyzer_*.dump"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
+            latest = files[0]
+            stat = latest.stat()
+            modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            if stat.st_size > 0 and datetime.now(timezone.utc) - modified <= max_age:
+                return f"backup file present: {latest}"
+
+    raise BackupRequiredError(
+        f"decision replay apply requires a successful analyzer DB backup from the last "
+        f"{int(max_age.total_seconds() // 3600)}h; run `python -m src.main backup-db --kind daily` "
+        "or pass --allow-no-backup for a scratch restore"
+    )
+
+
+async def _latest_successful_backup_run(conn, *, max_age: timedelta) -> str | None:
+    try:
+        row = await conn.fetchrow("""
+            SELECT path, size_bytes, finished_at, restore_validation
+            FROM analyzer_backup_runs
+            WHERE status = 'success'
+              AND COALESCE(size_bytes, 0) > 0
+            ORDER BY finished_at DESC NULLS LAST, started_at DESC
+            LIMIT 1
+        """)
+    except Exception:
+        return None
+    if not row:
+        return None
+    finished_at = _as_aware_datetime(_row_value(row, "finished_at"))
+    if not finished_at or datetime.now(timezone.utc) - finished_at > max_age:
+        return None
+    restore_validation = (_row_value(row, "restore_validation") or "").lower()
+    if restore_validation.startswith("failed") or restore_validation.startswith("error"):
+        return None
+    return (
+        f"latest successful backup: {_row_value(row, 'path')} "
+        f"({_row_value(row, 'size_bytes') or 0} bytes at {_row_value(row, 'finished_at')})"
+    )
+
+
+async def restore_audit_event(conn, event: dict[str, Any]) -> bool:
+    _validate_decision_event(event)
+    entity_ids = _uuid_list_or_none(event.get("entity_ids") or [])
+    created_at = datetime.fromisoformat(event["created_at"])
+    result = await conn.execute(
+        """
+        INSERT INTO audit_log (
+            id, prev_sha256, sha256, action, actor, entity_ids, payload, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::uuid[], $7::jsonb, $8)
+        ON CONFLICT (id) DO NOTHING
+        """,
+        int(event["audit_id"]),
+        event["prev_sha256"],
+        event["sha256"],
+        event["event_type"],
+        event["actor"],
+        entity_ids,
+        json.dumps(event["payload"], default=str),
+        created_at,
+    )
+    return str(result).endswith(" 1")
+
+
+async def apply_decision_effect(conn, event: dict[str, Any], replay_event: DecisionReplayEvent) -> str:
+    """Apply small idempotent effects during scratch restore.
+
+    Destructive or underspecified decisions deliberately return unsupported; the
+    dry-run report still tells the operator which derived systems must rebuild.
+    """
+    if replay_event.status != "restorable":
+        return "skipped_unresolved"
+
+    event_type = event.get("event_type")
+    payload = event.get("payload") or {}
+    entity_ids = replay_event.resolved_entity_ids
+
+    if event_type == "dismiss_identity_candidate":
+        if len(entity_ids) != 2:
+            return "skipped_unresolved"
+        a, b = sorted(entity_ids)
+        await conn.execute(
+            """
+            INSERT INTO identity_labels (entity_a, entity_b, features, label, source)
+            VALUES ($1::uuid, $2::uuid, '{}'::jsonb, 0, 'decision_replay')
+            ON CONFLICT (entity_a, entity_b)
+            DO UPDATE SET label = 0, source = 'decision_replay', created_at = NOW()
+            """,
+            a,
+            b,
+        )
+        await conn.execute(
+            """
+            DELETE FROM entity_relationships
+            WHERE relationship_type = 'same_person_probability'
+              AND ((entity_a_id = $1::uuid AND entity_b_id = $2::uuid)
+                OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
+            """,
+            a,
+            b,
+        )
+        return "applied"
+
+    if event_type == "assign_target_tier":
+        if len(entity_ids) != 1:
+            return "skipped_unresolved"
+        await conn.execute(
+            "UPDATE entities SET watch_status = $1, updated_at = NOW() WHERE id = $2::uuid",
+            payload.get("watch_status"),
+            entity_ids[0],
+        )
+        return "applied"
+
+    if event_type == "add_note":
+        if len(entity_ids) != 1:
+            return "skipped_unresolved"
+        await conn.execute(
+            """
+            UPDATE entities
+            SET notes = COALESCE($1, notes),
+                silence_threshold_days = COALESCE($2, silence_threshold_days),
+                updated_at = NOW()
+            WHERE id = $3::uuid
+            """,
+            payload.get("notes"),
+            payload.get("silence_threshold_days"),
+            entity_ids[0],
+        )
+        return "applied"
+
+    return "unsupported"
+
+
+async def _reset_audit_log_sequence(conn) -> None:
+    try:
+        await conn.execute("""
+            SELECT setval(
+                pg_get_serial_sequence('audit_log', 'id'),
+                GREATEST(COALESCE((SELECT MAX(id) FROM audit_log), 0), 1),
+                true
+            )
+        """)
+    except Exception:
+        # Sequence repair is helpful after restoring explicit ids, but replay
+        # reporting is still useful in fake/scratch DBs without a sequence.
+        return
+
+
 async def inspect_decision_line(conn, root: Path, path: Path, line_no: int, line: str) -> DecisionReplayEvent:
     event_type = None
     audit_id = None
@@ -145,6 +436,7 @@ async def inspect_decision_line(conn, root: Path, path: Path, line_no: int, line
         _validate_decision_event(payload)
         event_type = payload.get("event_type")
         audit_id = payload.get("audit_id")
+        payload_summary = summarize_payload(payload.get("payload") or {})
     except Exception as exc:
         return DecisionReplayEvent(
             path=rel_path,
@@ -166,6 +458,7 @@ async def inspect_decision_line(conn, root: Path, path: Path, line_no: int, line
             status="unresolved",
             reason="no stable platform references in decision payload",
             derived_rebuild_required=derived,
+            payload_summary=payload_summary,
         )
 
     resolved = await resolve_stable_refs(conn, refs)
@@ -189,7 +482,30 @@ async def inspect_decision_line(conn, root: Path, path: Path, line_no: int, line
         resolved_entity_ids=sorted(resolved["entity_ids"]),
         stable_refs=refs,
         derived_rebuild_required=derived,
+        payload_summary=payload_summary,
     )
+
+
+def summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key in (
+        "watch_status",
+        "relationship_type",
+        "is_real",
+        "is_correct",
+        "role",
+        "confidence",
+        "source",
+        "platform_id",
+        "notes",
+        "reason",
+    ):
+        if key in payload:
+            value = payload[key]
+            if isinstance(value, str) and len(value) > 160:
+                value = value[:157] + "..."
+            summary[key] = value
+    return summary
 
 
 def stable_refs_from_event(event: dict[str, Any]) -> list[dict[str, str | None]]:
@@ -254,6 +570,33 @@ def _clean(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _uuid_list_or_none(values: list[str]) -> list[str] | None:
+    if not values:
+        return None
+    return [str(UUID(str(value))) for value in values]
+
+
+def _as_aware_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _row_value(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    return row[key]
 
 
 def _safe_relative(path: Path, root: Path) -> str:
