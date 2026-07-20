@@ -15,6 +15,7 @@ def test_append_audit_writes_decision_jsonl(tmp_path, monkeypatch):
     class Conn:
         def __init__(self):
             self.insert_args = None
+            self.executed = []
 
         async def fetchrow(self, sql, *args):
             if "SELECT sha256 FROM audit_log" in sql:
@@ -23,8 +24,18 @@ def test_append_audit_writes_decision_jsonl(tmp_path, monkeypatch):
                 return {"ts": now}
             if "INSERT INTO audit_log" in sql:
                 self.insert_args = args
-                return {"id": 42, "created_at": now}
+                return {
+                    "id": 42,
+                    "created_at": now,
+                    "prev_sha256": args[0],
+                    "sha256": args[1],
+                    "decision_jsonl_written_at": None,
+                }
             raise AssertionError(f"Unexpected SQL: {sql}")
+
+        async def execute(self, sql, *args):
+            self.executed.append((sql, args))
+            return "UPDATE 1"
 
     conn = Conn()
     audit_id = asyncio.run(
@@ -58,6 +69,7 @@ def test_append_audit_writes_decision_jsonl(tmp_path, monkeypatch):
     assert event["prev_sha256"] is None
     assert event["sha256"] == conn.insert_args[1]
     assert len(event["idempotency_key"]) == 64
+    assert any("decision_jsonl_written_at = NOW()" in sql for sql, _ in conn.executed)
 
 
 def test_append_audit_invalid_decision_event_is_nonfatal_and_not_written(
@@ -72,14 +84,27 @@ def test_append_audit_invalid_decision_event_is_nonfatal_and_not_written(
     now = datetime(2026, 7, 20, 2, 0, 0, 123456, tzinfo=timezone.utc)
 
     class Conn:
+        def __init__(self):
+            self.executed = []
+
         async def fetchrow(self, sql, *args):
             if "SELECT sha256 FROM audit_log" in sql:
                 return None
             if "SELECT NOW() AS ts" in sql:
                 return {"ts": now}
             if "INSERT INTO audit_log" in sql:
-                return {"id": 43, "created_at": now}
+                return {
+                    "id": 43,
+                    "created_at": now,
+                    "prev_sha256": args[0],
+                    "sha256": args[1],
+                    "decision_jsonl_written_at": None,
+                }
             raise AssertionError(f"Unexpected SQL: {sql}")
+
+        async def execute(self, sql, *args):
+            self.executed.append((sql, args))
+            return "UPDATE 1"
 
     conn = Conn()
     with caplog.at_level(logging.ERROR, logger=audit_log.logger.name):
@@ -96,3 +121,43 @@ def test_append_audit_invalid_decision_event_is_nonfatal_and_not_written(
     assert audit_id == 43
     assert not (tmp_path / "2026-07.jsonl").exists()
     assert "decision JSONL append failed (non-fatal)" in caplog.text
+    assert any("decision_jsonl_error" in sql for sql, _ in conn.executed)
+
+
+def test_retry_pending_decision_jsonl_writes_and_clears_error(tmp_path, monkeypatch):
+    import src.util.audit_log as audit_log
+
+    monkeypatch.setattr(audit_log, "DECISION_LOG_DIR", tmp_path)
+    now = datetime(2026, 7, 20, 2, 0, 0, 123456, tzinfo=timezone.utc)
+    idem = "a" * 64
+
+    class Conn:
+        def __init__(self):
+            self.executed = []
+
+        async def fetch(self, sql, *args):
+            assert "decision_jsonl_written_at IS NULL" in sql
+            return [{
+                "id": 44,
+                "prev_sha256": None,
+                "sha256": "b" * 64,
+                "action": "add_note",
+                "actor": "dashboard",
+                "entity_ids": ["00000000-0000-0000-0000-000000000001"],
+                "payload": {"notes": "keep"},
+                "created_at": now,
+                "idempotency_key": idem,
+            }]
+
+        async def execute(self, sql, *args):
+            self.executed.append((sql, args))
+            return "UPDATE 1"
+
+    conn = Conn()
+    stats = asyncio.run(audit_log.retry_pending_decision_jsonl(conn))
+
+    assert stats == {"pending": 1, "written": 1, "failed": 0}
+    event = json.loads((tmp_path / "2026-07.jsonl").read_text(encoding="utf-8"))
+    assert event["audit_id"] == 44
+    assert event["idempotency_key"] == idem
+    assert any("decision_jsonl_written_at = NOW()" in sql for sql, _ in conn.executed)

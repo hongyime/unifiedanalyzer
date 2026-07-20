@@ -127,10 +127,45 @@ def _decision_log_path(created_at) -> Path:
     return DECISION_LOG_DIR / f"{created_at:%Y-%m}.jsonl"
 
 
-def _write_decision_event(*, audit_id: int, prev_sha256: str | None,
-                          sha256: str, action: str, actor: str | None,
-                          entity_ids: list[str] | None, payload: dict,
-                          created_at) -> None:
+def _decision_event_idempotency_key(
+    *,
+    action: str,
+    actor: str | None,
+    entity_ids: list[str] | None,
+    payload: dict,
+    created_at,
+) -> str:
+    return hashlib.sha256(
+        _canonical_json({
+            "action": action,
+            "actor": actor,
+            "entity_ids": sorted(entity_ids or []),
+            "payload": payload or {},
+            "created_at": created_at.isoformat(timespec="microseconds"),
+        }).encode("utf-8")
+    ).hexdigest()
+
+
+def _normalize_idempotency_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = str(value).strip().lower()
+    if _is_sha256_hex(stripped):
+        return stripped
+    return hashlib.sha256(stripped.encode("utf-8")).hexdigest()
+
+
+def _decision_event(*, audit_id: int, prev_sha256: str | None,
+                    sha256: str, action: str, actor: str | None,
+                    entity_ids: list[str] | None, payload: dict,
+                    created_at, idempotency_key: str | None = None) -> dict:
+    event_key = idempotency_key or _decision_event_idempotency_key(
+        action=action,
+        actor=actor,
+        entity_ids=entity_ids,
+        payload=payload,
+        created_at=created_at,
+    )
     event = {
         "schema_version": DECISION_EVENT_SCHEMA_VERSION,
         "audit_id": audit_id,
@@ -141,18 +176,30 @@ def _write_decision_event(*, audit_id: int, prev_sha256: str | None,
         "created_at": created_at.isoformat(timespec="microseconds"),
         "prev_sha256": prev_sha256,
         "sha256": sha256,
-        "idempotency_key": hashlib.sha256(
-            _canonical_json({
-                "action": action,
-                "actor": actor,
-                "entity_ids": sorted(entity_ids or []),
-                "payload": payload or {},
-                "created_at": created_at.isoformat(timespec="microseconds"),
-            }).encode("utf-8")
-        ).hexdigest(),
+        "idempotency_key": event_key,
     }
     _validate_decision_event(event)
-    _append_jsonl(_decision_log_path(created_at), event)
+    return event
+
+
+def _write_decision_event(*, audit_id: int, prev_sha256: str | None,
+                          sha256: str, action: str, actor: str | None,
+                          entity_ids: list[str] | None, payload: dict,
+                          created_at, idempotency_key: str | None = None) -> Path:
+    event = _decision_event(
+        audit_id=audit_id,
+        prev_sha256=prev_sha256,
+        sha256=sha256,
+        action=action,
+        actor=actor,
+        entity_ids=entity_ids,
+        payload=payload,
+        created_at=created_at,
+        idempotency_key=idempotency_key,
+    )
+    path = _decision_log_path(created_at)
+    _append_jsonl(path, event)
+    return path
 
 
 def _hash(prev_sha256: str | None, action: str, actor: str | None,
@@ -177,9 +224,51 @@ def _hash(prev_sha256: str | None, action: str, actor: str | None,
     return h.hexdigest()
 
 
+def _row_value(row, key: str, default=None):
+    try:
+        return row[key]
+    except Exception:
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return default
+
+
+async def _mark_decision_jsonl_written(conn, audit_id: int, path: Path) -> None:
+    try:
+        await conn.execute(
+            """
+            UPDATE audit_log
+            SET decision_jsonl_path = $2,
+                decision_jsonl_written_at = NOW(),
+                decision_jsonl_error = NULL
+            WHERE id = $1
+            """,
+            audit_id,
+            str(path),
+        )
+    except Exception:
+        logger.exception("decision JSONL status update failed: audit_id=%s", audit_id)
+
+
+async def _mark_decision_jsonl_error(conn, audit_id: int, error: str) -> None:
+    try:
+        await conn.execute(
+            """
+            UPDATE audit_log
+            SET decision_jsonl_error = $2
+            WHERE id = $1
+            """,
+            audit_id,
+            error[:1000],
+        )
+    except Exception:
+        logger.exception("decision JSONL error status update failed: audit_id=%s", audit_id)
+
+
 async def append_audit(conn, *, action: str, actor: str | None = None,
                        entity_ids: Iterable[str] | None = None,
-                       payload: dict | None = None) -> int:
+                       payload: dict | None = None,
+                       idempotency_key: str | None = None) -> int:
     """Append one row. Returns the new row id. Non-fatal on failure - we log
     a warning and swallow, because losing an audit line should never break
     the operator's action itself.
@@ -208,33 +297,88 @@ async def append_audit(conn, *, action: str, actor: str | None = None,
         created_iso = created_at.isoformat(timespec="microseconds")
 
         sha = _hash(prev_sha, action, actor, entity_id_list, payload, created_iso)
+        event_key = _normalize_idempotency_key(idempotency_key) or _decision_event_idempotency_key(
+            action=action,
+            actor=actor,
+            entity_ids=entity_id_list,
+            payload=payload,
+            created_at=created_at,
+        )
 
         row = await conn.fetchrow("""
             INSERT INTO audit_log (prev_sha256, sha256, action, actor,
-                                    entity_ids, payload, created_at)
-            VALUES ($1, $2, $3, $4, $5::uuid[], $6::jsonb, $7)
-            RETURNING id, created_at
+                                    entity_ids, payload, idempotency_key, created_at)
+            VALUES ($1, $2, $3, $4, $5::uuid[], $6::jsonb, $7, $8)
+            ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+            DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+            RETURNING id, created_at, prev_sha256, sha256, decision_jsonl_written_at
         """, prev_sha, sha, action, actor, entity_id_list,
-             json.dumps(payload, default=str), created_at)
+             json.dumps(payload, default=str), event_key, created_at)
         audit_id = int(row["id"])
+        if _row_value(row, "decision_jsonl_written_at") is not None:
+            return audit_id
         try:
-            _write_decision_event(
+            path = _write_decision_event(
                 audit_id=audit_id,
-                prev_sha256=prev_sha,
-                sha256=sha,
+                prev_sha256=_row_value(row, "prev_sha256", prev_sha),
+                sha256=_row_value(row, "sha256", sha),
                 action=action,
                 actor=actor,
                 entity_ids=entity_id_list,
                 payload=payload,
                 created_at=row["created_at"],
+                idempotency_key=event_key,
             )
-        except Exception:
+            await _mark_decision_jsonl_written(conn, audit_id, path)
+        except Exception as exc:
             logger.exception("decision JSONL append failed (non-fatal): action=%s", action)
+            await _mark_decision_jsonl_error(conn, audit_id, str(exc) or "decision JSONL append failed")
         return audit_id
     except Exception:
         # Non-fatal: never let audit logging break the actual action.
         logger.exception("audit_log append failed (non-fatal): action=%s", action)
         return -1
+
+
+async def retry_pending_decision_jsonl(conn, *, limit: int = 100) -> dict[str, int]:
+    """Retry audit rows whose DB insert succeeded before JSONL append did."""
+    rows = await conn.fetch(
+        """
+        SELECT id, prev_sha256, sha256, action, actor, entity_ids, payload,
+               created_at, idempotency_key
+        FROM audit_log
+        WHERE decision_jsonl_written_at IS NULL
+        ORDER BY id ASC
+        LIMIT $1
+        """,
+        limit,
+    )
+    stats = {"pending": len(rows), "written": 0, "failed": 0}
+    for row in rows:
+        audit_id = int(row["id"])
+        entity_id_list = [str(x) for x in (_row_value(row, "entity_ids") or [])] or None
+        payload = _row_value(row, "payload") or {}
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        try:
+            path = _write_decision_event(
+                audit_id=audit_id,
+                prev_sha256=_row_value(row, "prev_sha256"),
+                sha256=_row_value(row, "sha256"),
+                action=_row_value(row, "action"),
+                actor=_row_value(row, "actor"),
+                entity_ids=entity_id_list,
+                payload=payload,
+                created_at=_row_value(row, "created_at"),
+                idempotency_key=_row_value(row, "idempotency_key"),
+            )
+            await _mark_decision_jsonl_written(conn, audit_id, path)
+            stats["written"] += 1
+        except Exception as exc:
+            stats["failed"] += 1
+            logger.exception("decision JSONL retry failed: audit_id=%s", audit_id)
+            await _mark_decision_jsonl_error(conn, audit_id, str(exc))
+    return stats
 
 
 async def verify_audit_chain(conn) -> tuple[bool, int | None]:

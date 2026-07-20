@@ -76,10 +76,24 @@ CREATE TABLE IF NOT EXISTS audit_log (
     actor        VARCHAR(100),                 -- 'dashboard' | 'cli' | 'system' | operator name
     entity_ids   UUID[],                       -- the entities involved
     payload      JSONB NOT NULL DEFAULT '{}',  -- action-specific detail
+    idempotency_key CHAR(64),
+    decision_jsonl_path TEXT,
+    decision_jsonl_written_at TIMESTAMPTZ,
+    decision_jsonl_error TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_log_action  ON audit_log(action);
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS idempotency_key CHAR(64);
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS decision_jsonl_path TEXT;
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS decision_jsonl_written_at TIMESTAMPTZ;
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS decision_jsonl_error TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_log_idempotency_key
+    ON audit_log(idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_audit_log_decision_jsonl_pending
+    ON audit_log(id, created_at)
+    WHERE decision_jsonl_written_at IS NULL;
 
 -- Track-C: per-email breach findings from XposedOrNot (and any future breach
 -- provider). Analyzer-owned so we can enrich, alert, and time-track without

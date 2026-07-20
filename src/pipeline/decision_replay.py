@@ -326,9 +326,11 @@ async def restore_audit_event(conn, event: dict[str, Any]) -> bool:
     result = await conn.execute(
         """
         INSERT INTO audit_log (
-            id, prev_sha256, sha256, action, actor, entity_ids, payload, created_at
+            id, prev_sha256, sha256, action, actor, entity_ids, payload,
+            idempotency_key, decision_jsonl_path, decision_jsonl_written_at,
+            decision_jsonl_error, created_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6::uuid[], $7::jsonb, $8)
+        VALUES ($1, $2, $3, $4, $5, $6::uuid[], $7::jsonb, $8, NULL, NOW(), NULL, $9)
         ON CONFLICT (id) DO NOTHING
         """,
         int(event["audit_id"]),
@@ -338,6 +340,7 @@ async def restore_audit_event(conn, event: dict[str, Any]) -> bool:
         event["actor"],
         entity_ids,
         json.dumps(event["payload"], default=str),
+        event["idempotency_key"],
         created_at,
     )
     return str(result).endswith(" 1")
