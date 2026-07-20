@@ -592,7 +592,8 @@ async def resolve_entities() -> dict:
         # Previously only Strava names were checked against other names.
         for i, p1 in enumerate(candidate.profiles):
             names1 = []
-            if p1.name: names1.append(p1.name)
+            if p1.name:
+                names1.append(p1.name)
             names1.extend(ner_persons.get((p1.source, p1.platform_id), []))
             if not names1:
                 continue
@@ -601,7 +602,8 @@ async def resolve_entities() -> dict:
                 if p1.source == p2.source:
                     continue
                 names2 = []
-                if p2.name: names2.append(p2.name)
+                if p2.name:
+                    names2.append(p2.name)
                 names2.extend(ner_persons.get((p2.source, p2.platform_id), []))
                 if not names2:
                     continue
@@ -887,6 +889,8 @@ async def resolve_entities() -> dict:
                 confs.append(confidence)
                 confirmed.append(is_confirmed)
         if eids:
+            # No-auto-merge policy: automatic resolution may refresh link metadata
+            # but must not move an existing platform account to a different entity.
             await conn.execute("""
                 INSERT INTO entity_platform_links
                     (entity_id, source, platform_id, platform_username, platform_name,
@@ -899,7 +903,6 @@ async def resolve_entities() -> dict:
                 ) AS t(entity_id, source, platform_id, platform_username, platform_name,
                        confidence, is_confirmed)
                 ON CONFLICT (source, platform_id) DO UPDATE SET
-                    entity_id = EXCLUDED.entity_id,
                     platform_username = EXCLUDED.platform_username,
                     platform_name = EXCLUDED.platform_name,
                     confidence = EXCLUDED.confidence,
