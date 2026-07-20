@@ -1,7 +1,7 @@
 from itertools import combinations
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.db.connection import get_analyzer_pool
 from src.pipeline.identity_calibration import record_label
@@ -67,6 +67,50 @@ class WatchRequest(BaseModel):
     status: str | None = None  # priority | watching | archive | null
 
 
+class RelationshipDecisionRequest(BaseModel):
+    entity_a: str
+    entity_b: str
+    relationship_type: str = "relationship"
+    is_real: bool
+    confidence: float | None = Field(default=None, ge=0, le=100)
+    notes: str | None = None
+    evidence_refs: dict | None = None
+
+
+class LocationDecisionRequest(BaseModel):
+    is_correct: bool
+    location_ref: dict
+    confidence: float | None = Field(default=None, ge=0, le=100)
+    notes: str | None = None
+    evidence_refs: dict | None = None
+
+
+class MediaPersonDecisionRequest(BaseModel):
+    role: str = "person_in_photo"  # owner | person_in_photo
+    is_correct: bool = True
+    media_ref: dict
+    confidence: float | None = Field(default=None, ge=0, le=100)
+    notes: str | None = None
+    evidence_refs: dict | None = None
+
+
+class SourceConfidenceRequest(BaseModel):
+    confidence: float = Field(ge=0, le=100)
+    source: str | None = None
+    platform_id: str | None = None
+    notes: str | None = None
+    evidence_refs: dict | None = None
+
+
+async def _require_entities(conn, entity_ids: list[str]) -> None:
+    count = await conn.fetchval(
+        "SELECT COUNT(*) FROM entities WHERE id = ANY($1::uuid[])",
+        entity_ids,
+    )
+    if int(count or 0) != len(set(entity_ids)):
+        raise HTTPException(404, "One or more entities not found")
+
+
 @router.patch("/entities/{entity_id}/watch")
 async def set_watch(entity_id: str, req: WatchRequest):
     """Set the user-curated watchlist tier on an entity."""
@@ -91,6 +135,142 @@ async def set_watch(entity_id: str, req: WatchRequest):
             },
         )
     return {"ok": True, "watch_status": s}
+
+
+@router.post("/entities/relationship-decision")
+async def decide_relationship(req: RelationshipDecisionRequest):
+    """Record a human judgment that a relationship/evidence link is real or not real."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        await _require_entities(conn, [req.entity_a, req.entity_b])
+        relationship = await conn.fetchrow("""
+            SELECT relationship_type, weight, cross_platform, sources
+            FROM entity_relationships
+            WHERE relationship_type = $3
+              AND ((entity_a_id = $1::uuid AND entity_b_id = $2::uuid)
+                OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
+            ORDER BY weight DESC NULLS LAST, updated_at DESC NULLS LAST
+            LIMIT 1
+        """, req.entity_a, req.entity_b, req.relationship_type)
+        if req.relationship_type == "same_person_probability":
+            try:
+                await record_label(
+                    conn,
+                    req.entity_a,
+                    req.entity_b,
+                    1 if req.is_real else 0,
+                    "dashboard_relationship_decision",
+                )
+            except Exception:
+                pass
+        action = "confirm_relationship" if req.is_real else "reject_relationship"
+        await append_audit(
+            conn,
+            action=action,
+            actor="dashboard",
+            entity_ids=[req.entity_a, req.entity_b],
+            payload={
+                "relationship_type": req.relationship_type,
+                "is_real": req.is_real,
+                "confidence": req.confidence,
+                "notes": req.notes or "",
+                "evidence_refs": req.evidence_refs or {},
+                "relationship_snapshot": dict(relationship) if relationship else None,
+                "entity_snapshots": await _entity_snapshots(conn, [req.entity_a, req.entity_b]),
+            },
+        )
+    return {"ok": True, "action": action}
+
+
+@router.post("/entities/{entity_id}/location-decision")
+async def decide_location(entity_id: str, req: LocationDecisionRequest):
+    """Record whether a location inference is correct or wrong."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        await _require_entities(conn, [entity_id])
+        action = "confirm_location" if req.is_correct else "reject_location"
+        await append_audit(
+            conn,
+            action=action,
+            actor="dashboard",
+            entity_ids=[entity_id],
+            payload={
+                "entity_id": entity_id,
+                "is_correct": req.is_correct,
+                "location_ref": req.location_ref,
+                "confidence": req.confidence,
+                "notes": req.notes or "",
+                "evidence_refs": req.evidence_refs or {},
+                "entity_snapshot": (await _entity_snapshots(conn, [entity_id]))[0:1],
+            },
+        )
+    return {"ok": True, "action": action}
+
+
+@router.post("/entities/{entity_id}/media-person-decision")
+async def decide_media_person(entity_id: str, req: MediaPersonDecisionRequest):
+    """Record whether an entity owns media or appears in media."""
+    role = req.role.strip().lower()
+    if role not in {"owner", "person_in_photo"}:
+        raise HTTPException(400, "role must be owner or person_in_photo")
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        await _require_entities(conn, [entity_id])
+        if req.is_correct:
+            action = "assign_media_owner" if role == "owner" else "assign_person_in_photo"
+        else:
+            action = "reject_media_owner" if role == "owner" else "reject_person_in_photo"
+        await append_audit(
+            conn,
+            action=action,
+            actor="dashboard",
+            entity_ids=[entity_id],
+            payload={
+                "entity_id": entity_id,
+                "role": role,
+                "is_correct": req.is_correct,
+                "media_ref": req.media_ref,
+                "confidence": req.confidence,
+                "notes": req.notes or "",
+                "evidence_refs": req.evidence_refs or {},
+                "entity_snapshot": (await _entity_snapshots(conn, [entity_id]))[0:1],
+            },
+        )
+    return {"ok": True, "action": action}
+
+
+@router.post("/entities/{entity_id}/source-confidence")
+async def adjust_source_confidence(entity_id: str, req: SourceConfidenceRequest):
+    """Record a human confidence adjustment for an entity source/platform ref."""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        await _require_entities(conn, [entity_id])
+        link = None
+        if req.source and req.platform_id:
+            link = await conn.fetchrow("""
+                SELECT source, platform_id, platform_username, platform_name,
+                       confidence, link_method, is_confirmed
+                FROM entity_platform_links
+                WHERE entity_id = $1::uuid AND source = $2 AND platform_id = $3
+                LIMIT 1
+            """, entity_id, req.source, req.platform_id)
+        await append_audit(
+            conn,
+            action="adjust_source_confidence",
+            actor="dashboard",
+            entity_ids=[entity_id],
+            payload={
+                "entity_id": entity_id,
+                "confidence": req.confidence,
+                "source": req.source,
+                "platform_id": req.platform_id,
+                "notes": req.notes or "",
+                "evidence_refs": req.evidence_refs or {},
+                "platform_link_snapshot": dict(link) if link else None,
+                "entity_snapshot": (await _entity_snapshots(conn, [entity_id]))[0:1],
+            },
+        )
+    return {"ok": True}
 
 
 class SplitRequest(BaseModel):
