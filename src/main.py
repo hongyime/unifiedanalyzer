@@ -47,6 +47,13 @@ def main():
                         help="Weekly backups to keep (default: 4)")
     backup.add_argument("--retention-monthly", type=int, default=None,
                         help="Monthly backups to keep (default: 3)")
+    replay = sub.add_parser("decision-replay", help="Dry-run replay coverage for analyzer decision JSONL")
+    replay.add_argument("--dry-run", action="store_true", default=True,
+                        help="Only report replay status; mutations are not implemented")
+    replay.add_argument("--log-dir", type=str, default=None,
+                        help="Decision log directory (default: ANALYZER_DECISION_LOG_DIR)")
+    replay.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    replay.add_argument("--limit", type=int, default=None, help="Limit decision events scanned")
     hard_reset = sub.add_parser(
         "hard-reset-entities",
         help="DESTRUCTIVE: wipe all entities+links (CASCADE wipes faces/signals) then rebuild",
@@ -186,6 +193,29 @@ def main():
         except BackupError as exc:
             logger.error("Analyzer DB backup failed: %s", exc)
             sys.exit(1)
+
+    elif args.command == "decision-replay":
+        from src.db.connection import init_pools, close_pools, get_analyzer_pool
+        from src.pipeline.decision_replay import dry_run_decision_replay
+
+        async def _run():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                pool = get_analyzer_pool()
+                async with pool.acquire() as conn:
+                    report = await dry_run_decision_replay(
+                        conn,
+                        log_dir=args.log_dir,
+                        limit=args.limit,
+                    )
+                if args.json:
+                    print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+                else:
+                    print(report.to_text())
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
 
     elif args.command == "hard-reset-entities":
         if not args.yes:
