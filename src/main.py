@@ -54,6 +54,22 @@ def main():
                         help="Decision log directory (default: ANALYZER_DECISION_LOG_DIR)")
     replay.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     replay.add_argument("--limit", type=int, default=None, help="Limit decision events scanned")
+    priority_hints = sub.add_parser(
+        "priority-hints",
+        help="Preview or write analyzer-owned collector priority hints",
+    )
+    priority_mode = priority_hints.add_mutually_exclusive_group()
+    priority_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview hints without writing (default)",
+    )
+    priority_mode.add_argument(
+        "--write",
+        action="store_true",
+        help="Upsert hints into the analyzer collector_priority_hints table",
+    )
+    priority_hints.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     hard_reset = sub.add_parser(
         "hard-reset-entities",
         help="DESTRUCTIVE: wipe all entities+links (CASCADE wipes faces/signals) then rebuild",
@@ -208,6 +224,25 @@ def main():
                         log_dir=args.log_dir,
                         limit=args.limit,
                     )
+                if args.json:
+                    print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+                else:
+                    print(report.to_text())
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "priority-hints":
+        from src.db.connection import init_pools, close_pools, get_analyzer_pool
+        from src.pipeline.collector_priority_hints import export_collector_priority_hints
+
+        async def _run():
+            await init_pools(apply_schema_ddl=args.write)
+            try:
+                pool = get_analyzer_pool()
+                async with pool.acquire() as conn:
+                    report = await export_collector_priority_hints(conn, write=args.write)
                 if args.json:
                     print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
                 else:

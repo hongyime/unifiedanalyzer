@@ -328,6 +328,32 @@ CREATE INDEX IF NOT EXISTS idx_account_proximity_platform_owner
 CREATE INDEX IF NOT EXISTS idx_account_proximity_account
     ON account_proximity(platform, account_id);
 
+CREATE TABLE IF NOT EXISTS collector_priority_hints (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source VARCHAR(30) NOT NULL,
+    target_id VARCHAR(255) NOT NULL,
+    target_username VARCHAR(255),
+    priority SMALLINT NOT NULL DEFAULT 1,
+    confidence FLOAT NOT NULL,
+    hint_type VARCHAR(50) NOT NULL,
+    entity_id UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    candidate_entity_id UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    relationship_id UUID REFERENCES entity_relationships(id) ON DELETE SET NULL,
+    evidence JSONB NOT NULL DEFAULT '{}',
+    status VARCHAR(20) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (source, target_id, hint_type, entity_id, candidate_entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_collector_priority_hints_status
+    ON collector_priority_hints(status, priority, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_collector_priority_hints_target
+    ON collector_priority_hints(source, target_id);
+CREATE INDEX IF NOT EXISTS idx_collector_priority_hints_entity
+    ON collector_priority_hints(entity_id);
+CREATE INDEX IF NOT EXISTS idx_collector_priority_hints_candidate
+    ON collector_priority_hints(candidate_entity_id);
+
 -- Phase 6: media content analysis (see docs/media_analysis_plan.md).
 -- One row per (media_item_id, analysis_type). media_item_id references
 -- unifiedcollector.media_items.id by value (cross-database, no FK). For
