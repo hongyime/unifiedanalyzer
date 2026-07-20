@@ -280,6 +280,87 @@ def test_same_platform_penalty_source_annotates_flag():
     assert "if same_platform:" in text, "Multiplier not applied conditionally."
 
 
+def test_identity_scoring_skips_orphaned_uuid_targets(monkeypatch):
+    """Signals whose target_record_id points at a deleted entity must not break
+    the same-person relationship rebuild."""
+    import src.pipeline.identity_scorer as scorer
+
+    entity_a = "00000000-0000-0000-0000-000000000001"
+    entity_b = "00000000-0000-0000-0000-000000000002"
+    missing = "00000000-0000-0000-0000-000000000003"
+    writes = []
+
+    class Tx:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class Conn:
+        async def fetch(self, sql, *args):
+            if "FROM identity_signals" in sql:
+                return [
+                    {
+                        "entity_id": entity_a,
+                        "signal_type": "phone_match",
+                        "target_platform": None,
+                        "target_record_id": entity_b,
+                        "confidence": 1.0,
+                    },
+                    {
+                        "entity_id": entity_a,
+                        "signal_type": "phone_match",
+                        "target_platform": None,
+                        "target_record_id": missing,
+                        "confidence": 1.0,
+                    },
+                ]
+            if "FROM entity_platform_links" in sql:
+                return [
+                    {"entity_id": entity_a, "source": "telegram", "platform_id": "a"},
+                    {"entity_id": entity_b, "source": "whatsapp", "platform_id": "b"},
+                ]
+            if "FROM entities" in sql:
+                return [{"id": entity_a}, {"id": entity_b}]
+            if "FROM identity_labels" in sql:
+                return []
+            raise AssertionError(f"Unexpected fetch SQL: {sql}")
+
+        async def execute(self, sql, *args):
+            writes.append(("execute", sql, args))
+
+        async def executemany(self, sql, rows):
+            writes.append(("executemany", sql, rows))
+
+        def transaction(self):
+            return Tx()
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    monkeypatch.setattr(scorer, "get_analyzer_pool", lambda: Pool())
+    monkeypatch.setattr(scorer, "get_model", lambda: None)
+
+    stats = asyncio.run(scorer.compute_identity_scores())
+
+    persisted = [entry for entry in writes if entry[0] == "executemany"]
+    assert stats["pairs_scored"] == 1
+    assert stats["skipped_orphaned_targets"] == 1
+    assert len(persisted) == 1
+    rows = persisted[0][2]
+    assert len(rows) == 1
+    assert missing not in rows[0]
+
+
 # ---------------------------------------------------------------------------
 # New module import smoke tests
 # ---------------------------------------------------------------------------

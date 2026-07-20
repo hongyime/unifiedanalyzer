@@ -131,6 +131,9 @@ async def compute_identity_scores() -> dict:
         pid_to_entity: dict[tuple[str, str], str] = {
             (l["source"], l["platform_id"]): l["entity_id"] for l in link_rows
         }
+        valid_entities = {
+            r["id"] for r in await conn.fetch("SELECT id::text AS id FROM entities")
+        }
 
         # entity_id -> set of platforms it has links on (for cross_platform calc)
         entity_platforms: dict[str, set[str]] = {}
@@ -156,6 +159,7 @@ async def compute_identity_scores() -> dict:
     pair_contributions: dict[tuple[str, str], list[tuple[str, float]]] = {}
 
     skipped_unresolved = 0
+    skipped_orphaned = 0
     for row in signal_rows:
         src_eid = row["entity_id"]
         sig_type = row["signal_type"]
@@ -176,6 +180,10 @@ async def compute_identity_scores() -> dict:
 
         if not _is_uuid(src_eid) or not _is_uuid(tgt_eid):
             skipped_unresolved += 1
+            continue
+
+        if src_eid not in valid_entities or tgt_eid not in valid_entities:
+            skipped_orphaned += 1
             continue
 
         key = _pair_key(src_eid, tgt_eid)
@@ -279,5 +287,11 @@ async def compute_identity_scores() -> dict:
     }
     if skipped_unresolved:
         logger.debug("Identity scoring: skipped %d bio_mention rows with unresolved target entity", skipped_unresolved)
+    if skipped_orphaned:
+        stats["skipped_orphaned_targets"] = skipped_orphaned
+        logger.warning(
+            "Identity scoring: skipped %d rows pointing at missing entities",
+            skipped_orphaned,
+        )
     logger.info("Identity scoring: %s", stats)
     return stats
