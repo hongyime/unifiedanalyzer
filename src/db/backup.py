@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ class BackupConfig:
     database_url: str
     root: Path
     pg_dump_bin: str = "pg_dump"
+    pg_restore_bin: str = "pg_restore"
     retention: dict[BackupKind, int] | None = None
 
     @classmethod
@@ -83,6 +85,7 @@ class BackupConfig:
             database_url=db_url,
             root=backup_root,
             pg_dump_bin=pg_dump_bin or os.getenv("PG_DUMP_BIN", "pg_dump"),
+            pg_restore_bin=os.getenv("PG_RESTORE_BIN", "pg_restore"),
             retention=retention,
         )
 
@@ -246,22 +249,55 @@ def run_backup_kinds(
             would_delete=would_delete,
         )
 
+    run_id = _record_backup_run_start(config, normalized, targets)
     created: list[Path] = []
-    if targets:
-        primary = targets[0]
-        _run_pg_dump(config, primary)
-        created.append(primary)
-        for target in targets[1:]:
-            _copy_backup(primary, target)
-            created.append(target)
+    deleted: tuple[Path, ...] = tuple()
+    restore_validation: str | None = None
+    try:
+        if targets:
+            primary = targets[0]
+            _run_pg_dump(config, primary)
+            created.append(primary)
+            restore_validation = _validate_backup_archive(config, primary)
+            if restore_validation.startswith("failed:"):
+                raise BackupError(f"backup restore validation {restore_validation}")
+            for target in targets[1:]:
+                _copy_backup(primary, target)
+                created.append(target)
 
-    deleted = tuple(prune_backups(config, dry_run=False)) if apply_retention else tuple()
-    return BackupRunResult(
-        created=tuple(created),
-        deleted=deleted,
-        would_create=tuple(),
-        would_delete=tuple(),
+        deleted = tuple(prune_backups(config, dry_run=False)) if apply_retention else tuple()
+        result = BackupRunResult(
+            created=tuple(created),
+            deleted=deleted,
+            would_create=tuple(),
+            would_delete=tuple(),
+        )
+    except Exception as exc:
+        _record_backup_run_finish(
+            config,
+            run_id,
+            status="failed",
+            path=created[0] if created else (targets[0] if targets else None),
+            size_bytes=_path_size(created[0]) if created else None,
+            deleted_count=len(deleted),
+            restore_validation=restore_validation,
+            error_message=str(exc),
+            created_paths=tuple(created),
+        )
+        raise
+
+    _record_backup_run_finish(
+        config,
+        run_id,
+        status="success",
+        path=created[0] if created else None,
+        size_bytes=_path_size(created[0]) if created else 0,
+        deleted_count=len(deleted),
+        restore_validation=restore_validation,
+        error_message=None,
+        created_paths=result.created,
     )
+    return result
 
 
 def prune_backups(config: BackupConfig, *, dry_run: bool = False) -> tuple[Path, ...]:
@@ -370,6 +406,29 @@ def _run_pg_dump(config: BackupConfig, target: Path) -> None:
     logger.info("Analyzer DB backup created: %s", target)
 
 
+def _validate_backup_archive(config: BackupConfig, target: Path) -> str:
+    resolved = shutil.which(config.pg_restore_bin)
+    if resolved and Path(resolved).stem != Path(config.pg_restore_bin).stem:
+        resolved = None
+    pg_restore = resolved or (
+        config.pg_restore_bin if Path(config.pg_restore_bin).exists() else None
+    )
+    if not pg_restore:
+        return "skipped: pg_restore binary not found"
+
+    proc = subprocess.run(
+        [pg_restore, "--list", str(target)],
+        text=True,
+        capture_output=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return f"failed: pg_restore --list exited {proc.returncode}: {detail}"
+    return "passed: pg_restore --list"
+
+
 def _copy_backup(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f"{target.name}.tmp")
@@ -378,6 +437,125 @@ def _copy_backup(source: Path, target: Path) -> None:
     shutil.copy2(source, tmp)
     tmp.replace(target)
     logger.info("Analyzer DB backup copied: %s", target)
+
+
+def _record_backup_run_start(
+    config: BackupConfig,
+    kinds: tuple[BackupKind, ...],
+    targets: tuple[Path, ...],
+) -> uuid.UUID | None:
+    run_id = uuid.uuid4()
+    try:
+        with _connect_state_db(config) as conn:
+            _ensure_backup_runs_table(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO analyzer_backup_runs
+                        (id, status, kinds, path, metadata)
+                    VALUES (%s, 'running', %s, %s, %s::jsonb)
+                    """,
+                    (
+                        str(run_id),
+                        list(kinds),
+                        str(targets[0]) if targets else None,
+                        json.dumps({"target_paths": [str(path) for path in targets]}),
+                    ),
+                )
+            conn.commit()
+        return run_id
+    except Exception as exc:  # noqa: BLE001 - backup state must not block dumps
+        logger.warning("Could not record analyzer DB backup start: %s", exc)
+        return None
+
+
+def _record_backup_run_finish(
+    config: BackupConfig,
+    run_id: uuid.UUID | None,
+    *,
+    status: Literal["success", "failed"],
+    path: Path | None,
+    size_bytes: int | None,
+    deleted_count: int,
+    restore_validation: str | None,
+    error_message: str | None,
+    created_paths: tuple[Path, ...],
+) -> None:
+    if run_id is None:
+        return
+    try:
+        with _connect_state_db(config) as conn:
+            _ensure_backup_runs_table(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE analyzer_backup_runs
+                    SET status = %s,
+                        finished_at = NOW(),
+                        path = %s,
+                        size_bytes = %s,
+                        deleted_count = %s,
+                        restore_validation = %s,
+                        error_message = %s,
+                        metadata = metadata || %s::jsonb
+                    WHERE id = %s
+                    """,
+                    (
+                        status,
+                        str(path) if path else None,
+                        size_bytes,
+                        deleted_count,
+                        restore_validation,
+                        error_message,
+                        json.dumps({"created_paths": [str(p) for p in created_paths]}),
+                        str(run_id),
+                    ),
+                )
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001 - backup state must not block result reporting
+        logger.warning("Could not record analyzer DB backup finish: %s", exc)
+
+
+def _connect_state_db(config: BackupConfig):
+    import psycopg2
+
+    return psycopg2.connect(config.database_url, connect_timeout=2)
+
+
+def _ensure_backup_runs_table(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analyzer_backup_runs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                status VARCHAR(20) NOT NULL,
+                kinds TEXT[] NOT NULL DEFAULT '{}',
+                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at TIMESTAMPTZ,
+                path TEXT,
+                size_bytes BIGINT,
+                deleted_count INTEGER NOT NULL DEFAULT 0,
+                restore_validation TEXT,
+                error_message TEXT,
+                metadata JSONB NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analyzer_backup_runs_started "
+            "ON analyzer_backup_runs(started_at DESC)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analyzer_backup_runs_status "
+            "ON analyzer_backup_runs(status, started_at DESC)"
+        )
+
+
+def _path_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
 
 
 def _parse_database_url(database_url: str) -> dict[str, str | int]:

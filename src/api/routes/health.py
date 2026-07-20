@@ -13,6 +13,7 @@ async def health_check():
         "collector_db": "unknown",
         "last_incremental_run": None,
         "last_full_resolution": None,
+        "last_backup_run": None,
         "entity_count": 0,
         "alert_count_unread": 0,
     }
@@ -54,6 +55,31 @@ async def health_check():
             """)
             if full and full["finished_at"]:
                 status["last_full_resolution"] = full["finished_at"].isoformat()
+
+            try:
+                backup = await conn.fetchrow("""
+                    SELECT status, kinds, started_at, finished_at, path, size_bytes,
+                           deleted_count, restore_validation, error_message
+                    FROM analyzer_backup_runs
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                """)
+            except Exception:
+                backup = None
+            if backup:
+                status["last_backup_run"] = {
+                    "status": backup["status"],
+                    "kinds": list(backup["kinds"] or []),
+                    "started_at": backup["started_at"].isoformat()
+                    if backup["started_at"] else None,
+                    "finished_at": backup["finished_at"].isoformat()
+                    if backup["finished_at"] else None,
+                    "path": backup["path"],
+                    "size_bytes": backup["size_bytes"],
+                    "deleted_count": backup["deleted_count"],
+                    "restore_validation": backup["restore_validation"],
+                    "error_message": backup["error_message"],
+                }
 
     except Exception as e:
         status["analyzer_db"] = f"error: {e}"

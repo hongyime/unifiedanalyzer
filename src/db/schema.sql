@@ -211,6 +211,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_runs_one_running
 -- hung run is still reclaimed shortly after its heartbeat stops.
 ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP WITH TIME ZONE;
 
+CREATE TABLE IF NOT EXISTS analyzer_backup_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    status VARCHAR(20) NOT NULL, -- running | success | failed
+    kinds TEXT[] NOT NULL DEFAULT '{}',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ,
+    path TEXT,
+    size_bytes BIGINT,
+    deleted_count INTEGER NOT NULL DEFAULT 0,
+    restore_validation TEXT,
+    error_message TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_analyzer_backup_runs_started
+    ON analyzer_backup_runs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_analyzer_backup_runs_status
+    ON analyzer_backup_runs(status, started_at DESC);
+
 -- P2-3 (identity_system_review_plan.md): per-phase run status. Every secondary
 -- pipeline phase is non-fatal (try/except), so a persistently failing step was
 -- invisible. One row per (run, phase) records ok/failed + duration, enabling a

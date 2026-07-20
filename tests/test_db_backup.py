@@ -128,6 +128,62 @@ def test_run_backup_kinds_invokes_pg_dump_without_password_in_args(
     assert "unifiedanalyzer" in captured["cmd"]
 
 
+def test_run_backup_kinds_records_durable_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    import src.db.backup as backup
+
+    statements = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            statements.append((sql, params))
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+    def fake_run(cmd, **kwargs):
+        output = Path(cmd[cmd.index("--file") + 1])
+        output.write_bytes(b"custom-format-dump")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(backup, "_connect_state_db", lambda _config: FakeConn())
+    monkeypatch.setattr(backup.shutil, "which", lambda name: name if name == "pg_dump" else None)
+    monkeypatch.setattr(backup.subprocess, "run", fake_run)
+
+    config = BackupConfig(
+        database_url="postgres://collector:collector@localhost:5500/unifiedanalyzer",
+        root=tmp_path,
+        retention={"daily": 7, "weekly": 4, "monthly": 3},
+    )
+
+    result = run_backup_kinds(config, ("daily",), now=NOW, apply_retention=False)
+
+    assert result.created[0].stat().st_size == len(b"custom-format-dump")
+    assert any("INSERT INTO analyzer_backup_runs" in sql for sql, _ in statements)
+    update = next(params for sql, params in statements if "UPDATE analyzer_backup_runs" in sql)
+    assert update[0] == "success"
+    assert update[2] == len(b"custom-format-dump")
+    assert update[4] == "skipped: pg_restore binary not found"
+
+
 def test_backup_config_from_env_uses_retention_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv(
         "ANALYZER_DATABASE_URL",
