@@ -579,7 +579,17 @@ _PDF_CONTENT_TYPES = [(None, "pdf")]
 _MAX_PDF_TEXT_LEN = 200_000
 
 
+def _looks_like_pdf(path) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(1024).lstrip().startswith(b"%PDF-")
+    except OSError:
+        return False
+
+
 def _extract_pdf_text(path) -> str:
+    if not _looks_like_pdf(path):
+        return ""
     text = ""
     try:
         reader = pypdf.PdfReader(str(path))
@@ -611,12 +621,19 @@ async def analyze_media_pdf_text(limit: int | None = None) -> dict:
         path = resolve_media_path(item["file_path"])
         if path is None:
             continue
-        text = await asyncio.to_thread(_extract_pdf_text, path)
+        invalid_pdf_header = not _looks_like_pdf(path)
+        if invalid_pdf_header:
+            stats["invalid_pdf_header"] = stats.get("invalid_pdf_header", 0) + 1
+            text = ""
+        else:
+            text = await asyncio.to_thread(_extract_pdf_text, path)
 
         rows.append({
             "media_item_id": item["id"], "source": item["source"],
             "content_type": item["content_type"], "analysis_type": "pdf_text",
-            "extracted_text": text or None, "model_version": "pypdf-v1",
+            "extracted_text": text or None,
+            "result_json": {"skipped": "invalid_pdf_header"} if invalid_pdf_header else None,
+            "model_version": "pypdf-v1",
         })
         if text:
             eid = lookup_entity(entity_lookup, item["source"], item["entity_id"])
@@ -669,6 +686,15 @@ async def extract_pdf_images(limit: int | None = None) -> dict:
     for item in items:
         path = resolve_media_path(item["file_path"])
         if path is None:
+            continue
+        if not _looks_like_pdf(path):
+            stats["invalid_pdf_header"] = stats.get("invalid_pdf_header", 0) + 1
+            marker_rows.append({
+                "media_item_id": item["id"], "source": item["source"],
+                "content_type": item["content_type"], "analysis_type": "pdf_embedded_image",
+                "result_json": {"image_count": 0, "skipped": "invalid_pdf_header"},
+                "model_version": "pymupdf-v1",
+            })
             continue
         # (write-future, image_row) pairs — the row is recorded only once its file
         # has actually landed, so DB rows never reference a missing file.
