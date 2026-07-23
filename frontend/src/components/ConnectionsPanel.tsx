@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { List, Network, Users2 } from 'lucide-react'
+import { CheckCircle2, List, Network, Users2, XCircle } from 'lucide-react'
 import { FaceAvatar } from './FaceAvatar'
 import { NetworkGraph } from './NetworkGraph'
 import { Card } from './ui/Card'
@@ -93,6 +93,12 @@ type Connection = {
   faceOnly?: SocialCircleEntry
 }
 
+type RelationshipDecisionHandler = (
+  otherEntityId: string,
+  relationshipType: string,
+  isReal: boolean,
+) => Promise<void> | void
+
 const RELATIONSHIP_LABELS: Record<string, string> = {
   temporal_copost: 'activity overlap',
   temporal_hour_similarity: 'similar active hours',
@@ -125,6 +131,10 @@ function keyOf(id: string | null, fallback: string): string {
   return id ?? `anon:${fallback}`
 }
 
+function relationshipDecisionKey(otherEntityId: string, relationshipType: string, isReal: boolean): string {
+  return `${otherEntityId}:${relationshipType}:${isReal ? 'real' : 'not-real'}`
+}
+
 export function ConnectionsPanel({
   entityId,
   centerName,
@@ -134,6 +144,7 @@ export function ConnectionsPanel({
   network,
   associates,
   socialCircle,
+  onRelationshipDecision,
 }: {
   entityId: string
   centerName: string | null
@@ -143,9 +154,12 @@ export function ConnectionsPanel({
   network: NetworkData | null
   associates: Associate[]
   socialCircle: SocialCircleEntry[]
+  onRelationshipDecision?: RelationshipDecisionHandler
 }) {
   const [view, setView] = useState<'list' | 'graph'>('list')
   const [filter, setFilter] = useState<FilterKind>('all')
+  const [pendingDecision, setPendingDecision] = useState<string | null>(null)
+  const [decisionMessage, setDecisionMessage] = useState('')
 
   // ── Fuse all sources into one keyed map of connections ────────────────────
   const connections = useMemo<Connection[]>(() => {
@@ -274,6 +288,22 @@ export function ConnectionsPanel({
   const hasAnything =
     connections.length > 0 || unmatchedFaces.length > 0 || (network?.nodes.length ?? 0) > 0
 
+  const runRelationshipDecision = async (otherEntityId: string, relationshipType: string, isReal: boolean) => {
+    if (!onRelationshipDecision) return
+    const key = relationshipDecisionKey(otherEntityId, relationshipType, isReal)
+    setPendingDecision(key)
+    setDecisionMessage('')
+    try {
+      await onRelationshipDecision(otherEntityId, relationshipType, isReal)
+      setDecisionMessage(isReal ? 'Relationship confirmed.' : 'Relationship rejected.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setDecisionMessage(`Decision failed: ${message}`)
+    } finally {
+      setPendingDecision(null)
+    }
+  }
+
   if (!hasAnything) {
     return (
       <EmptyState
@@ -286,6 +316,12 @@ export function ConnectionsPanel({
 
   return (
     <div className="space-y-3">
+      {decisionMessage && (
+        <div className="rounded-md border border-border bg-hover px-3 py-2 text-sm text-text-secondary">
+          {decisionMessage}
+        </div>
+      )}
+
       {/* Toolbar: list⇄graph toggle + filter chips */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1">
@@ -359,7 +395,12 @@ export function ConnectionsPanel({
           ) : (
             <div className="space-y-2">
               {filtered.map((c) => (
-                <ConnectionRow key={keyOf(c.entityId, c.name ?? '')} c={c} />
+                <ConnectionRow
+                  key={keyOf(c.entityId, c.name ?? '')}
+                  c={c}
+                  onRelationshipDecision={onRelationshipDecision ? runRelationshipDecision : undefined}
+                  pendingDecision={pendingDecision}
+                />
               ))}
             </div>
           )}
@@ -389,7 +430,15 @@ export function ConnectionsPanel({
 }
 
 /** A single ranked connection, showing every facet that applies to it. */
-function ConnectionRow({ c }: { c: Connection }) {
+function ConnectionRow({
+  c,
+  onRelationshipDecision,
+  pendingDecision,
+}: {
+  c: Connection
+  onRelationshipDecision?: RelationshipDecisionHandler
+  pendingDecision: string | null
+}) {
   const label = c.name || (c.entityId ? c.entityId.slice(0, 8) : 'Unknown')
   const relTop = [...c.relTypes].sort((a, b) => b.weight - a.weight)
   const why = relTop.find((r) => r.why)?.why
@@ -443,6 +492,47 @@ function ConnectionRow({ c }: { c: Connection }) {
             <div className="mt-0.5 max-w-[520px] truncate text-[0.7rem] text-text-muted" title={groups.join(', ')}>
               Shared: {groups.slice(0, 6).join(', ')}
               {groups.length > 6 ? ` +${groups.length - 6} more` : ''}
+            </div>
+          )}
+          {c.entityId && onRelationshipDecision && relTop.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-1">
+              {relTop.map((r) => {
+                const confirmKey = relationshipDecisionKey(c.entityId as string, r.type, true)
+                const rejectKey = relationshipDecisionKey(c.entityId as string, r.type, false)
+                const busy = pendingDecision === confirmKey || pendingDecision === rejectKey
+                return (
+                  <div
+                    key={r.type}
+                    className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-1 py-0.5"
+                  >
+                    <span className="max-w-[150px] truncate px-1 text-[0.65rem] text-text-muted" title={relationshipLabel(r.type)}>
+                      {relationshipLabel(r.type)}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 w-6 px-0"
+                      icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+                      aria-label={`Confirm ${relationshipLabel(r.type)} relationship`}
+                      title={`Confirm ${relationshipLabel(r.type)} relationship`}
+                      loading={pendingDecision === confirmKey}
+                      disabled={pendingDecision != null && !busy}
+                      onClick={() => onRelationshipDecision(c.entityId as string, r.type, true)}
+                    />
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      className="h-6 w-6 px-0"
+                      icon={<XCircle className="h-3.5 w-3.5" />}
+                      aria-label={`Reject ${relationshipLabel(r.type)} relationship`}
+                      title={`Reject ${relationshipLabel(r.type)} relationship`}
+                      loading={pendingDecision === rejectKey}
+                      disabled={pendingDecision != null && !busy}
+                      onClick={() => onRelationshipDecision(c.entityId as string, r.type, false)}
+                    />
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

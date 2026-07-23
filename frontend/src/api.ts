@@ -243,6 +243,16 @@ export interface Relationship {
   why?: string | null
 }
 
+export interface RelationshipDecisionRequest {
+  entity_a: string
+  entity_b: string
+  relationship_type: string
+  is_real: boolean
+  confidence?: number | null
+  notes?: string | null
+  evidence_refs?: Record<string, unknown>
+}
+
 export interface InteractionPeer {
   entity_id: string
   name: string | null
@@ -686,6 +696,9 @@ export const api = {
 
   getRelationships: (entityId: string) =>
     get<{ data: Relationship[] }>(`/entities/${entityId}/relationships`),
+
+  decideRelationship: (body: RelationshipDecisionRequest) =>
+    post<{ ok: boolean; action: string }>('/entities/relationship-decision', body),
 
   getInteractions: (entityId: string, from?: string | null, to?: string | null) => {
     const q = new URLSearchParams()

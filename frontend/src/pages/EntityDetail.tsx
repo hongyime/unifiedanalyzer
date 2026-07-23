@@ -344,6 +344,30 @@ export default function EntityDetailPage() {
     }
   }
 
+  const handleRelationshipDecision = async (otherEntityId: string, relationshipType: string, isReal: boolean) => {
+    if (!id) return
+    try {
+      await api.decideRelationship({
+        entity_a: id,
+        entity_b: otherEntityId,
+        relationship_type: relationshipType,
+        is_real: isReal,
+        evidence_refs: {
+          source: 'connections_panel',
+          entity_page: id,
+          other_entity_id: otherEntityId,
+        },
+      })
+      setActionMsg(isReal ? 'Relationship confirmed' : 'Relationship rejected')
+      api.getEntityDecisions(id, 1).then((data) => setDecisionsTotal(data.total)).catch(() => {})
+      if (tab === 'decisions') loadDecisions()
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      setActionMsg(`Relationship decision failed: ${message}`)
+      throw e
+    }
+  }
+
   const handleSaveSettings = async () => {
     if (!id) return
     try {
@@ -637,6 +661,7 @@ export default function EntityDetailPage() {
             network={network}
             associates={associates?.associates ?? []}
             socialCircle={socialCircle ?? []}
+            onRelationshipDecision={handleRelationshipDecision}
           />
         </div>
       )}
