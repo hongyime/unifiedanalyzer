@@ -72,6 +72,10 @@ function compactValue(value: unknown): string {
   }
 }
 
+function evidenceTypeLabel(value: string | null | undefined): string {
+  return value ? value.replace(/_/g, ' ') : 'location evidence'
+}
+
 function decisionKeyValues(payload: Record<string, unknown>) {
   return ['notes', 'reason', 'confidence', 'relationship_type', 'watch_status', 'source', 'platform_id']
     .map((key) => ({ key, value: compactValue(payload[key]) }))
@@ -893,6 +897,15 @@ export default function EntityDetailPage() {
             >
               <StatRow label="Routes" value={geo?.counts.routes ?? 0} />
               <StatRow label="Places" value={geo?.counts.points ?? 0} />
+              {geo?.counts.evidence_types && Object.keys(geo.counts.evidence_types).length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {Object.entries(geo.counts.evidence_types).map(([type, count]) => (
+                    <span key={type} className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
+                      {evidenceTypeLabel(type)} {count}
+                    </span>
+                  ))}
+                </div>
+              )}
               {geo && geo.counts.routes + geo.counts.points === 0 && (
                 <div className="text-sm text-text-muted">No mapped evidence yet.</div>
               )}
@@ -1230,6 +1243,28 @@ export default function EntityDetailPage() {
                       {selectedGeoEvent.kind === 'point'
                         ? `${selectedGeoEvent.lat?.toFixed(5)}, ${selectedGeoEvent.lng?.toFixed(5)}`
                         : `${selectedGeoEvent.route_type || 'route'} · ${selectedGeoEvent.point_count ?? 0} points`}
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
+                        {evidenceTypeLabel(selectedGeoEvent.evidence_type)}
+                      </span>
+                      {selectedGeoEvent.confidence != null && (
+                        <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
+                          {Math.round(selectedGeoEvent.confidence * 100)}% confidence
+                        </span>
+                      )}
+                      {selectedGeoEvent.source_table && (
+                        <span
+                          className="max-w-[280px] truncate rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary"
+                          title={[
+                            selectedGeoEvent.source_table,
+                            selectedGeoEvent.source_record_id,
+                          ].filter(Boolean).join(':')}
+                        >
+                          {selectedGeoEvent.source_table}
+                          {selectedGeoEvent.source_record_id ? `:${selectedGeoEvent.source_record_id}` : ''}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-1">

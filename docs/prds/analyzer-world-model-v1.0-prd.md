@@ -237,7 +237,7 @@
 - Connections now expose relationship evidence with one-click confirm/reject controls backed by `/api/entities/relationship-decision`; decisions write to audit DB rows and append-only JSONL.
 - Person pages now include a Media/Faces tab backed by `/api/entities/{entity_id}/media-faces`, with account-linked media, face links, and owner/person-in-photo confirm/reject actions wired to durable media decision events.
 - Timeline now supports source and event-type filters plus the existing date brush. Confidence filtering is still pending because `timeline_events` does not currently store a confidence field.
-- Map selections now carry point/route evidence into confirm/reject controls backed by `/api/entities/{entity_id}/location-decision`.
+- Map geo payloads now classify route polylines, GPS starts, venue tags, venue geocodes, and message locations with confidence and source references; the map drawer shows those details before confirm/reject actions. A normalized durable location-evidence table is still pending.
 - Platform links now show link confidence and expose a source-confidence adjustment menu backed by `/api/entities/{entity_id}/source-confidence`.
 - Person pages now open on an Overview tab that summarizes confidence, account spread, identity evidence, latest activity, mapped evidence counts, relationship leads, and decision count before the deeper tabs.
 - Replay apply safely restores audit rows, dismissed identity candidates, same-person relationship confirm/reject labels, target tiers, notes, and source-confidence adjustments. Merge/split, location decisions, and media/person-in-photo decisions still require derived-table rebuilds or future normalized destination tables.

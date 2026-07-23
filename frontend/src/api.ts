@@ -696,9 +696,29 @@ export const api = {
     if (to) q.set('to', to)
     const suffix = q.toString() ? `?${q.toString()}` : ''
     return get<{
-      routes: { name: string | null; type: string | null; date: string | null; source: string; points: [number, number][] }[]
-      points: { lat: number; lng: number; label: string | null; source: string; occurred_at: string | null }[]
-      counts: { routes: number; points: number }
+      routes: {
+        name: string | null
+        type: string | null
+        date: string | null
+        source: string
+        evidence_type?: string | null
+        confidence?: number | null
+        source_table?: string | null
+        source_record_id?: string | null
+        points: [number, number][]
+      }[]
+      points: {
+        lat: number
+        lng: number
+        label: string | null
+        source: string
+        occurred_at: string | null
+        evidence_type?: string | null
+        confidence?: number | null
+        source_table?: string | null
+        source_record_id?: string | null
+      }[]
+      counts: { routes: number; points: number; evidence_types?: Record<string, number> }
     }>(`/entities/${entityId}/geo${suffix}`)
   },
 

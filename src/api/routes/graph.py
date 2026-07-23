@@ -172,7 +172,7 @@ async def entity_geo(
                     FROM strava_athletes
                     WHERE platform_athlete_id = ANY($1::bigint[])
                 )
-                SELECT a.name, a.start_date, a.type, a.start_latlng, a.summary_polyline,
+                SELECT a.platform_activity_id, a.name, a.start_date, a.type, a.start_latlng, a.summary_polyline,
                        s.latlng::text AS latlng
                 FROM strava_activities a
                 LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
@@ -188,6 +188,10 @@ async def entity_geo(
                     routes.append({"name": r["name"], "type": r["type"],
                                    "date": r["start_date"].isoformat() if r["start_date"] else None,
                                    "source": "strava",
+                                   "evidence_type": "route_polyline",
+                                   "confidence": 0.9 if r["latlng"] else 0.75,
+                                   "source_table": "strava_activities",
+                                   "source_record_id": str(r["platform_activity_id"]),
                                    "points": pts})
                 sp = _parse_latlng(r["start_latlng"])
                 if sp:
@@ -196,6 +200,10 @@ async def entity_geo(
                         "lng": sp[1],
                         "label": r["name"],
                         "source": "strava",
+                        "evidence_type": "gps_start",
+                        "confidence": 0.7,
+                        "source_table": "strava_activities",
+                        "source_record_id": str(r["platform_activity_id"]),
                         "occurred_at": r["start_date"].isoformat() if r["start_date"] else None,
                     })
         if ig_ids:
@@ -208,7 +216,7 @@ async def entity_geo(
                 ig_filters.append(f"p.platform_created_at <= ${len(ig_params) + 1}")
                 ig_params.append(to_date)
             posts = await cc.fetch(f"""
-                SELECT p.location_name, p.location_lat, p.location_lng, p.platform_created_at
+                SELECT p.platform_post_id, p.location_name, p.location_lat, p.location_lng, p.platform_created_at
                 FROM instagram_posts p
                 JOIN instagram_profiles pr ON pr.id = p.profile_id
                 WHERE {' AND '.join(ig_filters)}
@@ -220,6 +228,10 @@ async def entity_geo(
                     "lng": float(p["location_lng"]),
                     "label": p["location_name"],
                     "source": "instagram",
+                    "evidence_type": "venue_tag",
+                    "confidence": 0.75,
+                    "source_table": "instagram_posts",
+                    "source_record_id": str(p["platform_post_id"]),
                     "occurred_at": p["platform_created_at"].isoformat() if p["platform_created_at"] else None,
                 })
             # IG stores only place NAMES (no coords); collect them to resolve via
@@ -250,7 +262,7 @@ async def entity_geo(
                 tg_filters.append(f"m.platform_created_at <= ${len(tg_params) + 1}")
                 tg_params.append(to_date)
             loc_rows = await cc.fetch(f"""
-                SELECT l.latitude, l.longitude,
+                SELECT m.platform_message_id, l.latitude, l.longitude,
                        COALESCE(NULLIF(l.venue_title, ''), NULLIF(l.venue_address, ''), LEFT(COALESCE(m.text, m.caption, ''), 120)) AS label,
                        m.platform_created_at
                 FROM telegram_message_locations l
@@ -266,6 +278,10 @@ async def entity_geo(
                     "lng": float(row["longitude"]),
                     "label": row["label"],
                     "source": "telegram",
+                    "evidence_type": "message_location",
+                    "confidence": 0.9,
+                    "source_table": "telegram_message_locations",
+                    "source_record_id": str(row["platform_message_id"]),
                     "occurred_at": row["platform_created_at"].isoformat() if row["platform_created_at"] else None,
                 })
 
@@ -276,10 +292,24 @@ async def entity_geo(
                 "SELECT place_name, lat, lng FROM geocode_cache "
                 "WHERE status = 'ok' AND place_name = ANY($1::text[])", ig_place_names)
         for g in geo:
-            points.append({"lat": g["lat"], "lng": g["lng"], "label": g["place_name"], "source": "instagram", "occurred_at": None})
+            points.append({
+                "lat": g["lat"],
+                "lng": g["lng"],
+                "label": g["place_name"],
+                "source": "instagram",
+                "evidence_type": "venue_geocode",
+                "confidence": 0.55,
+                "source_table": "geocode_cache",
+                "source_record_id": g["place_name"],
+                "occurred_at": None,
+            })
 
+    evidence_counts: dict[str, int] = {}
+    for item in [*routes, *points]:
+        key = str(item.get("evidence_type") or "unknown")
+        evidence_counts[key] = evidence_counts.get(key, 0) + 1
     return {"routes": routes, "points": points,
-            "counts": {"routes": len(routes), "points": len(points)}}
+            "counts": {"routes": len(routes), "points": len(points), "evidence_types": evidence_counts}}
 
 
 @router.get("/entities/{entity_id}/associates")
