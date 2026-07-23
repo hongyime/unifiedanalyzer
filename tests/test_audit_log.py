@@ -72,6 +72,66 @@ def test_append_audit_writes_decision_jsonl(tmp_path, monkeypatch):
     assert any("decision_jsonl_written_at = NOW()" in sql for sql, _ in conn.executed)
 
 
+def test_append_audit_writes_stable_refs_and_evidence_snapshot(tmp_path, monkeypatch):
+    import src.util.audit_log as audit_log
+
+    monkeypatch.setattr(audit_log, "DECISION_LOG_DIR", tmp_path)
+    now = datetime(2026, 7, 20, 2, 0, 0, 123456, tzinfo=timezone.utc)
+
+    class Conn:
+        async def fetchrow(self, sql, *args):
+            if "SELECT sha256 FROM audit_log" in sql:
+                return None
+            if "SELECT NOW() AS ts" in sql:
+                return {"ts": now}
+            if "INSERT INTO audit_log" in sql:
+                return {
+                    "id": 46,
+                    "created_at": now,
+                    "prev_sha256": args[0],
+                    "sha256": args[1],
+                    "decision_jsonl_written_at": None,
+                }
+            raise AssertionError(f"Unexpected SQL: {sql}")
+
+        async def execute(self, _sql, *_args):
+            return "UPDATE 1"
+
+    asyncio.run(
+        audit_log.append_audit(
+            Conn(),
+            action="confirm_relationship",
+            actor="dashboard",
+            entity_ids=["00000000-0000-0000-0000-000000000001"],
+            payload={
+                "confidence": 96,
+                "evidence_refs": {"signal_id": "sig-1"},
+                "entity_snapshot": [{
+                    "entity_id": "00000000-0000-0000-0000-000000000001",
+                    "platform_links": [{
+                        "source": "instagram",
+                        "platform_id": "123",
+                        "platform_username": "alice",
+                    }],
+                }],
+            },
+        )
+    )
+
+    event = json.loads((tmp_path / "2026-07.jsonl").read_text(encoding="utf-8"))
+    assert event["stable_refs"] == [{
+        "source": "instagram",
+        "platform_id": "123",
+        "platform_username": "alice",
+        "media_sha256": None,
+        "sidecar_path": None,
+    }]
+    assert event["evidence_snapshot"] == {
+        "confidence": 96,
+        "evidence_refs": {"signal_id": "sig-1"},
+    }
+
+
 def test_append_audit_invalid_decision_event_is_nonfatal_and_not_written(
     tmp_path,
     monkeypatch,

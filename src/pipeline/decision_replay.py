@@ -513,6 +513,24 @@ def summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def stable_refs_from_event(event: dict[str, Any]) -> list[dict[str, str | None]]:
     refs: list[dict[str, str | None]] = []
+    for ref in event.get("stable_refs") or []:
+        if not isinstance(ref, dict):
+            continue
+        source = _clean(ref.get("source"))
+        platform_id = _clean(ref.get("platform_id"))
+        username = _clean(ref.get("platform_username"))
+        if not source or not (platform_id or username):
+            continue
+        out = {
+            "source": source,
+            "platform_id": platform_id,
+            "platform_username": username,
+        }
+        if out not in refs:
+            refs.append(out)
+    if refs:
+        return refs
+
     payload = event.get("payload") or {}
     for snapshot in _walk_snapshots(payload):
         for link in snapshot.get("platform_links") or []:

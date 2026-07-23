@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 DECISION_LOG_DIR = Path(os.getenv("ANALYZER_DECISION_LOG_DIR", "Z:/unifiedanalyzer/decisions"))
 DECISION_EVENT_SCHEMA_VERSION = 1
-_DECISION_EVENT_FIELDS = {
+_DECISION_EVENT_REQUIRED_FIELDS = {
     "schema_version",
     "audit_id",
     "event_type",
@@ -45,6 +45,11 @@ _DECISION_EVENT_FIELDS = {
     "sha256",
     "idempotency_key",
 }
+_DECISION_EVENT_OPTIONAL_FIELDS = {
+    "stable_refs",
+    "evidence_snapshot",
+}
+_DECISION_EVENT_FIELDS = _DECISION_EVENT_REQUIRED_FIELDS | _DECISION_EVENT_OPTIONAL_FIELDS
 
 
 def _canonical_json(obj) -> str:
@@ -74,7 +79,7 @@ def _is_sha256_hex(value: object) -> bool:
 
 
 def _validate_decision_event(event: dict) -> None:
-    missing = _DECISION_EVENT_FIELDS - event.keys()
+    missing = _DECISION_EVENT_REQUIRED_FIELDS - event.keys()
     if missing:
         raise ValueError(f"decision event missing fields: {sorted(missing)}")
 
@@ -121,6 +126,27 @@ def _validate_decision_event(event: dict) -> None:
 
     if not _is_sha256_hex(event["idempotency_key"]):
         raise ValueError("decision event idempotency_key must be a sha256 hex string")
+
+    if "stable_refs" in event:
+        stable_refs = event["stable_refs"]
+        if not isinstance(stable_refs, list):
+            raise ValueError("decision event stable_refs must be a list")
+        for ref in stable_refs:
+            if not isinstance(ref, dict):
+                raise ValueError("decision event stable_refs entries must be objects")
+            if not isinstance(ref.get("source"), str) or not ref.get("source"):
+                raise ValueError("decision event stable_refs entries require source")
+            if ref.get("platform_id") is not None and not isinstance(ref.get("platform_id"), str):
+                raise ValueError("decision event stable_refs platform_id must be string or null")
+            if ref.get("platform_username") is not None and not isinstance(ref.get("platform_username"), str):
+                raise ValueError("decision event stable_refs platform_username must be string or null")
+            if ref.get("media_sha256") is not None and not isinstance(ref.get("media_sha256"), str):
+                raise ValueError("decision event stable_refs media_sha256 must be string or null")
+            if ref.get("sidecar_path") is not None and not isinstance(ref.get("sidecar_path"), str):
+                raise ValueError("decision event stable_refs sidecar_path must be string or null")
+
+    if "evidence_snapshot" in event and not isinstance(event["evidence_snapshot"], dict):
+        raise ValueError("decision event evidence_snapshot must be an object")
 
 
 def _decision_log_path(created_at) -> Path:
@@ -177,9 +203,87 @@ def _decision_event(*, audit_id: int, prev_sha256: str | None,
         "prev_sha256": prev_sha256,
         "sha256": sha256,
         "idempotency_key": event_key,
+        "stable_refs": _stable_refs_from_payload(payload or {}),
+        "evidence_snapshot": _evidence_snapshot_from_payload(payload or {}),
     }
     _validate_decision_event(event)
     return event
+
+
+def _stable_refs_from_payload(payload: dict) -> list[dict[str, str | None]]:
+    refs: list[dict[str, str | None]] = []
+    for snapshot in _walk_entity_snapshots(payload):
+        for link in snapshot.get("platform_links") or []:
+            source = _clean_str(link.get("source"))
+            platform_id = _clean_str(link.get("platform_id"))
+            username = _clean_str(link.get("platform_username"))
+            if not source or not (platform_id or username):
+                continue
+            ref = {
+                "source": source,
+                "platform_id": platform_id,
+                "platform_username": username,
+                "media_sha256": None,
+                "sidecar_path": None,
+            }
+            if ref not in refs:
+                refs.append(ref)
+
+    media_ref = payload.get("media_ref") if isinstance(payload, dict) else None
+    if isinstance(media_ref, dict):
+        source = _clean_str(media_ref.get("source"))
+        content_id = _clean_str(media_ref.get("content_id") or media_ref.get("platform_media_id"))
+        media_sha = _clean_str(media_ref.get("sha256") or media_ref.get("media_sha256"))
+        sidecar_path = _clean_str(media_ref.get("sidecar_path") or media_ref.get("vault_sidecar"))
+        if source and (content_id or media_sha or sidecar_path):
+            ref = {
+                "source": source,
+                "platform_id": content_id,
+                "platform_username": None,
+                "media_sha256": media_sha,
+                "sidecar_path": sidecar_path,
+            }
+            if ref not in refs:
+                refs.append(ref)
+    return refs
+
+
+def _evidence_snapshot_from_payload(payload: dict) -> dict:
+    snapshot: dict = {}
+    for key in (
+        "confidence",
+        "evidence_refs",
+        "candidate_evidence",
+        "relationship_snapshot",
+        "location_ref",
+        "media_ref",
+        "platform_link_snapshot",
+        "watch_status",
+        "previous_watch_status",
+        "reason",
+        "notes",
+    ):
+        if key in payload:
+            snapshot[key] = payload[key]
+    return snapshot
+
+
+def _walk_entity_snapshots(value):
+    if isinstance(value, dict):
+        if isinstance(value.get("platform_links"), list):
+            yield value
+        for child in value.values():
+            yield from _walk_entity_snapshots(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_entity_snapshots(child)
+
+
+def _clean_str(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _write_decision_event(*, audit_id: int, prev_sha256: str | None,

@@ -92,6 +92,29 @@ def test_stable_refs_from_event_extracts_platform_links():
     ]
 
 
+def test_stable_refs_from_event_prefers_explicit_event_refs():
+    event = _event(payload={})
+    event["stable_refs"] = [
+        {
+            "source": "telegram",
+            "platform_id": "42",
+            "platform_username": None,
+            "media_sha256": None,
+            "sidecar_path": None,
+        }
+    ]
+
+    refs = stable_refs_from_event(event)
+
+    assert refs == [
+        {
+            "source": "telegram",
+            "platform_id": "42",
+            "platform_username": None,
+        }
+    ]
+
+
 def test_decision_replay_marks_restorable_event(tmp_path):
     _write_event(tmp_path, _event(payload={"entity_snapshots_before": [_snapshot()]}))
     conn = FakeConn({"instagram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}]})
