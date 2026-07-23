@@ -9,8 +9,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 HINT_TYPE_SAME_PERSON_95_99 = "same_person_probability_95_99"
+HINT_TYPE_SAME_PERSON_CONFIRMED_100 = "same_person_confirmed_100"
 MIN_HINT_CONFIDENCE = 0.95
-MAX_HINT_CONFIDENCE_EXCLUSIVE = 1.0
+MAX_HINT_CONFIDENCE = 1.0
 DEFAULT_HINT_PRIORITY = 1
 
 TARGETABLE_SOURCES = {
@@ -151,8 +152,8 @@ async def build_collector_priority_hints(conn) -> tuple[list[CollectorPriorityHi
         if confidence is None:
             skipped["missing_confidence"] += 1
             continue
-        if not (MIN_HINT_CONFIDENCE <= confidence < MAX_HINT_CONFIDENCE_EXCLUSIVE):
-            skipped["confidence_outside_95_99"] += 1
+        if not (MIN_HINT_CONFIDENCE <= confidence <= MAX_HINT_CONFIDENCE):
+            skipped["confidence_outside_95_100"] += 1
             continue
         entity_a = _clean(_row_get(row, "entity_a_id"))
         entity_b = _clean(_row_get(row, "entity_b_id"))
@@ -267,8 +268,8 @@ async def _fetch_candidate_relationships(conn):
         FROM entity_relationships er
         WHERE er.relationship_type = 'same_person_probability'
           AND (
-                (er.weight >= 95 AND er.weight < 100)
-             OR (er.weight >= 0.95 AND er.weight < 1.0)
+                (er.weight >= 95 AND er.weight <= 100)
+             OR (er.weight >= 0.95 AND er.weight <= 1.0)
           )
         ORDER BY er.weight DESC NULLS LAST, er.updated_at DESC NULLS LAST
         """
@@ -342,9 +343,10 @@ def _add_directional_hints(
             continue
         target_found = True
         relationship_id = _clean(_row_get(relationship, "relationship_id") or _row_get(relationship, "id"))
+        hint_type = _hint_type_for_confidence(confidence)
         evidence = {
             "exporter": "collector_priority_hints",
-            "policy": "same_person_probability_95_99_no_auto_merge",
+            "policy": _policy_for_confidence(confidence),
             "relationship_type": "same_person_probability",
             "relationship_weight": _row_get(relationship, "weight"),
             "relationship_sources": _json_value(_row_get(relationship, "sources")),
@@ -357,7 +359,7 @@ def _add_directional_hints(
             target_username=_clean(candidate_link.get("platform_username")),
             priority=DEFAULT_HINT_PRIORITY,
             confidence=round(confidence, 4),
-            hint_type=HINT_TYPE_SAME_PERSON_95_99,
+            hint_type=hint_type,
             entity_id=entity_id,
             candidate_entity_id=candidate_entity_id,
             relationship_id=relationship_id,
@@ -370,6 +372,18 @@ def _add_directional_hints(
 
     if not target_found:
         skipped["candidate_without_targetable_links"] += 1
+
+
+def _hint_type_for_confidence(confidence: float) -> str:
+    if confidence >= 1.0:
+        return HINT_TYPE_SAME_PERSON_CONFIRMED_100
+    return HINT_TYPE_SAME_PERSON_95_99
+
+
+def _policy_for_confidence(confidence: float) -> str:
+    if confidence >= 1.0:
+        return "same_person_confirmed_100_no_collector_overwrite"
+    return "same_person_probability_95_99_no_auto_merge"
 
 
 def _evidence_link(link: dict[str, Any]) -> dict[str, Any]:

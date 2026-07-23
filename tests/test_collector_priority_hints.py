@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from src.pipeline.collector_priority_hints import (
+    HINT_TYPE_SAME_PERSON_CONFIRMED_100,
     HINT_TYPE_SAME_PERSON_95_99,
     build_collector_priority_hints,
     export_collector_priority_hints,
@@ -138,7 +139,7 @@ def test_priority_hints_write_upserts_into_analyzer_table():
     assert json.loads(first[9])["policy"] == "same_person_probability_95_99_no_auto_merge"
 
 
-def test_priority_hints_filters_low_confidence_and_exact_matches():
+def test_priority_hints_includes_confirmed_and_filters_outside_band():
     conn = FakeConn(
         relationships=[
             _relationship(weight=94, confidence=0.94),
@@ -167,8 +168,17 @@ def test_priority_hints_filters_low_confidence_and_exact_matches():
     hints, skipped = asyncio.run(build_collector_priority_hints(conn))
 
     assert {(hint.entity_id, hint.candidate_entity_id) for hint in hints} == {
+        (ENTITY_A, ENTITY_C),
+        (ENTITY_C, ENTITY_A),
         (ENTITY_B, ENTITY_C),
         (ENTITY_C, ENTITY_B),
     }
-    assert {hint.confidence for hint in hints} == {0.955}
-    assert skipped["confidence_outside_95_99"] == 2
+    assert {hint.confidence for hint in hints} == {0.955, 1.0}
+    assert {hint.hint_type for hint in hints} == {
+        HINT_TYPE_SAME_PERSON_95_99,
+        HINT_TYPE_SAME_PERSON_CONFIRMED_100,
+    }
+    confirmed = [hint for hint in hints if hint.confidence == 1.0]
+    assert confirmed
+    assert all(hint.evidence["policy"] == "same_person_confirmed_100_no_collector_overwrite" for hint in confirmed)
+    assert skipped["confidence_outside_95_100"] == 1
