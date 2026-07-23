@@ -21,8 +21,10 @@ def _decode_meta(raw) -> dict:
 
 
 _DECISION_ACTION_LABELS = {
+    "merge_entities": "Merge confirmed",
     "merge_confirmed": "Merge confirmed",
     "split_person": "Split person",
+    "dismiss_match": "Dismissed identity candidate",
     "dismiss_identity_candidate": "Dismissed identity candidate",
     "confirm_relationship": "Relationship confirmed",
     "reject_relationship": "Relationship rejected",
@@ -47,18 +49,20 @@ def _short(value: Any, *, max_len: int = 96) -> str:
 
 
 def _decision_summary(action: str, payload: dict) -> str:
-    if action == "merge_confirmed":
+    if action in {"merge_confirmed", "merge_entities"}:
         merged = int(payload.get("merged_count") or len(payload.get("merged_entity_ids") or []) or 0)
         target = payload.get("target_entity_id")
         if target:
             return f"Merged {merged} into {str(target)[:8]}"
+        if not payload:
+            return "Merge confirmed"
         return f"Merged {merged} source entity" if merged == 1 else f"Merged {merged} source entities"
     if action == "split_person":
         links = payload.get("split_links") or payload.get("split_link_ids") or []
         new_id = payload.get("new_entity_id")
         suffix = f" into {str(new_id)[:8]}" if new_id else ""
         return f"Split {len(links)} platform link{'' if len(links) == 1 else 's'}{suffix}"
-    if action == "dismiss_identity_candidate":
+    if action in {"dismiss_identity_candidate", "dismiss_match"}:
         other = payload.get("entity_b") or payload.get("entity_a")
         return f"Marked candidate as not same{f' ({str(other)[:8]})' if other else ''}"
     if action in {"confirm_relationship", "reject_relationship"}:

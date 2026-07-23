@@ -46,7 +46,7 @@ class _Conn:
             return [
                 {
                     "id": 12,
-                    "action": "dismiss_identity_candidate",
+                    "action": "dismiss_match",
                     "actor": "dashboard",
                     "entity_ids": [ENTITY_ID, OTHER_ID],
                     "payload": {"entity_a": ENTITY_ID, "entity_b": OTHER_ID, "confidence": "X"},
@@ -73,7 +73,7 @@ def test_entity_decisions_returns_decision_history(monkeypatch):
     assert result["entity_id"] == ENTITY_ID
     assert result["total"] == 1
     decision = result["decisions"][0]
-    assert decision["action"] == "dismiss_identity_candidate"
+    assert decision["action"] == "dismiss_match"
     assert decision["action_label"] == "Dismissed identity candidate"
     assert decision["summary"] == "Marked candidate as not same (00000000)"
     assert decision["entity_names"][OTHER_ID] == "Other"
