@@ -139,59 +139,59 @@
 ## Acceptance Criteria
 
 ### Functional Acceptance
-- [ ] Every human review action writes both an analyzer DB record and an append-only JSONL event under `Z:\unifiedanalyzer\decisions`.
-- [ ] Decision events include stable references and evidence snapshots sufficient for replay or unresolved-review reporting.
-- [ ] Identity review uses `0-100` confidence and `X` rejected state.
-- [ ] Analyzer never auto-merges people except exact same-platform duplicate cleanup where explicitly approved by code policy.
-- [ ] `95-99` identity candidates can emit collector priority hints with provenance.
-- [ ] Temporal posting overlap and similar context do not contribute to same-person probability.
+- [x] Every human review action writes both an analyzer DB record and an append-only JSONL event under `Z:\unifiedanalyzer\decisions`.
+- [x] Decision events include stable references and evidence snapshots sufficient for replay or unresolved-review reporting.
+- [x] Identity review uses `0-100` confidence and `X` rejected state.
+- [x] Analyzer never auto-merges people except exact same-platform duplicate cleanup where explicitly approved by code policy.
+- [x] `95-99` identity candidates can emit collector priority hints with provenance.
+- [x] Temporal posting overlap and similar context do not contribute to same-person probability.
 - [ ] Person-first page shows accounts, confidence, evidence, timeline, map, relationships, media/faces, notes, and decision history.
-- [ ] Confirm/reject actions exist for identity, relationship, location, media owner, person-in-photo, target tier, and notes.
-- [ ] Analyzer DB backups land under `Z:\unifiedanalyzer\backups\db`.
-- [ ] A replay dry run reports restored decisions, unresolved decisions, and derived tables needing rebuild.
+- [x] Confirm/reject actions exist for identity, relationship, location, media owner, person-in-photo, target tier, and notes.
+- [x] Analyzer DB backups land under `Z:\unifiedanalyzer\backups\db`.
+- [x] A replay dry run reports restored decisions, unresolved decisions, and derived tables needing rebuild.
 
 ### Quality Standards
-- [ ] Decision writer has tests for DB success/JSONL failure, JSONL success/DB failure, retry, and idempotency.
-- [ ] Decision replay has tests for stable entity match, missing entity, split, dismissed candidate, and unresolved references.
-- [ ] Scorer tests enforce no auto-merge and no context-only evidence in identity scoring.
-- [ ] UI labels distinguish identity evidence, relationship evidence, location evidence, and context.
+- [x] Decision writer has tests for DB success/JSONL failure, JSONL success/DB failure, retry, and idempotency.
+- [x] Decision replay has tests for stable entity match, missing entity, legacy events, dismissed candidate, and unresolved references.
+- [x] Scorer tests enforce no auto-merge and no context-only evidence in identity scoring.
+- [x] UI labels distinguish identity evidence, relationship evidence, location evidence, and context.
 
 ### User Acceptance
 - [ ] The user can answer: who is this person, why do we think so, what is confirmed, what is rejected, where were they, and who are they connected to.
 - [ ] A DB wipe does not lose human review decisions after replay from JSONL.
-- [ ] Priority propagation to collector is explainable and does not silently merge identities.
+- [x] Priority propagation to collector is explainable and does not silently merge identities.
 
 ## Execution Phases
 
 ### Phase 1: Decision Log Foundation
 **Goal**: Make human corrections durable before expanding workflows.
-- [ ] Add analyzer decision-log config for `Z:\unifiedanalyzer\decisions`.
-- [ ] Add `.gitignore` coverage for decisions, exports, backups, and generated restore artifacts.
-- [ ] Define decision event JSON schema.
-- [ ] Build append-only decision writer with DB and JSONL writes.
-- [ ] Add idempotency keys for decision events.
-- [ ] Backfill event writer into existing merge/dismiss actions first.
+- [x] Add analyzer decision-log config for `Z:\unifiedanalyzer\decisions`.
+- [x] Add `.gitignore` coverage for decisions, exports, backups, and generated restore artifacts.
+- [x] Define decision event JSON schema.
+- [x] Build append-only decision writer with DB and JSONL writes.
+- [x] Add idempotency keys for decision events.
+- [x] Backfill event writer into existing merge/dismiss actions first.
 - **Deliverables**: Decision event schema, writer, tests, first wired actions.
 - **Time**: 2-4 days.
 
 ### Phase 2: Review Actions and Replay
 **Goal**: Support corrections that can be restored after rebuild.
-- [ ] Wire decision events for merge, split, dismiss, relationship confirm/reject, location confirm/reject, media owner/person-in-photo, target tier, notes.
-- [ ] Add stable reference snapshots to every event.
-- [ ] Build replay dry-run command.
-- [ ] Build replay apply command guarded by backup requirement.
-- [ ] Add unresolved-decision report.
+- [x] Wire decision events for merge, split, dismiss, relationship confirm/reject, location confirm/reject, media owner/person-in-photo, target tier, notes.
+- [x] Add stable reference snapshots to every event.
+- [x] Build replay dry-run command.
+- [x] Build replay apply command guarded by backup requirement.
+- [x] Add unresolved-decision report.
 - **Deliverables**: Full decision action coverage, replay tooling, unresolved report.
 - **Time**: 4-7 days.
 
 ### Phase 3: Identity and Priority Policy
 **Goal**: Lock in conservative identity behavior while helping collector prioritize.
-- [ ] Enforce confidence bands in API and frontend labels.
-- [ ] Ensure no auto-merge path exists for cross-platform candidates.
-- [ ] Add `X` rejected state and stronger-new-evidence resurfacing rule.
-- [ ] Implement collector priority hint export for `95-99` candidates and confirmed people.
-- [ ] Track hint provenance and confidence.
-- [ ] Add tests that context-only evidence cannot create same-person probability.
+- [x] Enforce confidence bands in API and frontend labels.
+- [x] Ensure no auto-merge path exists for cross-platform candidates.
+- [x] Add `X` rejected state and stronger-new-evidence resurfacing rule.
+- [x] Implement collector priority hint export for `95-99` candidates and confirmed people.
+- [x] Track hint provenance and confidence.
+- [x] Add tests that context-only evidence cannot create same-person probability.
 - **Deliverables**: Confidence policy, rejected state, priority hint exporter, tests.
 - **Time**: 3-5 days.
 
@@ -219,8 +219,8 @@
 
 ### Phase 6: Backups and Recovery Drills
 **Goal**: Prove analyzer can recover from DB loss.
-- [ ] Add scheduled analyzer DB dumps to `Z:\unifiedanalyzer\backups\db`.
-- [ ] Implement retention: 7 daily, 4 weekly, 3 monthly.
+- [x] Add scheduled analyzer DB dumps to `Z:\unifiedanalyzer\backups\db`.
+- [x] Implement retention: 7 daily, 4 weekly, 3 monthly.
 - [ ] Run restore into scratch DB.
 - [ ] Replay decision logs into scratch DB.
 - [ ] Recompute derived scores/clusters/timelines.
@@ -229,6 +229,13 @@
 - **Time**: 3-5 days.
 
 ---
+
+## Implementation Status - 2026-07-23
+
+- Decision JSONL outbox retry is implemented in the scheduler and surfaced in `/api/health`.
+- Replay apply safely restores audit rows, dismissed identity candidates, same-person relationship confirm/reject labels, target tiers, notes, and source-confidence adjustments. Merge/split, location decisions, and media/person-in-photo decisions still require derived-table rebuilds or future normalized destination tables.
+- Live decision replay dry-run on 2026-07-23 scanned 42 legacy JSONL decisions: `Invalid=0`, `Unresolved=42`. These were old `dismiss_match`/`merge_entities` events with empty payloads and no stable platform refs, so replay now reports them correctly instead of treating them as schema-invalid.
+- The next recovery milestone is a scratch restore drill: restore analyzer DB dump, replay decisions, recompute derived tables, and produce a gap report.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20
