@@ -61,6 +61,7 @@ async def health_check():
                     SELECT status, kinds, started_at, finished_at, path, size_bytes,
                            deleted_count, restore_validation, error_message
                     FROM analyzer_backup_runs
+                    WHERE status = 'failed' OR path IS NOT NULL
                     ORDER BY started_at DESC
                     LIMIT 1
                 """)
