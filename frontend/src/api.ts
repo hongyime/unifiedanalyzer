@@ -509,6 +509,14 @@ export interface LocationDecisionRequest {
   evidence_refs?: Record<string, unknown>
 }
 
+export interface SourceConfidenceRequest {
+  confidence: number
+  source?: string | null
+  platform_id?: string | null
+  notes?: string | null
+  evidence_refs?: Record<string, unknown>
+}
+
 export interface MediaStats {
   totals: {
     rows_total: number
@@ -789,6 +797,9 @@ export const api = {
 
   decideLocation: (entityId: string, body: LocationDecisionRequest) =>
     post<{ ok: boolean; action: string }>(`/entities/${entityId}/location-decision`, body),
+
+  adjustSourceConfidence: (entityId: string, body: SourceConfidenceRequest) =>
+    post<{ ok: boolean }>(`/entities/${entityId}/source-confidence`, body),
 
   getInteractions: (entityId: string, from?: string | null, to?: string | null) => {
     const q = new URLSearchParams()

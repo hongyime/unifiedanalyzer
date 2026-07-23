@@ -222,6 +222,7 @@ export default function EntityDetailPage() {
   const [relationships, setRelationships] = useState<Relationship[]>([])
   const [interactions, setInteractions] = useState<InteractionPeer[]>([])
   const [actionMsg, setActionMsg] = useState('')
+  const [sourceConfidenceBusy, setSourceConfidenceBusy] = useState<string | null>(null)
   const [cases, setCases] = useState<{ id: string; name: string }[]>([])
   const [pinCase, setPinCase] = useState('')
   const [brushRange, setBrushRange] = useState<[number, number] | null>(null)
@@ -488,6 +489,30 @@ export default function EntityDetailPage() {
     }
   }
 
+  const handleSourceConfidence = async (link: PlatformLink, confidence: number) => {
+    if (!id) return
+    setSourceConfidenceBusy(link.id)
+    try {
+      await api.adjustSourceConfidence(id, {
+        confidence,
+        source: link.source,
+        platform_id: link.platform_id,
+        evidence_refs: {
+          source: 'platform_links_table',
+          link_id: link.id,
+          platform_username: link.platform_username,
+        },
+      })
+      setActionMsg(`Source confidence set to ${confidence}`)
+      api.getEntityDecisions(id, 1).then((data) => setDecisionsTotal(data.total)).catch(() => {})
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      setActionMsg(`Source confidence failed: ${message}`)
+    } finally {
+      setSourceConfidenceBusy(null)
+    }
+  }
+
   const handleSaveSettings = async () => {
     if (!id) return
     try {
@@ -530,6 +555,12 @@ export default function EntityDetailPage() {
     },
     { id: 'name', header: 'Name', accessorFn: (r) => r.platform_name ?? '', cell: ({ row }) => row.original.platform_name || '—' },
     {
+      id: 'confidence',
+      header: 'Confidence',
+      accessorFn: (r) => r.confidence,
+      cell: ({ row }) => <ConfidencePill score={row.original.confidence} />,
+    },
+    {
       id: 'confirmed',
       header: 'State',
       cell: ({ row }) => (
@@ -539,7 +570,33 @@ export default function EntityDetailPage() {
       ),
     },
     { id: 'method', header: 'Method', cell: ({ row }) => <span className="text-xs text-text-muted">{row.original.link_method}</span> },
-  ], [selectedLinks])
+    {
+      id: 'adjust',
+      header: 'Adjust',
+      cell: ({ row }) => (
+        <select
+          defaultValue=""
+          disabled={sourceConfidenceBusy === row.original.id}
+          onChange={(e) => {
+            const value = Number(e.target.value)
+            e.currentTarget.value = ''
+            if (!Number.isFinite(value)) return
+            void handleSourceConfidence(row.original, value)
+          }}
+          onClick={(e) => e.stopPropagation()}
+          className="rounded-md border border-border bg-background px-2 py-1 text-xs text-text-primary"
+          aria-label={`Adjust confidence for ${row.original.source}`}
+        >
+          <option value="">Set...</option>
+          <option value="100">100 confirmed</option>
+          <option value="95">95 very strong</option>
+          <option value="75">75 probable</option>
+          <option value="55">55 weak</option>
+          <option value="0">0 wrong</option>
+        </select>
+      ),
+    },
+  ], [selectedLinks, sourceConfidenceBusy])
 
   const signalCols = useMemo<ColumnDef<Signal, unknown>[]>(() => [
     {
