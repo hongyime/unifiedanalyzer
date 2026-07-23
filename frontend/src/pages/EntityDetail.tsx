@@ -21,7 +21,7 @@ import { TimelineLanes } from '../components/TimelineLanes'
 import { ConnectionsPanel } from '../components/ConnectionsPanel'
 import { IdentitySummary } from '../components/IdentitySummary'
 import { IntersectPanel } from '../components/IntersectPanel'
-import { GeoMap } from '../components/GeoMap'
+import { GeoMap, GeoSelectedEvent } from '../components/GeoMap'
 import { PageHeader } from '../components/ui/PageHeader'
 import { PlatformBadge } from '../components/ui/PlatformBadge'
 import { Card } from '../components/ui/Card'
@@ -226,7 +226,8 @@ export default function EntityDetailPage() {
   const [pinCase, setPinCase] = useState('')
   const [brushRange, setBrushRange] = useState<[number, number] | null>(null)
   const [lanes, setLanes] = useState<Awaited<ReturnType<typeof api.getTimelineLanes>> | null>(null)
-  const [selectedGeoEvent, setSelectedGeoEvent] = useState<{ label: string | null; source: string; occurred_at: string | null } | null>(null)
+  const [selectedGeoEvent, setSelectedGeoEvent] = useState<GeoSelectedEvent | null>(null)
+  const [locationDecisionBusy, setLocationDecisionBusy] = useState<'confirm' | 'reject' | null>(null)
   useEffect(() => { api.getCases().then(d => setCases(d.cases)).catch(() => {}) }, [])
   useEffect(() => {
     setBrushRange(null)
@@ -235,7 +236,10 @@ export default function EntityDetailPage() {
     setTimelineType('')
     setEventsPage(1)
   }, [id])
-  useEffect(() => { setSelectedGeoEvent(null) }, [id, tab])
+  useEffect(() => {
+    setSelectedGeoEvent(null)
+    setLocationDecisionBusy(null)
+  }, [id, tab])
 
   useEffect(() => {
     if (!id) return
@@ -458,6 +462,29 @@ export default function EntityDetailPage() {
       setActionMsg(`Media decision failed: ${message}`)
     } finally {
       setMediaDecisionBusy(null)
+    }
+  }
+
+  const handleLocationDecision = async (isCorrect: boolean) => {
+    if (!id || !selectedGeoEvent) return
+    const key = isCorrect ? 'confirm' : 'reject'
+    setLocationDecisionBusy(key)
+    try {
+      await api.decideLocation(id, {
+        is_correct: isCorrect,
+        location_ref: selectedGeoEvent,
+        evidence_refs: {
+          source: 'map_tab',
+          entity_page: id,
+        },
+      })
+      setActionMsg(isCorrect ? 'Location confirmed' : 'Location rejected')
+      api.getEntityDecisions(id, 1).then((data) => setDecisionsTotal(data.total)).catch(() => {})
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      setActionMsg(`Location decision failed: ${message}`)
+    } finally {
+      setLocationDecisionBusy(null)
     }
   }
 
@@ -978,11 +1005,44 @@ export default function EntityDetailPage() {
             <GeoMap data={geo} onEventSelect={setSelectedGeoEvent} />
             {selectedGeoEvent && (
               <div className="mt-3 rounded-lg border border-border bg-hover px-3 py-2 text-sm">
-                <div className="font-medium">Selected map event</div>
-                <div className="text-text-muted">
-                  {selectedGeoEvent.source}
-                  {selectedGeoEvent.label ? ` · ${selectedGeoEvent.label}` : ''}
-                  {selectedGeoEvent.occurred_at ? ` · ${formatDate(selectedGeoEvent.occurred_at)}` : ''}
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <div className="font-medium">Selected map event</div>
+                    <div className="text-text-muted">
+                      {selectedGeoEvent.source}
+                      {selectedGeoEvent.label ? ` · ${selectedGeoEvent.label}` : ''}
+                      {selectedGeoEvent.occurred_at ? ` · ${formatDate(selectedGeoEvent.occurred_at)}` : ''}
+                    </div>
+                    <div className="mt-1 text-xs text-text-muted">
+                      {selectedGeoEvent.kind === 'point'
+                        ? `${selectedGeoEvent.lat?.toFixed(5)}, ${selectedGeoEvent.lng?.toFixed(5)}`
+                        : `${selectedGeoEvent.route_type || 'route'} · ${selectedGeoEvent.point_count ?? 0} points`}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 w-7 px-0"
+                      icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+                      aria-label="Confirm location"
+                      title="Confirm location"
+                      loading={locationDecisionBusy === 'confirm'}
+                      disabled={locationDecisionBusy != null && locationDecisionBusy !== 'confirm'}
+                      onClick={() => handleLocationDecision(true)}
+                    />
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      className="h-7 w-7 px-0"
+                      icon={<XCircle className="h-3.5 w-3.5" />}
+                      aria-label="Reject location"
+                      title="Reject location"
+                      loading={locationDecisionBusy === 'reject'}
+                      disabled={locationDecisionBusy != null && locationDecisionBusy !== 'reject'}
+                      onClick={() => handleLocationDecision(false)}
+                    />
+                  </div>
                 </div>
               </div>
             )}

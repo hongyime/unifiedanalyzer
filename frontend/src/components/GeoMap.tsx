@@ -13,12 +13,25 @@ type Geo = {
   counts: { routes: number; points: number }
 }
 
+export type GeoSelectedEvent = {
+  kind: 'route' | 'point'
+  label: string | null
+  source: string
+  occurred_at: string | null
+  lat?: number
+  lng?: number
+  route_type?: string | null
+  point_count?: number
+  start?: [number, number] | null
+  end?: [number, number] | null
+}
+
 export function GeoMap({
   data,
   onEventSelect,
 }: {
   data: Geo
-  onEventSelect?: (event: { label: string | null; source: string; occurred_at: string | null }) => void
+  onEventSelect?: (event: GeoSelectedEvent) => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const mapRef = useRef<L.Map | null>(null)
@@ -41,7 +54,16 @@ export function GeoMap({
       if (latlngs.length >= 2) {
         L.polyline(latlngs, { color: '#fc4c02', weight: 2, opacity: 0.7 })
           .bindPopup(`${r.name || 'activity'}${r.date ? ' · ' + r.date.slice(0, 10) : ''}`)
-          .on('click', () => onEventSelect?.({ label: r.name, source: r.source, occurred_at: r.date }))
+          .on('click', () => onEventSelect?.({
+            kind: 'route',
+            label: r.name,
+            source: r.source,
+            occurred_at: r.date,
+            route_type: r.type,
+            point_count: latlngs.length,
+            start: latlngs[0] ?? null,
+            end: latlngs[latlngs.length - 1] ?? null,
+          }))
           .addTo(layer)
         latlngs.forEach((ll) => bounds.push(ll))
       }
@@ -53,7 +75,14 @@ export function GeoMap({
         fillOpacity: 0.6,
       })
         .bindPopup(`${p.label || p.source}${p.occurred_at ? ` · ${p.occurred_at.slice(0, 10)}` : ''}`)
-        .on('click', () => onEventSelect?.({ label: p.label, source: p.source, occurred_at: p.occurred_at }))
+        .on('click', () => onEventSelect?.({
+          kind: 'point',
+          label: p.label,
+          source: p.source,
+          occurred_at: p.occurred_at,
+          lat: p.lat,
+          lng: p.lng,
+        }))
         .addTo(layer)
       bounds.push([p.lat, p.lng])
     })

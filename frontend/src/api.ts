@@ -501,6 +501,14 @@ export interface MediaPersonDecisionRequest {
   evidence_refs?: Record<string, unknown>
 }
 
+export interface LocationDecisionRequest {
+  is_correct: boolean
+  location_ref: Record<string, unknown>
+  confidence?: number | null
+  notes?: string | null
+  evidence_refs?: Record<string, unknown>
+}
+
 export interface MediaStats {
   totals: {
     rows_total: number
@@ -778,6 +786,9 @@ export const api = {
 
   decideMediaPerson: (entityId: string, body: MediaPersonDecisionRequest) =>
     post<{ ok: boolean; action: string }>(`/entities/${entityId}/media-person-decision`, body),
+
+  decideLocation: (entityId: string, body: LocationDecisionRequest) =>
+    post<{ ok: boolean; action: string }>(`/entities/${entityId}/location-decision`, body),
 
   getInteractions: (entityId: string, from?: string | null, to?: string | null) => {
     const q = new URLSearchParams()
