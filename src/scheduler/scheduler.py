@@ -11,6 +11,7 @@ from src.pipeline.incremental_runner import (
     get_last_run_time,
     clear_orphaned_run_locks,
 )
+from src.pipeline.collector_priority_hints import export_collector_priority_hints
 from src.pipeline.run_reporting import production_run_types, probe_phase_names
 from src.notifications.alerts import (
     notify_collector_health, notify_daily_digest, notify_merge_candidate,
@@ -66,6 +67,46 @@ async def _run_db_backup_check(now: datetime) -> None:
             "Analyzer DB backup retention pruned: %s",
             ", ".join(str(path) for path in result.deleted),
         )
+
+
+async def _stage_collector_priority_hints(run_type: str, stats: dict | None) -> dict:
+    """Refresh analyzer-owned collector priority hints after successful runs.
+
+    Analyzer owns identity confidence. Collector owns scheduling. This only
+    stages hints in the analyzer DB; collector imports them on its own cadence
+    without letting analyzer overwrite collector state.
+    """
+    if not _env_flag("ANALYZER_COLLECTOR_PRIORITY_HINTS_ENABLED", "1"):
+        return {"skipped": "disabled"}
+    if stats and stats.get("skipped"):
+        return {"skipped": "run_skipped"}
+
+    try:
+        pool = get_analyzer_pool()
+        async with pool.acquire() as conn:
+            report = await export_collector_priority_hints(conn, write=True)
+    except Exception as exc:
+        logger.warning(
+            "Collector priority hint staging failed after %s: %s",
+            run_type,
+            exc,
+            exc_info=True,
+        )
+        return {"error": str(exc)[:300]}
+
+    summary = {
+        "planned": report.planned,
+        "written": report.written,
+        "skipped": report.skipped,
+    }
+    logger.info(
+        "Collector priority hints staged after %s: planned=%d written=%d skipped=%s",
+        run_type,
+        report.planned,
+        report.written,
+        report.skipped,
+    )
+    return summary
 
 
 def _collector_no_run_issue(
@@ -506,13 +547,15 @@ async def start_scheduler() -> None:
         if last_full_run is None or (now - last_full_run) >= full_interval:
             logger.info("Starting full resolution (last run: %s)", last_full_run)
             try:
-                await run_full_resolution()
+                stats = await run_full_resolution()
+                await _stage_collector_priority_hints("full_resolution", stats)
             except Exception:
                 logger.exception("Full resolution failed")
         else:
             logger.info("Starting incremental run")
             try:
-                await run_incremental()
+                stats = await run_incremental()
+                await _stage_collector_priority_hints("incremental", stats)
             except Exception:
                 logger.exception("Incremental run failed")
 

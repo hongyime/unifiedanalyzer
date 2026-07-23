@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 from src.pipeline.collector_priority_hints import (
     HINT_TYPE_SAME_PERSON_CONFIRMED_100,
@@ -182,3 +183,76 @@ def test_priority_hints_includes_confirmed_and_filters_outside_band():
     assert confirmed
     assert all(hint.evidence["policy"] == "same_person_confirmed_100_no_collector_overwrite" for hint in confirmed)
     assert skipped["confidence_outside_95_100"] == 1
+
+
+def test_scheduler_stages_collector_priority_hints_after_success(monkeypatch):
+    import src.scheduler.scheduler as scheduler
+
+    class Acquire:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    calls = []
+
+    async def fake_export(conn, *, write):
+        calls.append((conn, write))
+        return SimpleNamespace(planned=3, written=3, skipped={"non_targetable_source": 1})
+
+    monkeypatch.setenv("ANALYZER_COLLECTOR_PRIORITY_HINTS_ENABLED", "1")
+    monkeypatch.setattr(scheduler, "get_analyzer_pool", lambda: Pool())
+    monkeypatch.setattr(scheduler, "export_collector_priority_hints", fake_export)
+
+    result = asyncio.run(scheduler._stage_collector_priority_hints("incremental", {"alerts": 0}))
+
+    assert result == {
+        "planned": 3,
+        "written": 3,
+        "skipped": {"non_targetable_source": 1},
+    }
+    assert len(calls) == 1
+    assert calls[0][1] is True
+
+
+def test_scheduler_priority_hint_staging_skips_disabled_or_skipped_run(monkeypatch):
+    import src.scheduler.scheduler as scheduler
+
+    monkeypatch.setenv("ANALYZER_COLLECTOR_PRIORITY_HINTS_ENABLED", "0")
+    disabled = asyncio.run(scheduler._stage_collector_priority_hints("incremental", {"alerts": 0}))
+    assert disabled == {"skipped": "disabled"}
+
+    monkeypatch.setenv("ANALYZER_COLLECTOR_PRIORITY_HINTS_ENABLED", "1")
+    skipped = asyncio.run(scheduler._stage_collector_priority_hints("incremental", {"skipped": True}))
+    assert skipped == {"skipped": "run_skipped"}
+
+
+def test_scheduler_priority_hint_staging_is_fail_soft(monkeypatch):
+    import src.scheduler.scheduler as scheduler
+
+    class Acquire:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    async def fake_export(conn, *, write):
+        raise RuntimeError("boom")
+
+    monkeypatch.setenv("ANALYZER_COLLECTOR_PRIORITY_HINTS_ENABLED", "1")
+    monkeypatch.setattr(scheduler, "get_analyzer_pool", lambda: Pool())
+    monkeypatch.setattr(scheduler, "export_collector_priority_hints", fake_export)
+
+    result = asyncio.run(scheduler._stage_collector_priority_hints("incremental", {"alerts": 0}))
+
+    assert result == {"error": "boom"}
