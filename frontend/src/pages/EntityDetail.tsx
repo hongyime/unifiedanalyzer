@@ -186,6 +186,7 @@ function StatRow({ label, value, help }: { label: string; value: React.ReactNode
 }
 
 type TabKey =
+  | 'overview'
   | 'identity'
   | 'changes'
   | 'timeline'
@@ -211,7 +212,7 @@ export default function EntityDetailPage() {
   const [eventsPage, setEventsPage] = useState(1)
   const [timelineSource, setTimelineSource] = useState('')
   const [timelineType, setTimelineType] = useState('')
-  const [tab, setTab] = useState<TabKey>('identity')
+  const [tab, setTab] = useState<TabKey>('overview')
   const [loading, setLoading] = useState(true)
   const [behavior, setBehavior] = useState<BehaviorProfile | null>(null)
   const [intelligence, setIntelligence] = useState<IntelligenceReport | null>(null)
@@ -220,6 +221,8 @@ export default function EntityDetailPage() {
   const [notes, setNotes] = useState('')
   const [mergeTarget, setMergeTarget] = useState('')
   const [relationships, setRelationships] = useState<Relationship[]>([])
+  const [overviewRelationships, setOverviewRelationships] = useState<Relationship[]>([])
+  const [overviewEvents, setOverviewEvents] = useState<TimelineEvent[]>([])
   const [interactions, setInteractions] = useState<InteractionPeer[]>([])
   const [actionMsg, setActionMsg] = useState('')
   const [sourceConfidenceBusy, setSourceConfidenceBusy] = useState<string | null>(null)
@@ -236,6 +239,9 @@ export default function EntityDetailPage() {
     setTimelineSource('')
     setTimelineType('')
     setEventsPage(1)
+    setGeo(null)
+    setOverviewEvents([])
+    setOverviewRelationships([])
   }, [id])
   useEffect(() => {
     setSelectedGeoEvent(null)
@@ -306,7 +312,7 @@ export default function EntityDetailPage() {
 
   const [geo, setGeo] = useState<Awaited<ReturnType<typeof api.getEntityGeo>> | null>(null)
   useEffect(() => {
-    if (!id || tab !== 'map') return
+    if (!id || (tab !== 'map' && tab !== 'overview')) return
     api.getEntityGeo(
       id,
       isoFromEpoch(brushRange?.[0] ?? null),
@@ -339,7 +345,14 @@ export default function EntityDetailPage() {
     setDecisions(null)
     setDecisionsTotal(0)
   }, [id])
+  useEffect(() => { if (id) api.getEntityDecisions(id, 1).then((data) => setDecisionsTotal(data.total)).catch(() => setDecisionsTotal(0)) }, [id])
   useEffect(() => { if (id && tab === 'decisions') loadDecisions() }, [id, tab])
+
+  useEffect(() => {
+    if (!id || tab !== 'overview') return
+    api.getTimeline(id, 1).then((data) => setOverviewEvents(data.data.slice(0, 5))).catch(() => setOverviewEvents([]))
+    api.getRelationships(id).then((data) => setOverviewRelationships(data.data.slice(0, 5))).catch(() => setOverviewRelationships([]))
+  }, [id, tab])
 
   useEffect(() => {
     setMediaFaces(null)
@@ -632,6 +645,21 @@ export default function EntityDetailPage() {
     },
   ], [])
 
+  const signalSummary = useMemo(() => {
+    const counts = new Map<string, { count: number; maxConfidence: number }>()
+    for (const signal of entity?.identity_signals ?? []) {
+      const label = LABELS.signalType[signal.signal_type] ?? signal.signal_type.replace(/_/g, ' ')
+      const cur = counts.get(label) ?? { count: 0, maxConfidence: 0 }
+      cur.count += 1
+      cur.maxConfidence = Math.max(cur.maxConfidence, signal.confidence)
+      counts.set(label, cur)
+    }
+    return Array.from(counts.entries())
+      .map(([label, value]) => ({ label, ...value }))
+      .sort((a, b) => b.maxConfidence - a.maxConfidence || b.count - a.count)
+      .slice(0, 6)
+  }, [entity?.identity_signals])
+
   if (loading) return <LoadingSpinner label="Loading person…" />
   if (!entity) return <EmptyState title="Person not found" description="This entity may have been merged or removed." />
 
@@ -642,6 +670,7 @@ export default function EntityDetailPage() {
   ]
 
   const tabs: { key: TabKey; label: string; badge?: string }[] = [
+    { key: 'overview', label: 'Overview' },
     { key: 'identity', label: 'Identity' },
     { key: 'changes', label: 'Changes', badge: changelog && changelog.total_changes > 0 ? String(changelog.total_changes) : undefined },
     { key: 'timeline', label: 'Timeline' },
@@ -772,6 +801,133 @@ export default function EntityDetailPage() {
           </Button>
         ))}
       </div>
+
+      {/* ── Overview ────────────────────────────────────────────────── */}
+      {tab === 'overview' && (
+        <div className="grid gap-4 xl:grid-cols-3">
+          <div className="space-y-4 xl:col-span-2">
+            <Card title="At a glance">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="min-w-0">
+                  <div className="text-xs text-text-muted">Confidence</div>
+                  <div className="mt-1"><ConfidencePill score={entity.confidence_score} /></div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs text-text-muted">Accounts</div>
+                  <div className="mt-1 text-xl font-semibold">{entity.platform_links.length}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs text-text-muted">Evidence</div>
+                  <div className="mt-1 text-xl font-semibold">{entity.signal_count}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs text-text-muted">Decisions</div>
+                  <div className="mt-1 text-xl font-semibold">{decisionsTotal}</div>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1">
+                {entity.platform_links.slice(0, 10).map((link) => (
+                  <PlatformBadge
+                    key={link.id}
+                    source={link.source}
+                    label={link.platform_username || link.platform_name || link.platform_id}
+                  />
+                ))}
+                {entity.platform_links.length > 10 && (
+                  <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-muted">
+                    +{entity.platform_links.length - 10}
+                  </span>
+                )}
+              </div>
+            </Card>
+
+            <Card
+              title="Latest activity"
+              actions={<Button size="sm" variant="ghost" onClick={() => setTab('timeline')}>Timeline</Button>}
+            >
+              {overviewEvents.length === 0 ? (
+                <div className="text-sm text-text-muted">No recent activity indexed.</div>
+              ) : (
+                <div className="space-y-2">
+                  {overviewEvents.map((event) => (
+                    <div key={event.id} className="flex items-start justify-between gap-3 rounded-md border border-border px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1">
+                          <PlatformBadge source={event.source} />
+                          <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">{event.event_type}</span>
+                        </div>
+                        <div className="mt-1 truncate text-sm" title={event.title ?? undefined}>{event.title || '(no title)'}</div>
+                      </div>
+                      <div className="shrink-0 text-xs text-text-muted">{formatDate(event.occurred_at)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          </div>
+
+          <div className="space-y-4">
+            <Card title="Why linked">
+              {signalSummary.length === 0 ? (
+                <div className="text-sm text-text-muted">No identity evidence recorded.</div>
+              ) : (
+                <div className="space-y-2">
+                  {signalSummary.map((signal) => (
+                    <div key={signal.label} className="flex items-center justify-between gap-2">
+                      <span className="truncate text-sm" title={signal.label}>{signal.label}</span>
+                      <span className="shrink-0 text-xs text-text-muted">
+                        {signal.count} · {Math.round(signal.maxConfidence * 100)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <Button size="sm" variant="ghost" className="mt-3" onClick={() => setTab('identity')}>
+                Evidence
+              </Button>
+            </Card>
+
+            <Card
+              title="Where"
+              actions={<Button size="sm" variant="ghost" onClick={() => setTab('map')}>Map</Button>}
+            >
+              <StatRow label="Routes" value={geo?.counts.routes ?? 0} />
+              <StatRow label="Places" value={geo?.counts.points ?? 0} />
+              {geo && geo.counts.routes + geo.counts.points === 0 && (
+                <div className="text-sm text-text-muted">No mapped evidence yet.</div>
+              )}
+            </Card>
+
+            <Card
+              title="Connected to"
+              actions={<Button size="sm" variant="ghost" onClick={() => setTab('connections')}>Connections</Button>}
+            >
+              {overviewRelationships.length === 0 ? (
+                <div className="text-sm text-text-muted">No relationship evidence yet.</div>
+              ) : (
+                <div className="space-y-2">
+                  {overviewRelationships.map((relationship) => (
+                    <Link
+                      key={relationship.id}
+                      to={`/entities/${relationship.other_entity_id}`}
+                      className="block rounded-md border border-border px-3 py-2 hover:bg-hover"
+                    >
+                      <div className="truncate text-sm font-medium">
+                        {relationship.other_name || relationship.other_entity_id.slice(0, 8)}
+                      </div>
+                      <div className="mt-0.5 truncate text-xs text-text-muted">
+                        {relationship.relationship_type.replace(/_/g, ' ')}
+                        {' · '}
+                        {Math.round(relationship.weight)}%
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </Card>
+          </div>
+        </div>
+      )}
 
       {/* ── Identity ─────────────────────────────────────────────────── */}
       {tab === 'identity' && (
