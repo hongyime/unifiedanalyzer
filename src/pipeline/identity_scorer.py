@@ -25,6 +25,7 @@ import logging
 import os as _os_scorer
 from uuid import UUID
 
+from src.pipeline.auto_labeler import _HARD_SIGNALS as _HARD_IDENTITY_SIGNALS
 from src.db.connection import get_analyzer_pool
 from src.pipeline.identity_calibration import pair_feature_vector, get_model, predict_proba
 
@@ -152,16 +153,16 @@ def _dismissal_suppresses_candidate(
     contributions: list[tuple[str, float]],
     dismissed_features: dict[str, float],
 ) -> bool:
-    """Return False only when new identity evidence is stronger than dismissal.
+    """Return False only when hard identity evidence beats the dismissal.
 
-    Old labels without a feature snapshot stay suppressive. Context-only signal
+    Old labels without a feature snapshot stay suppressive. Weak/context signal
     growth never reopens a dismissed same-person candidate on its own.
     """
     if not dismissed_features:
         return True
     current = _features_from_contributions(contributions)
     for sig_type, confidence in current.items():
-        if sig_type in _CONTEXT_ONLY_SIGNALS:
+        if sig_type not in _HARD_IDENTITY_SIGNALS:
             continue
         previous = float(dismissed_features.get(sig_type, 0.0) or 0.0)
         if confidence >= min(1.0, previous + _DISMISS_RESURFACE_MIN_DELTA):

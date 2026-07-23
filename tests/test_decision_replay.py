@@ -340,6 +340,46 @@ def test_apply_decision_replay_applies_dismiss_effect(tmp_path):
     assert any("DELETE FROM entity_relationships" in sql for sql, _ in conn.executed)
 
 
+def test_apply_decision_replay_preserves_dismiss_evidence_snapshot(tmp_path):
+    event = _event(
+        event_type="dismiss_identity_candidate",
+        payload={
+            "features": {},
+            "entity_snapshots": [_snapshot("telegram", "1", "a"), _snapshot("instagram", "2", "b")],
+        },
+    )
+    event["evidence_snapshot"] = {
+        "candidate_evidence": {
+            "sources": {
+                "contributing_signals": [
+                    {"type": "phone_match", "confidence": 0.8},
+                    {"type": "phone_match", "confidence": 0.5},
+                    {"type": "shared_life_context", "confidence": 0.9},
+                ],
+            },
+        },
+    }
+    _write_event(tmp_path, event)
+    conn = FakeConn(
+        {
+            "telegram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}],
+            "instagram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000002"}],
+        },
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 1,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "ok",
+        },
+    )
+
+    report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+
+    assert report.effect_applied == 1
+    _insert_sql, insert_args = next((sql, args) for sql, args in conn.executed if "INSERT INTO identity_labels" in sql)
+    assert json.loads(insert_args[2]) == {"phone_match": 0.8, "shared_life_context": 0.9}
+
+
 def test_apply_decision_replay_preserves_legacy_action_but_applies_canonical_effect(tmp_path):
     event = _event(
         event_type="dismiss_match",

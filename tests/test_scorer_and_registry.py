@@ -131,6 +131,33 @@ def test_dismissed_pair_resurfaces_on_new_identity_signal():
     )
 
 
+def test_dismissed_pair_requires_materially_stronger_hard_signal():
+    from src.pipeline.identity_scorer import (
+        _DISMISS_RESURFACE_MIN_DELTA,
+        _dismissal_suppresses_candidate,
+    )
+
+    previous = 0.6
+    just_under = previous + _DISMISS_RESURFACE_MIN_DELTA - 0.001
+    assert _dismissal_suppresses_candidate(
+        [("email_match", just_under)],
+        {"email_match": previous},
+    )
+    assert not _dismissal_suppresses_candidate(
+        [("email_match", previous + _DISMISS_RESURFACE_MIN_DELTA)],
+        {"email_match": previous},
+    )
+
+
+def test_dismissed_pair_ignores_new_weak_identity_signal():
+    from src.pipeline.identity_scorer import _dismissal_suppresses_candidate
+
+    assert _dismissal_suppresses_candidate(
+        [("email_match", 0.6), ("content_similarity", 1.0), ("real_name_fuzzy", 1.0)],
+        {"email_match": 0.6},
+    )
+
+
 def test_dismissed_pair_ignores_new_context_only_signal():
     from src.pipeline.identity_scorer import _dismissal_suppresses_candidate
 

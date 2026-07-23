@@ -368,7 +368,7 @@ async def apply_decision_effect(conn, event: dict[str, Any], replay_event: Decis
         if len(entity_ids) != 2:
             return "skipped_unresolved"
         a, b = sorted(entity_ids)
-        features = _dismiss_feature_snapshot(payload)
+        features = _dismiss_feature_snapshot(payload, event.get("evidence_snapshot"))
         await conn.execute(
             """
             INSERT INTO identity_labels (entity_a, entity_b, features, label, source)
@@ -403,7 +403,7 @@ async def apply_decision_effect(conn, event: dict[str, Any], replay_event: Decis
             return "unsupported"
         a, b = sorted(entity_ids)
         label = 1 if event_type == "confirm_relationship" else 0
-        features = _relationship_feature_snapshot(payload)
+        features = _relationship_feature_snapshot(payload, event.get("evidence_snapshot"))
         await conn.execute(
             """
             INSERT INTO identity_labels (entity_a, entity_b, features, label, source)
@@ -486,49 +486,59 @@ async def apply_decision_effect(conn, event: dict[str, Any], replay_event: Decis
     return "unsupported"
 
 
-def _dismiss_feature_snapshot(payload: dict[str, Any]) -> dict[str, float]:
-    explicit = payload.get("features")
-    if isinstance(explicit, dict):
-        return _coerce_feature_snapshot(explicit)
+def _dismiss_feature_snapshot(
+    payload: dict[str, Any],
+    evidence_snapshot: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    for source in _snapshot_sources(payload, evidence_snapshot):
+        explicit = source.get("features")
+        if isinstance(explicit, dict):
+            features = _coerce_feature_snapshot(explicit)
+            if features:
+                return features
 
-    evidence = payload.get("candidate_evidence")
-    if not isinstance(evidence, dict):
-        return {}
-    sources = evidence.get("sources")
-    if isinstance(sources, str):
-        try:
-            sources = json.loads(sources)
-        except json.JSONDecodeError:
-            sources = {}
-    if not isinstance(sources, dict):
-        return {}
-    signals = sources.get("contributing_signals")
-    if not isinstance(signals, list):
-        return {}
+    for source in _snapshot_sources(payload, evidence_snapshot):
+        features = _features_from_snapshot_container(source.get("candidate_evidence"))
+        if features:
+            return features
 
-    features: dict[str, float] = {}
-    for signal in signals:
-        if not isinstance(signal, dict):
-            continue
-        signal_type = signal.get("type")
-        if not signal_type:
-            continue
-        try:
-            confidence = float(signal.get("confidence") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        key = str(signal_type)
-        if confidence > features.get(key, 0.0):
-            features[key] = confidence
-    return features
+    for source in _snapshot_sources(payload, evidence_snapshot):
+        features = _features_from_snapshot_container(source.get("relationship_snapshot"))
+        if features:
+            return features
+
+    return {}
 
 
-def _relationship_feature_snapshot(payload: dict[str, Any]) -> dict[str, float]:
-    explicit = payload.get("features")
-    if isinstance(explicit, dict):
-        return _coerce_feature_snapshot(explicit)
+def _relationship_feature_snapshot(
+    payload: dict[str, Any],
+    evidence_snapshot: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    for source in _snapshot_sources(payload, evidence_snapshot):
+        explicit = source.get("features")
+        if isinstance(explicit, dict):
+            features = _coerce_feature_snapshot(explicit)
+            if features:
+                return features
 
-    snapshot = payload.get("relationship_snapshot")
+    for source in _snapshot_sources(payload, evidence_snapshot):
+        features = _features_from_snapshot_container(source.get("relationship_snapshot"))
+        if features:
+            return features
+
+    return {}
+
+
+def _snapshot_sources(
+    payload: dict[str, Any],
+    evidence_snapshot: dict[str, Any] | None,
+):
+    yield payload
+    if isinstance(evidence_snapshot, dict):
+        yield evidence_snapshot
+
+
+def _features_from_snapshot_container(snapshot: Any) -> dict[str, float]:
     if not isinstance(snapshot, dict):
         return {}
     sources = snapshot.get("sources")
