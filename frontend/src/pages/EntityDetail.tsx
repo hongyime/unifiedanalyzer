@@ -209,6 +209,8 @@ export default function EntityDetailPage() {
   const [events, setEvents] = useState<TimelineEvent[]>([])
   const [eventsTotal, setEventsTotal] = useState(0)
   const [eventsPage, setEventsPage] = useState(1)
+  const [timelineSource, setTimelineSource] = useState('')
+  const [timelineType, setTimelineType] = useState('')
   const [tab, setTab] = useState<TabKey>('identity')
   const [loading, setLoading] = useState(true)
   const [behavior, setBehavior] = useState<BehaviorProfile | null>(null)
@@ -229,6 +231,9 @@ export default function EntityDetailPage() {
   useEffect(() => {
     setBrushRange(null)
     setLanes(null)
+    setTimelineSource('')
+    setTimelineType('')
+    setEventsPage(1)
   }, [id])
   useEffect(() => { setSelectedGeoEvent(null) }, [id, tab])
 
@@ -247,15 +252,15 @@ export default function EntityDetailPage() {
     api.getTimeline(
       id,
       eventsPage,
-      '',
-      '',
+      timelineSource,
+      timelineType,
       isoFromEpoch(brushRange?.[0] ?? null),
       isoFromEpoch(brushRange?.[1] ?? null),
     ).then(r => {
       setEvents(r.data)
       setEventsTotal(r.total)
     })
-  }, [id, tab, eventsPage, brushRange])
+  }, [id, tab, eventsPage, brushRange, timelineSource, timelineType])
   useEffect(() => {
     if (!id || !TIMELINE_TABS.has(tab)) return
     api.getTimelineLanes(id, 2000).then((data) => {
@@ -263,6 +268,9 @@ export default function EntityDetailPage() {
       setBrushRange((current) => current ?? (data.min_t != null && data.max_t != null ? [data.min_t, data.max_t] : null))
     }).catch(() => setLanes(null))
   }, [id, tab])
+  useEffect(() => {
+    setEventsPage(1)
+  }, [timelineSource, timelineType, brushRange])
 
   useEffect(() => {
     if (!id || tab !== 'behavior') return
@@ -563,6 +571,15 @@ export default function EntityDetailPage() {
     { key: 'settings', label: 'Settings' },
   ]
 
+  const timelineSources = Array.from(new Set((lanes?.lanes ?? []).map((lane) => lane.source))).sort()
+  const timelineTypes = Array.from(
+    new Set(
+      (lanes?.lanes ?? [])
+        .filter((lane) => !timelineSource || lane.source === timelineSource)
+        .flatMap((lane) => lane.events.map((event) => event.type).filter((type): type is string => Boolean(type))),
+    ),
+  ).sort()
+
   return (
     <div>
       <Link to="/entities" className="mb-3 inline-flex items-center gap-1 text-sm text-text-muted hover:text-text-primary">
@@ -828,9 +845,50 @@ export default function EntityDetailPage() {
         <div className="space-y-3">
           {lanes && lanes.total > 0 && (
             <Card>
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-sm font-semibold">Activity across platforms</div>
-                <div className="text-xs text-text-muted">{lanes.total.toLocaleString()} events</div>
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-semibold">Activity across platforms</div>
+                  <div className="text-xs text-text-muted">{eventsTotal.toLocaleString()} shown · {lanes.total.toLocaleString()} indexed</div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={timelineSource}
+                    onChange={(e) => {
+                      setTimelineSource(e.target.value)
+                      setTimelineType('')
+                    }}
+                    className="rounded-md border border-border bg-background px-2 py-1 text-xs text-text-primary"
+                    aria-label="Timeline source filter"
+                  >
+                    <option value="">All sources</option>
+                    {timelineSources.map((source) => (
+                      <option key={source} value={source}>{source}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={timelineType}
+                    onChange={(e) => setTimelineType(e.target.value)}
+                    className="rounded-md border border-border bg-background px-2 py-1 text-xs text-text-primary"
+                    aria-label="Timeline event type filter"
+                  >
+                    <option value="">All event types</option>
+                    {timelineTypes.map((type) => (
+                      <option key={type} value={type}>{type}</option>
+                    ))}
+                  </select>
+                  {(timelineSource || timelineType) && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setTimelineSource('')
+                        setTimelineType('')
+                      }}
+                    >
+                      Clear
+                    </Button>
+                  )}
+                </div>
               </div>
               <TimelineLanes
                 data={lanes}

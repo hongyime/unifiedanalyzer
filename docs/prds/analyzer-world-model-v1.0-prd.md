@@ -236,6 +236,7 @@
 - Person pages now include a read-only Decisions tab backed by `/api/entities/{entity_id}/decisions`, showing audit actions, involved entities, payload detail, and JSONL durability.
 - Connections now expose relationship evidence with one-click confirm/reject controls backed by `/api/entities/relationship-decision`; decisions write to audit DB rows and append-only JSONL.
 - Person pages now include a Media/Faces tab backed by `/api/entities/{entity_id}/media-faces`, with account-linked media, face links, and owner/person-in-photo confirm/reject actions wired to durable media decision events.
+- Timeline now supports source and event-type filters plus the existing date brush. Confidence filtering is still pending because `timeline_events` does not currently store a confidence field.
 - Replay apply safely restores audit rows, dismissed identity candidates, same-person relationship confirm/reject labels, target tiers, notes, and source-confidence adjustments. Merge/split, location decisions, and media/person-in-photo decisions still require derived-table rebuilds or future normalized destination tables.
 - Live decision replay dry-run on 2026-07-23 scanned 42 legacy JSONL decisions: `Invalid=0`, `Unresolved=42`. These were old `dismiss_match`/`merge_entities` events with empty payloads and no stable platform refs, so replay now reports them correctly instead of treating them as schema-invalid.
 - The next recovery milestone is a scratch restore drill: restore analyzer DB dump, replay decisions, recompute derived tables, and produce a gap report.
