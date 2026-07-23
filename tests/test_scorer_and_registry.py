@@ -209,6 +209,49 @@ def test_merge_candidate_notifications_default_to_requested_floor():
     assert _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE == 70
 
 
+def test_coordinated_posting_alerts_default_off(monkeypatch):
+    import src.pipeline.alert_engine as alerts
+
+    called = False
+
+    async def fake_detector():
+        nonlocal called
+        called = True
+        return 99
+
+    monkeypatch.delenv("COORDINATED_POSTING_ALERT_ENABLED", raising=False)
+    monkeypatch.setenv("SILENCE_GAP_DYNAMIC", "0")
+    monkeypatch.setenv("NEW_ACTIVITY_AFTER_SILENCE_ENABLED", "0")
+    monkeypatch.setenv("PROFILE_CHANGE_ALERT_ENABLED", "0")
+    monkeypatch.setenv("NEW_IDENTITY_LINK_ALERT_ENABLED", "0")
+    monkeypatch.setenv("LOCATION_MISMATCH_ALERT_ENABLED", "0")
+    monkeypatch.setattr(alerts, "_detect_coordinated_posting", fake_detector)
+
+    stats = asyncio.run(alerts.run_alerts())
+
+    assert called is False
+    assert stats["coordinated_posting"] == 0
+
+
+def test_coordinated_posting_alerts_can_be_enabled(monkeypatch):
+    import src.pipeline.alert_engine as alerts
+
+    async def fake_detector():
+        return 7
+
+    monkeypatch.setenv("COORDINATED_POSTING_ALERT_ENABLED", "1")
+    monkeypatch.setenv("SILENCE_GAP_DYNAMIC", "0")
+    monkeypatch.setenv("NEW_ACTIVITY_AFTER_SILENCE_ENABLED", "0")
+    monkeypatch.setenv("PROFILE_CHANGE_ALERT_ENABLED", "0")
+    monkeypatch.setenv("NEW_IDENTITY_LINK_ALERT_ENABLED", "0")
+    monkeypatch.setenv("LOCATION_MISMATCH_ALERT_ENABLED", "0")
+    monkeypatch.setattr(alerts, "_detect_coordinated_posting", fake_detector)
+
+    stats = asyncio.run(alerts.run_alerts())
+
+    assert stats["coordinated_posting"] == 7
+
+
 def test_collector_unavailable_phase_records_skipped(monkeypatch):
     """A collector outage should be an intentional skipped phase, not failed."""
     from src.db.connection import CollectorUnavailableError

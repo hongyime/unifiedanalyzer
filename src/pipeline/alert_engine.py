@@ -59,7 +59,7 @@ async def run_alerts() -> dict:
     if _env_bool("NEW_IDENTITY_LINK_ALERT_ENABLED", True):
         stats["new_identity_link"] = await _detect_new_identity_links()
 
-    if _env_bool("COORDINATED_POSTING_ALERT_ENABLED", True):
+    if _env_bool("COORDINATED_POSTING_ALERT_ENABLED", False):
         stats["coordinated_posting"] = await _detect_coordinated_posting()
 
     if _env_bool("LOCATION_MISMATCH_ALERT_ENABLED", True):
@@ -399,6 +399,8 @@ async def _detect_coordinated_posting() -> int:
     min_occurrences = _env_int("COORDINATED_POSTING_MIN_OCCURRENCES", 3)
     window = timedelta(minutes=_env_int("COORDINATED_POSTING_WINDOW_MINUTES", 10))
     lookback_days = _env_int("COORDINATED_POSTING_LOOKBACK_DAYS", 30)
+    max_events = _env_int("COORDINATED_POSTING_MAX_EVENTS", 20000)
+    max_entities = _env_int("COORDINATED_POSTING_MAX_ENTITIES", 500)
     count = 0
 
     now = datetime.now(timezone.utc)
@@ -406,19 +408,41 @@ async def _detect_coordinated_posting() -> int:
 
     async with pool.acquire() as conn:
         events = await conn.fetch("""
+            WITH recent AS (
+                SELECT entity_id::text, occurred_at, source
+                FROM timeline_events
+                WHERE entity_id IS NOT NULL
+                  AND occurred_at > $1
+                ORDER BY occurred_at DESC
+                LIMIT $2
+            )
             SELECT entity_id::text, occurred_at, source
-            FROM timeline_events
-            WHERE entity_id IS NOT NULL
-              AND occurred_at > $1
+            FROM recent
             ORDER BY occurred_at
-        """, since)
+        """, since, max_events)
 
         # entity_id -> sorted list of (occurred_at, source)
         entity_events: dict[str, list[tuple[datetime, str]]] = defaultdict(list)
         for e in events:
             entity_events[e["entity_id"]].append((e["occurred_at"], e["source"]))
 
-        entity_ids = list(entity_events)
+        if len(events) >= max_events:
+            logger.warning(
+                "COORDINATED_POSTING capped at %d recent events; lower lookback or raise cap if needed",
+                max_events,
+            )
+
+        entity_ids = sorted(
+            entity_events,
+            key=lambda eid: len(entity_events[eid]),
+            reverse=True,
+        )[:max_entities]
+        if len(entity_events) > max_entities:
+            logger.warning(
+                "COORDINATED_POSTING capped at %d busiest entities out of %d",
+                max_entities,
+                len(entity_events),
+            )
 
         # pair_key (a < b) -> count of cross-platform co-occurrences within window
         pair_counts: dict[tuple[str, str], int] = defaultdict(int)
