@@ -52,6 +52,15 @@ async def test_health_uses_latest_actionable_backup_run(monkeypatch):
                     "restore_validation": "passed: pg_restore --list",
                     "error_message": None,
                 }
+            if "FROM audit_log" in sql and "COUNT(*) FILTER" in sql:
+                return {
+                    "pending_jsonl": 2,
+                    "jsonl_errors": 1,
+                    "latest_jsonl_written_at": None,
+                    "latest_jsonl_error_at": None,
+                }
+            if "FROM audit_log" in sql and "decision_jsonl_error IS NOT NULL" in sql:
+                return {"decision_jsonl_error": "disk full"}
             raise AssertionError(f"Unexpected fetchrow SQL: {sql}")
 
     class CollectorConn:
@@ -65,6 +74,9 @@ async def test_health_uses_latest_actionable_backup_run(monkeypatch):
 
     result = await health.health_check()
 
-    assert result["status"] == "ok"
+    assert result["status"] == "degraded"
     assert result["last_backup_run"]["path"] == "/app/backups/db/daily/unifiedanalyzer_daily.dump"
+    assert result["decision_log"]["pending_jsonl"] == 2
+    assert result["decision_log"]["jsonl_errors"] == 1
+    assert result["decision_log"]["latest_jsonl_error"] == "disk full"
     assert "WHERE status = 'failed' OR path IS NOT NULL" in backup_queries[0]

@@ -14,6 +14,13 @@ async def health_check():
         "last_incremental_run": None,
         "last_full_resolution": None,
         "last_backup_run": None,
+        "decision_log": {
+            "pending_jsonl": None,
+            "jsonl_errors": None,
+            "latest_jsonl_written_at": None,
+            "latest_jsonl_error_at": None,
+            "latest_jsonl_error": None,
+        },
         "entity_count": 0,
         "alert_count_unread": 0,
     }
@@ -81,6 +88,40 @@ async def health_check():
                     "restore_validation": backup["restore_validation"],
                     "error_message": backup["error_message"],
                 }
+
+            try:
+                decision_log = await conn.fetchrow("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE decision_jsonl_written_at IS NULL)::int AS pending_jsonl,
+                        COUNT(*) FILTER (WHERE decision_jsonl_error IS NOT NULL)::int AS jsonl_errors,
+                        MAX(decision_jsonl_written_at) AS latest_jsonl_written_at,
+                        MAX(created_at) FILTER (WHERE decision_jsonl_error IS NOT NULL) AS latest_jsonl_error_at
+                    FROM audit_log
+                """)
+                latest_error = await conn.fetchrow("""
+                    SELECT decision_jsonl_error
+                    FROM audit_log
+                    WHERE decision_jsonl_error IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """)
+            except Exception:
+                decision_log = None
+                latest_error = None
+            if decision_log:
+                pending = int(decision_log["pending_jsonl"] or 0)
+                errors = int(decision_log["jsonl_errors"] or 0)
+                status["decision_log"] = {
+                    "pending_jsonl": pending,
+                    "jsonl_errors": errors,
+                    "latest_jsonl_written_at": decision_log["latest_jsonl_written_at"].isoformat()
+                    if decision_log["latest_jsonl_written_at"] else None,
+                    "latest_jsonl_error_at": decision_log["latest_jsonl_error_at"].isoformat()
+                    if decision_log["latest_jsonl_error_at"] else None,
+                    "latest_jsonl_error": latest_error["decision_jsonl_error"] if latest_error else None,
+                }
+                if pending or errors:
+                    status["status"] = "degraded"
 
     except Exception as e:
         status["analyzer_db"] = f"error: {e}"

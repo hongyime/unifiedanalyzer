@@ -18,6 +18,7 @@ from src.notifications.alerts import (
     notify_status,
 )
 from src.merge_candidates import merge_candidate_notify_min_confidence
+from src.util.audit_log import retry_pending_decision_jsonl
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,28 @@ async def _stage_collector_priority_hints(run_type: str, stats: dict | None) -> 
         report.skipped,
     )
     return summary
+
+
+async def _run_decision_outbox_check() -> dict:
+    """Retry audit_log rows whose JSONL append failed or was interrupted.
+
+    Human review decisions must not remain DB-only. The dashboard action path
+    records JSONL errors on audit_log; this scheduled outbox drains those rows
+    without requiring a manual CLI run.
+    """
+    if not _env_flag("ANALYZER_DECISION_OUTBOX_ENABLED", "1"):
+        return {"skipped": "disabled"}
+    limit = _env_int("ANALYZER_DECISION_OUTBOX_LIMIT", 100, minimum=1, maximum=5000)
+    try:
+        pool = get_analyzer_pool()
+        async with pool.acquire() as conn:
+            stats = await retry_pending_decision_jsonl(conn, limit=limit)
+    except Exception as exc:
+        logger.warning("Decision JSONL outbox retry failed: %s", exc, exc_info=True)
+        return {"error": str(exc)[:300]}
+    if stats.get("pending") or stats.get("failed"):
+        logger.info("Decision JSONL outbox retry: %s", stats)
+    return stats
 
 
 def _collector_no_run_issue(
@@ -480,16 +503,24 @@ async def start_scheduler() -> None:
         3600,
         minimum=300,
     )
+    decision_outbox_interval = _env_int(
+        "ANALYZER_DECISION_OUTBOX_INTERVAL_SECONDS",
+        900,
+        minimum=60,
+    )
 
     logger.info("Scheduler started: incremental every %d min, full resolution every %s, "
-                "digest at %02d:00 UTC, status heartbeat every %dh, DB backups %s",
+                "digest at %02d:00 UTC, status heartbeat every %dh, DB backups %s, "
+                "decision outbox every %ds",
                 interval // 60, full_interval, digest_hour, status_interval_h,
-                "enabled" if backup_enabled else "disabled")
+                "enabled" if backup_enabled else "disabled",
+                decision_outbox_interval)
 
     last_digest_date: str | None = None
     last_health_check: datetime | None = None
     last_status: datetime | None = None
     last_backup_check: datetime | None = None
+    last_decision_outbox_check: datetime | None = None
     was_offline = False
 
     while _running:
@@ -542,6 +573,13 @@ async def start_scheduler() -> None:
         ):
             await _run_db_backup_check(now)
             last_backup_check = now
+
+        if (
+            last_decision_outbox_check is None
+            or (now - last_decision_outbox_check).total_seconds() >= decision_outbox_interval
+        ):
+            await _run_decision_outbox_check()
+            last_decision_outbox_check = now
 
         last_full_run = await get_last_run_time("full_resolution")
         if last_full_run is None or (now - last_full_run) >= full_interval:
