@@ -91,12 +91,6 @@ async def _detect_silence_gaps() -> int:
     count = 0
 
     async with pool.acquire() as conn:
-        entities = await conn.fetch("""
-            SELECT e.id, e.canonical_name, e.silence_threshold_days
-            FROM entities e
-            WHERE e.tier = 'primary'
-        """)
-
         # Per-source global last event: is the SOURCE still collecting at all?
         source_health_rows = await conn.fetch("""
             SELECT source, MAX(occurred_at) AS last_event
@@ -105,33 +99,44 @@ async def _detect_silence_gaps() -> int:
         """)
         source_last_event = {r["source"]: r["last_event"] for r in source_health_rows}
 
-        # Each entity's most-recent event and the source it came from, in one scan.
-        entity_last_source_rows = await conn.fetch("""
-            SELECT DISTINCT ON (entity_id) entity_id, source
-            FROM timeline_events
-            WHERE entity_id IS NOT NULL
-            ORDER BY entity_id, occurred_at DESC
-        """)
-        entity_last_source = {r["entity_id"]: r["source"] for r in entity_last_source_rows}
-
-        for entity in entities:
-            eid = entity["id"]
-
-            row = await conn.fetchrow("""
+        entity_rows = await conn.fetch("""
+            WITH event_stats AS (
                 SELECT
+                    entity_id,
                     MAX(occurred_at) AS last_event,
                     MIN(occurred_at) AS first_event,
                     COUNT(*) AS event_count
                 FROM timeline_events
-                WHERE entity_id = $1
-            """, eid)
+                WHERE entity_id IS NOT NULL
+                GROUP BY entity_id
+            ),
+            last_sources AS (
+                SELECT DISTINCT ON (entity_id)
+                    entity_id,
+                    source AS last_source
+                FROM timeline_events
+                WHERE entity_id IS NOT NULL
+                ORDER BY entity_id, occurred_at DESC
+            )
+            SELECT
+                e.id,
+                e.canonical_name,
+                e.silence_threshold_days,
+                s.last_event,
+                s.first_event,
+                s.event_count,
+                ls.last_source
+            FROM entities e
+            JOIN event_stats s ON s.entity_id = e.id
+            LEFT JOIN last_sources ls ON ls.entity_id = e.id
+            WHERE e.tier = 'primary'
+        """)
 
-            if not row or not row["last_event"]:
-                continue
-
-            last_event = row["last_event"]
-            first_event = row["first_event"]
-            event_count = row["event_count"]
+        for entity in entity_rows:
+            eid = entity["id"]
+            last_event = entity["last_event"]
+            first_event = entity["first_event"]
+            event_count = entity["event_count"]
             history_days = (now - first_event).days if first_event else 0
 
             custom_threshold = entity["silence_threshold_days"]
@@ -151,7 +156,7 @@ async def _detect_silence_gaps() -> int:
                 # source of its latest event has produced nothing for anyone in
                 # source_stale_days, the gap is a collection outage — skip.
                 if suppress_on_source_stall:
-                    last_src = entity_last_source.get(eid)
+                    last_src = entity["last_source"]
                     src_last = source_last_event.get(last_src)
                     if src_last is not None and (now - src_last).days >= source_stale_days:
                         continue
