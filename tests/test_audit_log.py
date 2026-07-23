@@ -132,6 +132,30 @@ def test_append_audit_writes_stable_refs_and_evidence_snapshot(tmp_path, monkeyp
     }
 
 
+def test_validate_decision_event_rejects_unknown_event_type():
+    import src.util.audit_log as audit_log
+
+    event = {
+        "schema_version": 1,
+        "audit_id": 1,
+        "event_type": "merge_entities",
+        "actor": "dashboard",
+        "entity_ids": ["00000000-0000-0000-0000-000000000001"],
+        "payload": {},
+        "created_at": "2026-07-20T02:00:00.123456+00:00",
+        "prev_sha256": None,
+        "sha256": "a" * 64,
+        "idempotency_key": "b" * 64,
+    }
+
+    try:
+        audit_log._validate_decision_event(event)
+    except ValueError as exc:
+        assert "event_type is not supported" in str(exc)
+    else:
+        raise AssertionError("unknown decision event type was accepted")
+
+
 def test_append_audit_invalid_decision_event_is_nonfatal_and_not_written(
     tmp_path,
     monkeypatch,

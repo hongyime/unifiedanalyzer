@@ -319,3 +319,9 @@ def test_apply_decision_replay_applies_dismiss_effect(tmp_path):
 def test_reject_media_decisions_have_rebuild_mapping():
     assert DERIVED_REBUILD_BY_EVENT["reject_media_owner"] == ("media_attribution", "timeline_events")
     assert DERIVED_REBUILD_BY_EVENT["reject_person_in_photo"] == ("face_links", "timeline_events")
+
+
+def test_all_supported_decision_events_have_replay_mapping():
+    from src.util.audit_log import DECISION_EVENT_TYPES
+
+    assert DECISION_EVENT_TYPES <= set(DERIVED_REBUILD_BY_EVENT)

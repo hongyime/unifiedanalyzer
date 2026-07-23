@@ -63,7 +63,9 @@
     - `confirm_location`
     - `reject_location`
     - `assign_media_owner`
+    - `reject_media_owner`
     - `assign_person_in_photo`
+    - `reject_person_in_photo`
     - `assign_target_tier`
     - `add_note`
     - `adjust_source_confidence`
