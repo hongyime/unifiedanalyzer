@@ -11,6 +11,11 @@ from uuid import UUID
 from src.util.audit_log import DECISION_LOG_DIR, _validate_decision_event
 
 
+LEGACY_EVENT_TYPE_ALIASES = {
+    "dismiss_match": "dismiss_identity_candidate",
+    "merge_entities": "merge_confirmed",
+}
+
 DERIVED_REBUILD_BY_EVENT = {
     "merge_confirmed": ("identity_scores", "entity_graph", "timeline_events"),
     "split_person": ("identity_scores", "entity_graph", "timeline_events"),
@@ -320,7 +325,7 @@ async def _latest_successful_backup_run(conn, *, max_age: timedelta) -> str | No
 
 
 async def restore_audit_event(conn, event: dict[str, Any]) -> bool:
-    _validate_decision_event(event)
+    _validate_replay_event(event)
     entity_ids = _uuid_list_or_none(event.get("entity_ids") or [])
     created_at = datetime.fromisoformat(event["created_at"])
     result = await conn.execute(
@@ -355,7 +360,7 @@ async def apply_decision_effect(conn, event: dict[str, Any], replay_event: Decis
     if replay_event.status != "restorable":
         return "skipped_unresolved"
 
-    event_type = event.get("event_type")
+    event_type = _canonical_event_type(event.get("event_type"))
     payload = event.get("payload") or {}
     entity_ids = replay_event.resolved_entity_ids
 
@@ -588,8 +593,8 @@ async def inspect_decision_line(conn, root: Path, path: Path, line_no: int, line
     rel_path = _safe_relative(path, root)
     try:
         payload = json.loads(line)
-        _validate_decision_event(payload)
-        event_type = payload.get("event_type")
+        _validate_replay_event(payload)
+        event_type = _canonical_event_type(payload.get("event_type"))
         audit_id = payload.get("audit_id")
         payload_summary = summarize_payload(payload.get("payload") or {})
     except Exception as exc:
@@ -699,6 +704,24 @@ def stable_refs_from_event(event: dict[str, Any]) -> list[dict[str, str | None]]
             if ref not in refs:
                 refs.append(ref)
     return refs
+
+
+def _canonical_event_type(event_type: Any) -> str | None:
+    if event_type is None:
+        return None
+    text = str(event_type)
+    return LEGACY_EVENT_TYPE_ALIASES.get(text, text)
+
+
+def _validate_replay_event(event: dict[str, Any]) -> None:
+    event_type = event.get("event_type")
+    if event_type not in LEGACY_EVENT_TYPE_ALIASES:
+        _validate_decision_event(event)
+        return
+
+    normalized = dict(event)
+    normalized["event_type"] = LEGACY_EVENT_TYPE_ALIASES[event_type]
+    _validate_decision_event(normalized)
 
 
 async def resolve_stable_refs(conn, refs: list[dict[str, str | None]]) -> dict[str, Any]:

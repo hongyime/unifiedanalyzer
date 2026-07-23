@@ -136,6 +136,17 @@ def test_decision_replay_marks_no_reference_event_unresolved(tmp_path):
     assert report.events[0].reason == "no stable platform references in decision payload"
 
 
+def test_decision_replay_accepts_legacy_event_names_as_unresolved_not_invalid(tmp_path):
+    _write_event(tmp_path, _event(event_type="dismiss_match", payload={}))
+
+    report = asyncio.run(dry_run_decision_replay(FakeConn({}), log_dir=tmp_path))
+
+    assert report.invalid == 0
+    assert report.unresolved == 1
+    assert report.events[0].event_type == "dismiss_identity_candidate"
+    assert "identity_scores" in report.events[0].derived_rebuild_required
+
+
 def test_decision_replay_marks_ambiguous_reference(tmp_path):
     _write_event(tmp_path, _event(payload={"entity_snapshots_before": [_snapshot()]}))
     conn = FakeConn({
@@ -327,6 +338,39 @@ def test_apply_decision_replay_applies_dismiss_effect(tmp_path):
     assert "features = EXCLUDED.features" in insert_sql
     assert json.loads(insert_args[2]) == {"email_match": 0.6, "bio_mention": 0.9}
     assert any("DELETE FROM entity_relationships" in sql for sql, _ in conn.executed)
+
+
+def test_apply_decision_replay_preserves_legacy_action_but_applies_canonical_effect(tmp_path):
+    event = _event(
+        event_type="dismiss_match",
+        payload={
+            "entity_snapshots": [_snapshot("telegram", "1", "a"), _snapshot("instagram", "2", "b")],
+            "features": {"email_match": 0.6},
+        },
+    )
+    _write_event(tmp_path, event)
+    conn = FakeConn(
+        {
+            "telegram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}],
+            "instagram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000002"}],
+        },
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 1,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "ok",
+        },
+    )
+
+    report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+
+    assert report.effect_applied == 1
+    audit_sql, audit_args = next((sql, args) for sql, args in conn.executed if "INSERT INTO audit_log" in sql)
+    assert "INSERT INTO audit_log" in audit_sql
+    assert audit_args[3] == "dismiss_match"
+    insert_sql, insert_args = next((sql, args) for sql, args in conn.executed if "INSERT INTO identity_labels" in sql)
+    assert "identity_labels" in insert_sql
+    assert json.loads(insert_args[2]) == {"email_match": 0.6}
 
 
 def test_apply_decision_replay_applies_same_person_relationship_confirm(tmp_path):
