@@ -390,6 +390,43 @@ async def apply_decision_effect(conn, event: dict[str, Any], replay_event: Decis
         )
         return "applied"
 
+    if event_type in {"confirm_relationship", "reject_relationship"}:
+        if len(entity_ids) != 2:
+            return "skipped_unresolved"
+        relationship_type = payload.get("relationship_type")
+        if relationship_type != "same_person_probability":
+            return "unsupported"
+        a, b = sorted(entity_ids)
+        label = 1 if event_type == "confirm_relationship" else 0
+        features = _relationship_feature_snapshot(payload)
+        await conn.execute(
+            """
+            INSERT INTO identity_labels (entity_a, entity_b, features, label, source)
+            VALUES ($1::uuid, $2::uuid, $3::jsonb, $4, 'decision_replay')
+            ON CONFLICT (entity_a, entity_b)
+            DO UPDATE SET features = EXCLUDED.features,
+                          label = EXCLUDED.label,
+                          source = 'decision_replay',
+                          created_at = NOW()
+            """,
+            a,
+            b,
+            json.dumps(features, default=str),
+            label,
+        )
+        if event_type == "reject_relationship":
+            await conn.execute(
+                """
+                DELETE FROM entity_relationships
+                WHERE relationship_type = 'same_person_probability'
+                  AND ((entity_a_id = $1::uuid AND entity_b_id = $2::uuid)
+                    OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
+                """,
+                a,
+                b,
+            )
+        return "applied"
+
     if event_type == "assign_target_tier":
         if len(entity_ids) != 1:
             return "skipped_unresolved"
@@ -417,6 +454,30 @@ async def apply_decision_effect(conn, event: dict[str, Any], replay_event: Decis
         )
         return "applied"
 
+    if event_type == "adjust_source_confidence":
+        if len(entity_ids) != 1:
+            return "skipped_unresolved"
+        source = payload.get("source")
+        platform_id = payload.get("platform_id")
+        confidence = payload.get("confidence")
+        if source is None or platform_id is None or confidence is None:
+            return "unsupported"
+        await conn.execute(
+            """
+            UPDATE entity_platform_links
+            SET confidence = $1,
+                updated_at = NOW()
+            WHERE entity_id = $2::uuid
+              AND source = $3
+              AND platform_id = $4
+            """,
+            confidence,
+            entity_ids[0],
+            source,
+            platform_id,
+        )
+        return "applied"
+
     return "unsupported"
 
 
@@ -437,6 +498,45 @@ def _dismiss_feature_snapshot(payload: dict[str, Any]) -> dict[str, float]:
     if not isinstance(sources, dict):
         return {}
     signals = sources.get("contributing_signals")
+    if not isinstance(signals, list):
+        return {}
+
+    features: dict[str, float] = {}
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        signal_type = signal.get("type")
+        if not signal_type:
+            continue
+        try:
+            confidence = float(signal.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        key = str(signal_type)
+        if confidence > features.get(key, 0.0):
+            features[key] = confidence
+    return features
+
+
+def _relationship_feature_snapshot(payload: dict[str, Any]) -> dict[str, float]:
+    explicit = payload.get("features")
+    if isinstance(explicit, dict):
+        return _coerce_feature_snapshot(explicit)
+
+    snapshot = payload.get("relationship_snapshot")
+    if not isinstance(snapshot, dict):
+        return {}
+    sources = snapshot.get("sources")
+    if isinstance(sources, str):
+        try:
+            sources = json.loads(sources)
+        except json.JSONDecodeError:
+            sources = {}
+    if not isinstance(sources, dict):
+        return {}
+    signals = sources.get("contributing_signals")
+    if isinstance(signals, dict):
+        return _coerce_feature_snapshot(signals)
     if not isinstance(signals, list):
         return {}
 

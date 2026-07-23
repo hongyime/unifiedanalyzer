@@ -329,6 +329,103 @@ def test_apply_decision_replay_applies_dismiss_effect(tmp_path):
     assert any("DELETE FROM entity_relationships" in sql for sql, _ in conn.executed)
 
 
+def test_apply_decision_replay_applies_same_person_relationship_confirm(tmp_path):
+    _write_event(tmp_path, _event(
+        event_type="confirm_relationship",
+        payload={
+            "relationship_type": "same_person_probability",
+            "entity_snapshots": [_snapshot("telegram", "1", "a"), _snapshot("instagram", "2", "b")],
+            "relationship_snapshot": {
+                "sources": {
+                    "contributing_signals": [
+                        {"type": "phone_match", "confidence": 0.9},
+                        {"type": "email_match", "confidence": 0.7},
+                    ],
+                },
+            },
+        },
+    ))
+    conn = FakeConn(
+        {
+            "telegram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}],
+            "instagram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000002"}],
+        },
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 1,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "ok",
+        },
+    )
+
+    report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+
+    assert report.effect_applied == 1
+    insert_sql, insert_args = next((sql, args) for sql, args in conn.executed if "INSERT INTO identity_labels" in sql)
+    assert "label = EXCLUDED.label" in insert_sql
+    assert json.loads(insert_args[2]) == {"phone_match": 0.9, "email_match": 0.7}
+    assert insert_args[3] == 1
+
+
+def test_apply_decision_replay_applies_same_person_relationship_reject(tmp_path):
+    _write_event(tmp_path, _event(
+        event_type="reject_relationship",
+        payload={
+            "relationship_type": "same_person_probability",
+            "entity_snapshots": [_snapshot("telegram", "1", "a"), _snapshot("instagram", "2", "b")],
+            "relationship_snapshot": {"sources": {"contributing_signals": {"phone_match": 0.8}}},
+        },
+    ))
+    conn = FakeConn(
+        {
+            "telegram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}],
+            "instagram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000002"}],
+        },
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 1,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "ok",
+        },
+    )
+
+    report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+
+    assert report.effect_applied == 1
+    insert_sql, insert_args = next((sql, args) for sql, args in conn.executed if "INSERT INTO identity_labels" in sql)
+    assert json.loads(insert_args[2]) == {"phone_match": 0.8}
+    assert insert_args[3] == 0
+    assert any("DELETE FROM entity_relationships" in sql for sql, _ in conn.executed)
+
+
+def test_apply_decision_replay_applies_source_confidence(tmp_path):
+    _write_event(tmp_path, _event(
+        event_type="adjust_source_confidence",
+        payload={
+            "source": "instagram",
+            "platform_id": "123",
+            "confidence": 87.5,
+            "entity_snapshot": [_snapshot("instagram", "123", "alice")],
+        },
+    ))
+    conn = FakeConn(
+        {"instagram": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}]},
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 1,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "ok",
+        },
+    )
+
+    report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+
+    assert report.effect_applied == 1
+    update_sql, update_args = next((sql, args) for sql, args in conn.executed if "UPDATE entity_platform_links" in sql)
+    assert "platform_id = $4" in update_sql
+    assert update_args == (87.5, "eeeeeeee-0000-0000-0000-000000000001", "instagram", "123")
+
+
 def test_reject_media_decisions_have_rebuild_mapping():
     assert DERIVED_REBUILD_BY_EVENT["reject_media_owner"] == ("media_attribution", "timeline_events")
     assert DERIVED_REBUILD_BY_EVENT["reject_person_in_photo"] == ("face_links", "timeline_events")
