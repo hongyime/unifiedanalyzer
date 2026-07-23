@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Trash2, Bell, MapPin, ChevronLeft, ChevronRight, History } from 'lucide-react'
+import { ArrowLeft, Trash2, Bell, MapPin, ChevronLeft, ChevronRight, History, ImageIcon, CheckCircle2, XCircle } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 import {
   api,
@@ -14,6 +14,7 @@ import {
   Signal,
   SocialCircleEntry,
   DecisionHistoryEntry,
+  EntityMediaFaces,
 } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { TimelineLanes } from '../components/TimelineLanes'
@@ -81,6 +82,39 @@ function decisionDurability(decision: DecisionHistoryEntry): { status: 'success'
   if (decision.decision_jsonl_error) return { status: 'error', label: 'JSONL error' }
   if (decision.durable) return { status: 'success', label: 'JSONL written' }
   return { status: 'warning', label: 'JSONL pending' }
+}
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null || !Number.isFinite(bytes)) return '—'
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unit]}`
+}
+
+function MediaThumb({ src, label }: { src?: string | null; label: string }) {
+  const [failed, setFailed] = useState(false)
+  if (src && !failed) {
+    return (
+      <img
+        src={src}
+        alt={label}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        className="h-14 w-14 shrink-0 rounded-md border border-border object-cover"
+      />
+    )
+  }
+  return (
+    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md border border-border bg-hover text-text-muted">
+      <ImageIcon className="h-5 w-5" />
+    </div>
+  )
 }
 
 /** Reused hour+day activity bars. Uses the info accent for both charts so the
@@ -156,6 +190,7 @@ type TabKey =
   | 'changes'
   | 'timeline'
   | 'map'
+  | 'media'
   | 'intersect'
   | 'behavior'
   | 'connections'
@@ -274,6 +309,9 @@ export default function EntityDetailPage() {
 
   const [decisions, setDecisions] = useState<DecisionHistoryEntry[] | null>(null)
   const [decisionsTotal, setDecisionsTotal] = useState(0)
+  const [mediaFaces, setMediaFaces] = useState<EntityMediaFaces | null>(null)
+  const [mediaFacesError, setMediaFacesError] = useState('')
+  const [mediaDecisionBusy, setMediaDecisionBusy] = useState<string | null>(null)
   const loadDecisions = () => {
     if (!id) return
     api.getEntityDecisions(id).then((data) => {
@@ -289,6 +327,20 @@ export default function EntityDetailPage() {
     setDecisionsTotal(0)
   }, [id])
   useEffect(() => { if (id && tab === 'decisions') loadDecisions() }, [id, tab])
+
+  useEffect(() => {
+    setMediaFaces(null)
+    setMediaFacesError('')
+    setMediaDecisionBusy(null)
+  }, [id])
+  useEffect(() => {
+    if (!id || tab !== 'media') return
+    setMediaFacesError('')
+    api.getEntityMediaFaces(id).then(setMediaFaces).catch((e) => {
+      setMediaFaces(null)
+      setMediaFacesError(e instanceof Error ? e.message : String(e))
+    })
+  }, [id, tab])
 
   useEffect(() => {
     if (!id || tab !== 'intelligence') return
@@ -365,6 +417,39 @@ export default function EntityDetailPage() {
       const message = e instanceof Error ? e.message : String(e)
       setActionMsg(`Relationship decision failed: ${message}`)
       throw e
+    }
+  }
+
+  const handleMediaPersonDecision = async (
+    targetEntityId: string,
+    role: 'owner' | 'person_in_photo',
+    isCorrect: boolean,
+    mediaRef: Record<string, unknown>,
+  ) => {
+    if (!id) return
+    const ref = String(mediaRef.media_item_id ?? mediaRef.face_id ?? mediaRef.associated_face_id ?? role)
+    const key = `${targetEntityId}:${role}:${isCorrect ? 'yes' : 'no'}:${ref}`
+    setMediaDecisionBusy(key)
+    try {
+      await api.decideMediaPerson(targetEntityId, {
+        role,
+        is_correct: isCorrect,
+        media_ref: mediaRef,
+        evidence_refs: {
+          source: 'media_faces_tab',
+          entity_page: id,
+        },
+      })
+      const label = role === 'owner' ? 'media owner' : 'person in photo'
+      setActionMsg(isCorrect ? `Confirmed ${label}` : `Rejected ${label}`)
+      if (targetEntityId === id) {
+        api.getEntityDecisions(id, 1).then((data) => setDecisionsTotal(data.total)).catch(() => {})
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      setActionMsg(`Media decision failed: ${message}`)
+    } finally {
+      setMediaDecisionBusy(null)
     }
   }
 
@@ -469,6 +554,7 @@ export default function EntityDetailPage() {
     { key: 'changes', label: 'Changes', badge: changelog && changelog.total_changes > 0 ? String(changelog.total_changes) : undefined },
     { key: 'timeline', label: 'Timeline' },
     { key: 'map', label: 'Map' },
+    { key: 'media', label: 'Media/Faces', badge: mediaFaces ? String(mediaFaces.owned_media.length + mediaFaces.known_faces.length + mediaFaces.associated_faces.length) : undefined },
     { key: 'intersect', label: 'Intersect' },
     { key: 'behavior', label: 'Behavior' },
     { key: 'connections', label: 'Connections' },
@@ -849,6 +935,230 @@ export default function EntityDetailPage() {
             title="No geo signals yet"
             description="Strava routes and Instagram places will appear here as the collector populates them."
           />
+        )
+      )}
+
+      {/* ── Media/Faces ─────────────────────────────────────────────── */}
+      {tab === 'media' && (
+        mediaFacesError ? (
+          <EmptyState
+            icon={<ImageIcon className="h-10 w-10" />}
+            title="Media and faces unavailable"
+            description={mediaFacesError}
+          />
+        ) : !mediaFaces ? (
+          <LoadingSpinner label="Loading media and faces..." />
+        ) : (
+          <div className="space-y-3">
+            {mediaFaces.collector_skipped && (
+              <Card className="border-warning/60">
+                <div className="text-sm text-text-secondary">
+                  Collector media lookup skipped{mediaFaces.collector_error ? `: ${mediaFaces.collector_error}` : '.'}
+                </div>
+              </Card>
+            )}
+
+            <Card title={`Owned media (${mediaFaces.owned_media.length})`}>
+              {mediaFaces.owned_media.length === 0 ? (
+                <div className="text-sm text-text-muted">No owned collector media resolved for this person.</div>
+              ) : (
+                <div className="space-y-2">
+                  {mediaFaces.owned_media.map((m) => {
+                    const mediaRef = {
+                      media_item_id: m.media_item_id,
+                      source: m.source,
+                      content_id: m.content_id,
+                      sha256: m.sha256,
+                      kind: m.kind,
+                    }
+                    const yesKey = `${entity.id}:owner:yes:${m.media_item_id}`
+                    const noKey = `${entity.id}:owner:no:${m.media_item_id}`
+                    return (
+                      <div key={m.media_item_id} className="flex items-start justify-between gap-3 rounded-lg border border-border px-3 py-2">
+                        <div className="flex min-w-0 items-start gap-2">
+                          <MediaThumb src={m.analysis?.thumbnail_url} label={m.filename || m.content_type} />
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1">
+                              <PlatformBadge source={m.source} />
+                              <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">{m.kind}</span>
+                              <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">{m.content_type}</span>
+                            </div>
+                            <div className="mt-1 truncate text-sm font-medium" title={m.filename || m.content_id}>
+                              {m.filename || m.content_id}
+                            </div>
+                            <div className="mt-0.5 text-xs text-text-muted">
+                              {m.collected_at ? formatDate(m.collected_at) : '—'} · {formatBytes(m.file_size)}
+                              {m.width && m.height ? ` · ${m.width}x${m.height}` : ''}
+                            </div>
+                            {m.analysis?.text_preview && (
+                              <div className="mt-1 max-w-[560px] truncate text-xs text-text-muted" title={m.analysis.text_preview}>
+                                {m.analysis.text_preview}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 px-0"
+                            icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+                            aria-label="Confirm media owner"
+                            title="Confirm media owner"
+                            loading={mediaDecisionBusy === yesKey}
+                            disabled={mediaDecisionBusy != null && mediaDecisionBusy !== yesKey}
+                            onClick={() => handleMediaPersonDecision(entity.id, 'owner', true, mediaRef)}
+                          />
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            className="h-7 w-7 px-0"
+                            icon={<XCircle className="h-3.5 w-3.5" />}
+                            aria-label="Reject media owner"
+                            title="Reject media owner"
+                            loading={mediaDecisionBusy === noKey}
+                            disabled={mediaDecisionBusy != null && mediaDecisionBusy !== noKey}
+                            onClick={() => handleMediaPersonDecision(entity.id, 'owner', false, mediaRef)}
+                          />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </Card>
+
+            <Card title={`Known face links (${mediaFaces.known_faces.length})`}>
+              {mediaFaces.known_faces.length === 0 ? (
+                <div className="text-sm text-text-muted">No face links recorded for this person.</div>
+              ) : (
+                <div className="grid gap-2 md:grid-cols-2">
+                  {mediaFaces.known_faces.map((f) => {
+                    const ref = String(f.media_item_id ?? f.face_id)
+                    const mediaRef = {
+                      media_item_id: f.media_item_id,
+                      face_id: f.face_id,
+                      confidence: f.confidence,
+                      method: f.method,
+                    }
+                    const yesKey = `${entity.id}:person_in_photo:yes:${ref}`
+                    const noKey = `${entity.id}:person_in_photo:no:${ref}`
+                    return (
+                      <div key={`${f.face_id}:${f.media_item_id ?? ''}`} className="flex items-start justify-between gap-3 rounded-lg border border-border px-3 py-2">
+                        <div className="flex min-w-0 items-start gap-2">
+                          <MediaThumb src={f.face_crop_url} label={`Face ${f.face_id}`} />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium">Face {f.face_id}</div>
+                            <div className="mt-0.5 text-xs text-text-muted">
+                              {f.method || 'face link'} · {f.confidence != null ? `${Math.round(f.confidence * 100)}%` : '—'}
+                              {f.created_at ? ` · ${formatDate(f.created_at)}` : ''}
+                            </div>
+                            {f.media_item_id && (
+                              <div className="mt-1 truncate font-mono text-[0.7rem] text-text-muted" title={f.media_item_id}>
+                                {f.media_item_id}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 px-0"
+                            icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+                            aria-label="Confirm person in photo"
+                            title="Confirm person in photo"
+                            loading={mediaDecisionBusy === yesKey}
+                            disabled={mediaDecisionBusy != null && mediaDecisionBusy !== yesKey}
+                            onClick={() => handleMediaPersonDecision(entity.id, 'person_in_photo', true, mediaRef)}
+                          />
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            className="h-7 w-7 px-0"
+                            icon={<XCircle className="h-3.5 w-3.5" />}
+                            aria-label="Reject person in photo"
+                            title="Reject person in photo"
+                            loading={mediaDecisionBusy === noKey}
+                            disabled={mediaDecisionBusy != null && mediaDecisionBusy !== noKey}
+                            onClick={() => handleMediaPersonDecision(entity.id, 'person_in_photo', false, mediaRef)}
+                          />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </Card>
+
+            <Card title={`Faces seen in this person's media (${mediaFaces.associated_faces.length})`}>
+              {mediaFaces.associated_faces.length === 0 ? (
+                <div className="text-sm text-text-muted">No associated faces found in this person's media.</div>
+              ) : (
+                <div className="grid gap-2 md:grid-cols-2">
+                  {mediaFaces.associated_faces.map((f) => {
+                    const targetEntity = f.matched_entity_id
+                    const mediaRef = {
+                      media_item_id: f.media_item_id,
+                      associated_face_id: f.associated_face_id,
+                      owner_entity_id: entity.id,
+                      source_platform: f.source_platform,
+                    }
+                    const yesKey = targetEntity ? `${targetEntity}:person_in_photo:yes:${f.media_item_id}` : ''
+                    const noKey = targetEntity ? `${targetEntity}:person_in_photo:no:${f.media_item_id}` : ''
+                    return (
+                      <div key={`${f.associated_face_id}:${f.media_item_id}`} className="flex items-start justify-between gap-3 rounded-lg border border-border px-3 py-2">
+                        <div className="flex min-w-0 items-start gap-2">
+                          <MediaThumb src={f.face_crop_url} label={`Face ${f.associated_face_id}`} />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium">Face {f.associated_face_id}</div>
+                            <div className="mt-0.5 text-xs text-text-muted">
+                              {f.source_platform || 'media'} · quality {f.quality_score != null ? f.quality_score.toFixed(2) : '—'}
+                              {f.first_seen_at ? ` · ${formatDate(f.first_seen_at)}` : ''}
+                            </div>
+                            {f.matched_entity_id ? (
+                              <Link to={`/entities/${f.matched_entity_id}`} className="mt-1 block truncate text-xs hover:underline">
+                                {f.matched_entity_name || f.matched_entity_id.slice(0, 8)}
+                                {f.matched_confidence != null ? ` · ${Math.round(f.matched_confidence * 100)}%` : ''}
+                              </Link>
+                            ) : (
+                              <div className="mt-1 text-xs text-text-muted">Unmatched face</div>
+                            )}
+                          </div>
+                        </div>
+                        {targetEntity && (
+                          <div className="flex shrink-0 items-center gap-1">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 w-7 px-0"
+                              icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+                              aria-label="Confirm matched person in photo"
+                              title="Confirm matched person in photo"
+                              loading={mediaDecisionBusy === yesKey}
+                              disabled={mediaDecisionBusy != null && mediaDecisionBusy !== yesKey}
+                              onClick={() => handleMediaPersonDecision(targetEntity, 'person_in_photo', true, mediaRef)}
+                            />
+                            <Button
+                              size="sm"
+                              variant="danger"
+                              className="h-7 w-7 px-0"
+                              icon={<XCircle className="h-3.5 w-3.5" />}
+                              aria-label="Reject matched person in photo"
+                              title="Reject matched person in photo"
+                              loading={mediaDecisionBusy === noKey}
+                              disabled={mediaDecisionBusy != null && mediaDecisionBusy !== noKey}
+                              onClick={() => handleMediaPersonDecision(targetEntity, 'person_in_photo', false, mediaRef)}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </Card>
+          </div>
         )
       )}
 

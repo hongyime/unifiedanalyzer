@@ -25,6 +25,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
+from src.api.face_lookup import face_crop_url
 from src.db.connection import get_analyzer_pool, get_collector_pool
 from src.pipeline.media_common import resolve_media_path
 
@@ -148,6 +149,245 @@ def _row_to_dict(r) -> dict:
         # derived pdf images / video frames). Let the client decide whether to
         # request one; the endpoint 404s gracefully otherwise.
         "thumbnail_url": f"/api/media/{r['id']}/thumbnail",
+    }
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _analysis_preview(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    text = row.get("extracted_text")
+    return {
+        "analysis_id": row.get("analysis_id"),
+        "analysis_type": row.get("analysis_type"),
+        "content_type": row.get("content_type"),
+        "source": row.get("source"),
+        "text_preview": (text[:180] + "...") if text and len(text) > 180 else text,
+        "has_text": bool(text),
+        "has_gps": row.get("gps_lat") is not None and row.get("gps_lon") is not None,
+        "gps_lat": row.get("gps_lat"),
+        "gps_lon": row.get("gps_lon"),
+        "taken_at": _iso(row.get("taken_at")),
+        "processed_at": _iso(row.get("processed_at")),
+        "thumbnail_url": f"/api/media/{row['analysis_id']}/thumbnail" if row.get("analysis_id") else None,
+    }
+
+
+async def _analysis_by_media_id(conn, media_ids: set[str]) -> dict[str, dict]:
+    if not media_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (media_item_id)
+               media_item_id,
+               id::text AS analysis_id,
+               analysis_type,
+               content_type,
+               source,
+               extracted_text,
+               gps_lat,
+               gps_lon,
+               taken_at,
+               processed_at
+        FROM media_analysis
+        WHERE media_item_id = ANY($1::text[])
+        ORDER BY media_item_id, processed_at DESC NULLS LAST
+        """,
+        sorted(media_ids),
+    )
+    return {str(r["media_item_id"]): dict(r) for r in rows}
+
+
+@router.get("/entities/{entity_id}/media-faces")
+async def entity_media_faces(entity_id: str, limit: int = Query(40, ge=1, le=120)):
+    """Entity-scoped media/faces for the person page.
+
+    Returns owned collector media, faces already linked to this entity, and other
+    faces found in this entity's media. Corrections are recorded by
+    /entities/{entity_id}/media-person-decision.
+    """
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM entities WHERE id = $1::uuid", entity_id)
+        if not exists:
+            raise HTTPException(404, "Entity not found")
+
+        link_rows = await conn.fetch(
+            """
+            SELECT source, platform_id, platform_username
+            FROM entity_platform_links
+            WHERE entity_id = $1::uuid
+            """,
+            entity_id,
+        )
+        known_face_rows = await conn.fetch(
+            """
+            SELECT face_id, media_item_id, confidence, method, created_at
+            FROM entity_faces
+            WHERE entity_id = $1::uuid
+            ORDER BY confidence DESC NULLS LAST, created_at DESC NULLS LAST
+            LIMIT $2
+            """,
+            entity_id,
+            limit,
+        )
+        association_rows = await conn.fetch(
+            """
+            SELECT fa.associated_face_id,
+                   fa.media_item_id,
+                   fa.source_platform,
+                   fa.quality_score,
+                   fa.first_seen_at,
+                   match.entity_id::text AS matched_entity_id,
+                   match.canonical_name AS matched_entity_name,
+                   match.confidence AS matched_confidence
+            FROM face_associations fa
+            LEFT JOIN LATERAL (
+                SELECT ef.entity_id,
+                       e.canonical_name,
+                       ef.confidence
+                FROM entity_faces ef
+                JOIN entities e ON e.id = ef.entity_id
+                WHERE ef.face_id = fa.associated_face_id
+                  AND ef.entity_id <> fa.entity_id
+                ORDER BY ef.confidence DESC NULLS LAST, e.canonical_name NULLS LAST
+                LIMIT 1
+            ) AS match ON TRUE
+            WHERE fa.entity_id = $1::uuid
+            ORDER BY
+                match.confidence DESC NULLS LAST,
+                fa.quality_score DESC NULLS LAST,
+                fa.first_seen_at DESC NULLS LAST
+            LIMIT $2
+            """,
+            entity_id,
+            limit,
+        )
+
+    account_pairs: list[tuple[str, str]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for link in link_rows:
+        source = str(link["source"] or "").strip()
+        for value in (link["platform_id"], link["platform_username"]):
+            account = str(value or "").strip()
+            if not source or not account:
+                continue
+            key = (source, account.lower())
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            account_pairs.append((source, account))
+
+    owned_rows = []
+    collector_skipped = False
+    collector_error = None
+    if account_pairs:
+        try:
+            collector = get_collector_pool()
+            sources = [source for source, _account in account_pairs]
+            accounts = [account for _source, account in account_pairs]
+            async with collector.acquire() as conn:
+                owned_rows = await conn.fetch(
+                    """
+                    WITH keys AS (
+                        SELECT *
+                        FROM unnest($1::text[], $2::text[]) AS t(source, account)
+                    ),
+                    matched AS (
+                        SELECT DISTINCT ON (m.id)
+                               m.id::text AS media_item_id,
+                               m.source,
+                               m.entity_id,
+                               m.entity_name,
+                               m.content_type,
+                               m.content_id,
+                               m.filename,
+                               m.file_size,
+                               m.width,
+                               m.height,
+                               m.sha256,
+                               m.kind,
+                               m.collected_at
+                        FROM media_items m
+                        JOIN keys k
+                          ON m.source = k.source
+                         AND lower(m.entity_id) = lower(k.account)
+                        ORDER BY m.id
+                    )
+                    SELECT *
+                    FROM matched
+                    ORDER BY collected_at DESC NULLS LAST
+                    LIMIT $3
+                    """,
+                    sources,
+                    accounts,
+                    limit,
+                )
+        except Exception as exc:  # noqa: BLE001 - collector media should degrade, not break person pages
+            collector_skipped = True
+            collector_error = f"{exc.__class__.__name__}: {exc}"
+
+    media_ids = {
+        str(row["media_item_id"])
+        for row in [*owned_rows, *known_face_rows, *association_rows]
+        if row["media_item_id"]
+    }
+    async with analyzer.acquire() as conn:
+        analysis = await _analysis_by_media_id(conn, media_ids)
+
+    return {
+        "entity_id": entity_id,
+        "collector_skipped": collector_skipped,
+        "collector_error": collector_error,
+        "owned_media": [
+            {
+                "media_item_id": r["media_item_id"],
+                "source": r["source"],
+                "entity_id": r["entity_id"],
+                "entity_name": r["entity_name"],
+                "content_type": r["content_type"],
+                "content_id": r["content_id"],
+                "filename": r["filename"],
+                "file_size": r["file_size"],
+                "width": r["width"],
+                "height": r["height"],
+                "sha256": r["sha256"],
+                "kind": r["kind"],
+                "collected_at": _iso(r["collected_at"]),
+                "analysis": _analysis_preview(analysis.get(str(r["media_item_id"]))),
+            }
+            for r in owned_rows
+        ],
+        "known_faces": [
+            {
+                "face_id": r["face_id"],
+                "face_crop_url": face_crop_url(r["face_id"]),
+                "media_item_id": r["media_item_id"],
+                "confidence": r["confidence"],
+                "method": r["method"],
+                "created_at": _iso(r["created_at"]),
+                "analysis": _analysis_preview(analysis.get(str(r["media_item_id"]))),
+            }
+            for r in known_face_rows
+        ],
+        "associated_faces": [
+            {
+                "associated_face_id": r["associated_face_id"],
+                "face_crop_url": face_crop_url(r["associated_face_id"]),
+                "media_item_id": r["media_item_id"],
+                "source_platform": r["source_platform"],
+                "quality_score": r["quality_score"],
+                "first_seen_at": _iso(r["first_seen_at"]),
+                "matched_entity_id": r["matched_entity_id"],
+                "matched_entity_name": r["matched_entity_name"],
+                "matched_confidence": r["matched_confidence"],
+                "analysis": _analysis_preview(analysis.get(str(r["media_item_id"]))),
+            }
+            for r in association_rows
+        ],
     }
 
 

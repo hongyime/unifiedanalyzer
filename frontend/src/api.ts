@@ -428,6 +428,79 @@ export interface MediaItem {
   thumbnail_url: string
 }
 
+export interface EntityMediaAnalysisPreview {
+  analysis_id: string | null
+  analysis_type: string | null
+  content_type: string | null
+  source: string | null
+  text_preview: string | null
+  has_text: boolean
+  has_gps: boolean
+  gps_lat: number | null
+  gps_lon: number | null
+  taken_at: string | null
+  processed_at: string | null
+  thumbnail_url: string | null
+}
+
+export interface EntityOwnedMedia {
+  media_item_id: string
+  source: string
+  entity_id: string
+  entity_name: string
+  content_type: string
+  content_id: string
+  filename: string
+  file_size: number | null
+  width: number | null
+  height: number | null
+  sha256: string | null
+  kind: string
+  collected_at: string | null
+  analysis: EntityMediaAnalysisPreview | null
+}
+
+export interface EntityKnownFace {
+  face_id: number
+  face_crop_url: string | null
+  media_item_id: string | null
+  confidence: number | null
+  method: string | null
+  created_at: string | null
+  analysis: EntityMediaAnalysisPreview | null
+}
+
+export interface EntityAssociatedFace {
+  associated_face_id: number
+  face_crop_url: string | null
+  media_item_id: string
+  source_platform: string | null
+  quality_score: number | null
+  first_seen_at: string | null
+  matched_entity_id: string | null
+  matched_entity_name: string | null
+  matched_confidence: number | null
+  analysis: EntityMediaAnalysisPreview | null
+}
+
+export interface EntityMediaFaces {
+  entity_id: string
+  collector_skipped: boolean
+  collector_error: string | null
+  owned_media: EntityOwnedMedia[]
+  known_faces: EntityKnownFace[]
+  associated_faces: EntityAssociatedFace[]
+}
+
+export interface MediaPersonDecisionRequest {
+  role: 'owner' | 'person_in_photo'
+  is_correct: boolean
+  media_ref: Record<string, unknown>
+  confidence?: number | null
+  notes?: string | null
+  evidence_refs?: Record<string, unknown>
+}
+
 export interface MediaStats {
   totals: {
     rows_total: number
@@ -699,6 +772,12 @@ export const api = {
 
   decideRelationship: (body: RelationshipDecisionRequest) =>
     post<{ ok: boolean; action: string }>('/entities/relationship-decision', body),
+
+  getEntityMediaFaces: (entityId: string, limit = 40) =>
+    get<EntityMediaFaces>(`/entities/${entityId}/media-faces?limit=${limit}`),
+
+  decideMediaPerson: (entityId: string, body: MediaPersonDecisionRequest) =>
+    post<{ ok: boolean; action: string }>(`/entities/${entityId}/media-person-decision`, body),
 
   getInteractions: (entityId: string, from?: string | null, to?: string | null) => {
     const q = new URLSearchParams()
