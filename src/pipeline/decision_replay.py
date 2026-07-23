@@ -363,15 +363,20 @@ async def apply_decision_effect(conn, event: dict[str, Any], replay_event: Decis
         if len(entity_ids) != 2:
             return "skipped_unresolved"
         a, b = sorted(entity_ids)
+        features = _dismiss_feature_snapshot(payload)
         await conn.execute(
             """
             INSERT INTO identity_labels (entity_a, entity_b, features, label, source)
-            VALUES ($1::uuid, $2::uuid, '{}'::jsonb, 0, 'decision_replay')
+            VALUES ($1::uuid, $2::uuid, $3::jsonb, 0, 'decision_replay')
             ON CONFLICT (entity_a, entity_b)
-            DO UPDATE SET label = 0, source = 'decision_replay', created_at = NOW()
+            DO UPDATE SET features = EXCLUDED.features,
+                          label = 0,
+                          source = 'decision_replay',
+                          created_at = NOW()
             """,
             a,
             b,
+            json.dumps(features, default=str),
         )
         await conn.execute(
             """
@@ -413,6 +418,53 @@ async def apply_decision_effect(conn, event: dict[str, Any], replay_event: Decis
         return "applied"
 
     return "unsupported"
+
+
+def _dismiss_feature_snapshot(payload: dict[str, Any]) -> dict[str, float]:
+    explicit = payload.get("features")
+    if isinstance(explicit, dict):
+        return _coerce_feature_snapshot(explicit)
+
+    evidence = payload.get("candidate_evidence")
+    if not isinstance(evidence, dict):
+        return {}
+    sources = evidence.get("sources")
+    if isinstance(sources, str):
+        try:
+            sources = json.loads(sources)
+        except json.JSONDecodeError:
+            sources = {}
+    if not isinstance(sources, dict):
+        return {}
+    signals = sources.get("contributing_signals")
+    if not isinstance(signals, list):
+        return {}
+
+    features: dict[str, float] = {}
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        signal_type = signal.get("type")
+        if not signal_type:
+            continue
+        try:
+            confidence = float(signal.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        key = str(signal_type)
+        if confidence > features.get(key, 0.0):
+            features[key] = confidence
+    return features
+
+
+def _coerce_feature_snapshot(raw: dict[str, Any]) -> dict[str, float]:
+    features: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            features[str(key)] = float(value or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return features
 
 
 async def _reset_audit_log_sequence(conn) -> None:

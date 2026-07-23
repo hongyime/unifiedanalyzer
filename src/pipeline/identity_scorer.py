@@ -103,6 +103,7 @@ _HIGH_CONFIDENCE = 0.70
 # for the rare burner-account case. Tune with env SCORER_SAME_PLATFORM_MULTIPLIER.
 _SAME_PLATFORM_MULTIPLIER = float(_os_scorer.getenv("SCORER_SAME_PLATFORM_MULTIPLIER", "0.3"))
 _CROSS_PLATFORM_MULTIPLIER = float(_os_scorer.getenv("SCORER_CROSS_PLATFORM_MULTIPLIER", "1.5"))
+_DISMISS_RESURFACE_MIN_DELTA = float(_os_scorer.getenv("SCORER_DISMISS_RESURFACE_MIN_DELTA", "0.05"))
 
 def _pair_key(a: str, b: str) -> tuple[str, str]:
     """Normalize pair ordering — lexicographically smaller UUID first."""
@@ -119,6 +120,53 @@ def _is_uuid(value: str | None) -> bool:
 
 def _has_identity_evidence(contributions: list[tuple[str, float]]) -> bool:
     return any(sig_type not in _CONTEXT_ONLY_SIGNALS for sig_type, _ in contributions)
+
+
+def _features_from_contributions(contributions: list[tuple[str, float]]) -> dict[str, float]:
+    features: dict[str, float] = {}
+    for sig_type, confidence in contributions:
+        confidence = float(confidence or 0.0)
+        if confidence > features.get(sig_type, 0.0):
+            features[sig_type] = confidence
+    return features
+
+
+def _feature_snapshot(raw) -> dict[str, float]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            out[str(key)] = float(value or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _dismissal_suppresses_candidate(
+    contributions: list[tuple[str, float]],
+    dismissed_features: dict[str, float],
+) -> bool:
+    """Return False only when new identity evidence is stronger than dismissal.
+
+    Old labels without a feature snapshot stay suppressive. Context-only signal
+    growth never reopens a dismissed same-person candidate on its own.
+    """
+    if not dismissed_features:
+        return True
+    current = _features_from_contributions(contributions)
+    for sig_type, confidence in current.items():
+        if sig_type in _CONTEXT_ONLY_SIGNALS:
+            continue
+        previous = float(dismissed_features.get(sig_type, 0.0) or 0.0)
+        if confidence >= min(1.0, previous + _DISMISS_RESURFACE_MIN_DELTA):
+            return False
+    return True
 
 
 async def compute_identity_scores() -> dict:
@@ -156,11 +204,11 @@ async def compute_identity_scores() -> dict:
         # source='auto_negative_*'; those are training data, NOT dismissals,
         # and must not suppress the scorer from surfacing the pair.
         dismissed_rows = await conn.fetch("""
-            SELECT entity_a::text AS a, entity_b::text AS b
+            SELECT entity_a::text AS a, entity_b::text AS b, features
             FROM identity_labels
             WHERE label = 0 AND (source IS NULL OR source NOT LIKE 'auto\\_%' ESCAPE '\\')
         """)
-        dismissed = {(r["a"], r["b"]) for r in dismissed_rows}
+        dismissed = {(r["a"], r["b"]): _feature_snapshot(r["features"]) for r in dismissed_rows}
 
     # --- Aggregate contributions per normalized pair ---
     # pair_key -> list of (signal_type, confidence)
@@ -206,8 +254,12 @@ async def compute_identity_scores() -> dict:
     scoring_method = "calibrated" if model is not None else "noisy_or"
     results: list[dict] = []
     for (a, b), contributions in pair_contributions.items():
-        if (a, b) in dismissed:
-            continue  # user said these are different people
+        dismissed_features = dismissed.get((a, b))
+        resurfaced_after_dismissal = False
+        if dismissed_features is not None:
+            if _dismissal_suppresses_candidate(contributions, dismissed_features):
+                continue
+            resurfaced_after_dismissal = True
         if not _has_identity_evidence(contributions):
             continue
         breakdown = [{"type": t, "confidence": round(c, 4)} for t, c in contributions]
@@ -250,6 +302,7 @@ async def compute_identity_scores() -> dict:
             "breakdown": breakdown,
             "cross_platform": cross_platform,
             "same_platform": same_platform,
+            "resurfaced_after_dismissal": resurfaced_after_dismissal,
         })
 
     # --- Persist: delete-and-reinsert ---
@@ -261,6 +314,8 @@ async def compute_identity_scores() -> dict:
             "same_platform": r["same_platform"],
             "contributing_signals": r["breakdown"],
         }
+        if r.get("resurfaced_after_dismissal"):
+            sources["resurfaced_after_dismissal"] = True
         insert_rows.append((
             r["entity_a"],
             r["entity_b"],

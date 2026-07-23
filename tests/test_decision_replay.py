@@ -294,7 +294,18 @@ def test_apply_decision_replay_skips_effects_for_unresolved_events(tmp_path):
 def test_apply_decision_replay_applies_dismiss_effect(tmp_path):
     _write_event(tmp_path, _event(
         event_type="dismiss_identity_candidate",
-        payload={"entity_snapshots": [_snapshot("telegram", "1", "a"), _snapshot("instagram", "2", "b")]},
+        payload={
+            "entity_snapshots": [_snapshot("telegram", "1", "a"), _snapshot("instagram", "2", "b")],
+            "candidate_evidence": {
+                "sources": {
+                    "contributing_signals": [
+                        {"type": "email_match", "confidence": 0.6},
+                        {"type": "email_match", "confidence": 0.4},
+                        {"type": "bio_mention", "confidence": 0.9},
+                    ],
+                },
+            },
+        },
     ))
     conn = FakeConn(
         {
@@ -312,7 +323,9 @@ def test_apply_decision_replay_applies_dismiss_effect(tmp_path):
     report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
 
     assert report.effect_applied == 1
-    assert any("INSERT INTO identity_labels" in sql for sql, _ in conn.executed)
+    insert_sql, insert_args = next((sql, args) for sql, args in conn.executed if "INSERT INTO identity_labels" in sql)
+    assert "features = EXCLUDED.features" in insert_sql
+    assert json.loads(insert_args[2]) == {"email_match": 0.6, "bio_mention": 0.9}
     assert any("DELETE FROM entity_relationships" in sql for sql, _ in conn.executed)
 
 

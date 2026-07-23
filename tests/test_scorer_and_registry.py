@@ -113,6 +113,33 @@ def test_context_only_signals_do_not_create_same_person_probability():
     assert _has_identity_evidence([*context_only, ("email_match", 0.6)])
 
 
+def test_dismissed_same_evidence_stays_suppressed():
+    from src.pipeline.identity_scorer import _dismissal_suppresses_candidate
+
+    assert _dismissal_suppresses_candidate(
+        [("email_match", 0.6), ("bio_mention", 0.9)],
+        {"email_match": 0.6},
+    )
+
+
+def test_dismissed_pair_resurfaces_on_new_identity_signal():
+    from src.pipeline.identity_scorer import _dismissal_suppresses_candidate
+
+    assert not _dismissal_suppresses_candidate(
+        [("email_match", 0.6), ("phone_match", 0.7)],
+        {"email_match": 0.6},
+    )
+
+
+def test_dismissed_pair_ignores_new_context_only_signal():
+    from src.pipeline.identity_scorer import _dismissal_suppresses_candidate
+
+    assert _dismissal_suppresses_candidate(
+        [("email_match", 0.6), ("shared_life_context", 1.0), ("group_cooccurrence", 1.0)],
+        {"email_match": 0.6},
+    )
+
+
 def test_track_c_signals_registered():
     """The Track-1/2 new-signal shipment (2026-07-08): both social_face_link
     and shared_life_context must be present in the registry."""
