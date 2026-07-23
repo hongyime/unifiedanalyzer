@@ -205,8 +205,8 @@ async def _analysis_by_media_id(conn, media_ids: set[str]) -> dict[str, dict]:
 async def entity_media_faces(entity_id: str, limit: int = Query(40, ge=1, le=120)):
     """Entity-scoped media/faces for the person page.
 
-    Returns owned collector media, faces already linked to this entity, and other
-    faces found in this entity's media. Corrections are recorded by
+    Returns collector media linked to this entity, faces already linked to this
+    entity, and other faces found in this entity's media. Corrections are recorded by
     /entities/{entity_id}/media-person-decision.
     """
     analyzer = get_analyzer_pool()
@@ -281,7 +281,7 @@ async def entity_media_faces(entity_id: str, limit: int = Query(40, ge=1, le=120
             seen_pairs.add(key)
             account_pairs.append((source, account))
 
-    owned_rows = []
+    linked_rows = []
     collector_skipped = False
     collector_error = None
     if account_pairs:
@@ -290,7 +290,7 @@ async def entity_media_faces(entity_id: str, limit: int = Query(40, ge=1, le=120
             sources = [source for source, _account in account_pairs]
             accounts = [account for _source, account in account_pairs]
             async with collector.acquire() as conn:
-                owned_rows = await conn.fetch(
+                linked_rows = await conn.fetch(
                     """
                     WITH keys AS (
                         SELECT *
@@ -332,7 +332,7 @@ async def entity_media_faces(entity_id: str, limit: int = Query(40, ge=1, le=120
 
     media_ids = {
         str(row["media_item_id"])
-        for row in [*owned_rows, *known_face_rows, *association_rows]
+        for row in [*linked_rows, *known_face_rows, *association_rows]
         if row["media_item_id"]
     }
     async with analyzer.acquire() as conn:
@@ -342,7 +342,7 @@ async def entity_media_faces(entity_id: str, limit: int = Query(40, ge=1, le=120
         "entity_id": entity_id,
         "collector_skipped": collector_skipped,
         "collector_error": collector_error,
-        "owned_media": [
+        "linked_media": [
             {
                 "media_item_id": r["media_item_id"],
                 "source": r["source"],
@@ -359,7 +359,7 @@ async def entity_media_faces(entity_id: str, limit: int = Query(40, ge=1, le=120
                 "collected_at": _iso(r["collected_at"]),
                 "analysis": _analysis_preview(analysis.get(str(r["media_item_id"]))),
             }
-            for r in owned_rows
+            for r in linked_rows
         ],
         "known_faces": [
             {

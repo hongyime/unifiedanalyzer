@@ -554,7 +554,7 @@ export default function EntityDetailPage() {
     { key: 'changes', label: 'Changes', badge: changelog && changelog.total_changes > 0 ? String(changelog.total_changes) : undefined },
     { key: 'timeline', label: 'Timeline' },
     { key: 'map', label: 'Map' },
-    { key: 'media', label: 'Media/Faces', badge: mediaFaces ? String(mediaFaces.owned_media.length + mediaFaces.known_faces.length + mediaFaces.associated_faces.length) : undefined },
+    { key: 'media', label: 'Media/Faces', badge: mediaFaces ? String(mediaFaces.linked_media.length + mediaFaces.known_faces.length + mediaFaces.associated_faces.length) : undefined },
     { key: 'intersect', label: 'Intersect' },
     { key: 'behavior', label: 'Behavior' },
     { key: 'connections', label: 'Connections' },
@@ -958,12 +958,14 @@ export default function EntityDetailPage() {
               </Card>
             )}
 
-            <Card title={`Owned media (${mediaFaces.owned_media.length})`}>
-              {mediaFaces.owned_media.length === 0 ? (
-                <div className="text-sm text-text-muted">No owned collector media resolved for this person.</div>
+            <Card title={`Account-linked media (${mediaFaces.linked_media.length})`}>
+              {mediaFaces.linked_media.length === 0 ? (
+                <div className="text-sm text-text-muted">No collector media resolved for this person.</div>
               ) : (
                 <div className="space-y-2">
-                  {mediaFaces.owned_media.map((m) => {
+                  {mediaFaces.linked_media.map((m) => {
+                    const role = m.kind === 'tagged' ? 'person_in_photo' : 'owner'
+                    const decisionLabel = role === 'owner' ? 'media owner' : 'person in photo'
                     const mediaRef = {
                       media_item_id: m.media_item_id,
                       source: m.source,
@@ -971,8 +973,8 @@ export default function EntityDetailPage() {
                       sha256: m.sha256,
                       kind: m.kind,
                     }
-                    const yesKey = `${entity.id}:owner:yes:${m.media_item_id}`
-                    const noKey = `${entity.id}:owner:no:${m.media_item_id}`
+                    const yesKey = `${entity.id}:${role}:yes:${m.media_item_id}`
+                    const noKey = `${entity.id}:${role}:no:${m.media_item_id}`
                     return (
                       <div key={m.media_item_id} className="flex items-start justify-between gap-3 rounded-lg border border-border px-3 py-2">
                         <div className="flex min-w-0 items-start gap-2">
@@ -1003,22 +1005,22 @@ export default function EntityDetailPage() {
                             variant="ghost"
                             className="h-7 w-7 px-0"
                             icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-                            aria-label="Confirm media owner"
-                            title="Confirm media owner"
+                            aria-label={`Confirm ${decisionLabel}`}
+                            title={`Confirm ${decisionLabel}`}
                             loading={mediaDecisionBusy === yesKey}
                             disabled={mediaDecisionBusy != null && mediaDecisionBusy !== yesKey}
-                            onClick={() => handleMediaPersonDecision(entity.id, 'owner', true, mediaRef)}
+                            onClick={() => handleMediaPersonDecision(entity.id, role, true, mediaRef)}
                           />
                           <Button
                             size="sm"
                             variant="danger"
                             className="h-7 w-7 px-0"
                             icon={<XCircle className="h-3.5 w-3.5" />}
-                            aria-label="Reject media owner"
-                            title="Reject media owner"
+                            aria-label={`Reject ${decisionLabel}`}
+                            title={`Reject ${decisionLabel}`}
                             loading={mediaDecisionBusy === noKey}
                             disabled={mediaDecisionBusy != null && mediaDecisionBusy !== noKey}
-                            onClick={() => handleMediaPersonDecision(entity.id, 'owner', false, mediaRef)}
+                            onClick={() => handleMediaPersonDecision(entity.id, role, false, mediaRef)}
                           />
                         </div>
                       </div>

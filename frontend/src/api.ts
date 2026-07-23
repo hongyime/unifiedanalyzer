@@ -443,7 +443,7 @@ export interface EntityMediaAnalysisPreview {
   thumbnail_url: string | null
 }
 
-export interface EntityOwnedMedia {
+export interface EntityLinkedMedia {
   media_item_id: string
   source: string
   entity_id: string
@@ -487,7 +487,7 @@ export interface EntityMediaFaces {
   entity_id: string
   collector_skipped: boolean
   collector_error: string | null
-  owned_media: EntityOwnedMedia[]
+  linked_media: EntityLinkedMedia[]
   known_faces: EntityKnownFace[]
   associated_faces: EntityAssociatedFace[]
 }
