@@ -1,4 +1,6 @@
 import json
+from typing import Any
+
 from fastapi import APIRouter, Query, HTTPException
 
 from src.db.connection import get_analyzer_pool
@@ -16,6 +18,76 @@ def _decode_meta(raw) -> dict:
         return d if isinstance(d, dict) else {}
     except (TypeError, json.JSONDecodeError):
         return {}
+
+
+_DECISION_ACTION_LABELS = {
+    "merge_confirmed": "Merge confirmed",
+    "split_person": "Split person",
+    "dismiss_identity_candidate": "Dismissed identity candidate",
+    "confirm_relationship": "Relationship confirmed",
+    "reject_relationship": "Relationship rejected",
+    "confirm_location": "Location confirmed",
+    "reject_location": "Location rejected",
+    "assign_media_owner": "Media owner assigned",
+    "reject_media_owner": "Media owner rejected",
+    "assign_person_in_photo": "Person in photo assigned",
+    "reject_person_in_photo": "Person in photo rejected",
+    "assign_target_tier": "Target tier assigned",
+    "add_note": "Note added",
+    "adjust_source_confidence": "Source confidence adjusted",
+}
+
+
+def _short(value: Any, *, max_len: int = 96) -> str:
+    text = "" if value is None else str(value)
+    text = " ".join(text.split())
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3].rstrip() + "..."
+
+
+def _decision_summary(action: str, payload: dict) -> str:
+    if action == "merge_confirmed":
+        merged = int(payload.get("merged_count") or len(payload.get("merged_entity_ids") or []) or 0)
+        target = payload.get("target_entity_id")
+        if target:
+            return f"Merged {merged} into {str(target)[:8]}"
+        return f"Merged {merged} source entity" if merged == 1 else f"Merged {merged} source entities"
+    if action == "split_person":
+        links = payload.get("split_links") or payload.get("split_link_ids") or []
+        new_id = payload.get("new_entity_id")
+        suffix = f" into {str(new_id)[:8]}" if new_id else ""
+        return f"Split {len(links)} platform link{'' if len(links) == 1 else 's'}{suffix}"
+    if action == "dismiss_identity_candidate":
+        other = payload.get("entity_b") or payload.get("entity_a")
+        return f"Marked candidate as not same{f' ({str(other)[:8]})' if other else ''}"
+    if action in {"confirm_relationship", "reject_relationship"}:
+        rel = payload.get("relationship_type") or "relationship"
+        state = "confirmed" if action == "confirm_relationship" else "rejected"
+        return f"{str(rel).replace('_', ' ')} {state}"
+    if action in {"confirm_location", "reject_location"}:
+        state = "confirmed" if action == "confirm_location" else "rejected"
+        ref = payload.get("location_ref") if isinstance(payload.get("location_ref"), dict) else {}
+        source = ref.get("source") or ref.get("type") or "location"
+        return f"{str(source).replace('_', ' ')} {state}"
+    if action in {"assign_media_owner", "reject_media_owner", "assign_person_in_photo", "reject_person_in_photo"}:
+        role = payload.get("role") or (
+            "owner" if "media_owner" in action else "person in photo"
+        )
+        state = "assigned" if action.startswith("assign") else "rejected"
+        return f"{str(role).replace('_', ' ')} {state}"
+    if action == "assign_target_tier":
+        return f"Watch status set to {payload.get('watch_status') or 'default'}"
+    if action == "add_note":
+        note = _short(payload.get("notes"), max_len=120)
+        return note or "Note updated"
+    if action == "adjust_source_confidence":
+        source = payload.get("source") or "source"
+        confidence = payload.get("confidence")
+        if confidence is not None:
+            return f"{source} confidence set to {confidence}"
+        return f"{source} confidence adjusted"
+    return _short(action.replace("_", " "))
 
 
 SORT_COLUMNS = {
@@ -291,6 +363,78 @@ async def search_entities(q: str = Query(..., min_length=1), limit: int = Query(
     } for r in rows]}
 
 
+@router.get("/entities/{entity_id}/decisions")
+async def entity_decisions(entity_id: str, limit: int = Query(50, ge=1, le=200)):
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT 1 FROM entities WHERE id = $1::uuid",
+            entity_id,
+        )
+        if not exists:
+            raise HTTPException(404, "Entity not found")
+
+        rows = await conn.fetch(
+            """
+            SELECT id, action, actor, entity_ids, payload, created_at,
+                   decision_jsonl_path, decision_jsonl_written_at, decision_jsonl_error
+            FROM audit_log
+            WHERE $1::uuid = ANY(COALESCE(entity_ids, ARRAY[]::uuid[]))
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2
+            """,
+            entity_id,
+            limit,
+        )
+
+        referenced_ids: set[str] = set()
+        for row in rows:
+            for eid in row["entity_ids"] or []:
+                referenced_ids.add(str(eid))
+
+        names = {}
+        if referenced_ids:
+            name_rows = await conn.fetch(
+                """
+                SELECT id::text AS id, canonical_name
+                FROM entities
+                WHERE id = ANY($1::uuid[])
+                """,
+                list(referenced_ids),
+            )
+            names = {r["id"]: r["canonical_name"] for r in name_rows}
+
+    decisions = []
+    for row in rows:
+        payload = _decode_meta(row["payload"])
+        action = str(row["action"] or "")
+        entity_ids = [str(eid) for eid in (row["entity_ids"] or [])]
+        decisions.append({
+            "id": int(row["id"]),
+            "action": action,
+            "action_label": _DECISION_ACTION_LABELS.get(action, action.replace("_", " ").title()),
+            "actor": row["actor"],
+            "entity_ids": entity_ids,
+            "entity_names": {eid: names.get(eid) for eid in entity_ids},
+            "payload": payload,
+            "summary": _decision_summary(action, payload),
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "decision_jsonl_path": row["decision_jsonl_path"],
+            "decision_jsonl_written_at": (
+                row["decision_jsonl_written_at"].isoformat()
+                if row["decision_jsonl_written_at"] else None
+            ),
+            "decision_jsonl_error": row["decision_jsonl_error"],
+            "durable": bool(row["decision_jsonl_written_at"]) and not row["decision_jsonl_error"],
+        })
+
+    return {
+        "entity_id": entity_id,
+        "decisions": decisions,
+        "total": len(decisions),
+    }
+
+
 @router.get("/entities/{entity_id}")
 async def get_entity(entity_id: str):
     pool = get_analyzer_pool()
@@ -372,16 +516,16 @@ async def get_entity(entity_id: str):
         "created_at": entity["created_at"].isoformat() if entity["created_at"] else None,
         "platform_links": [
             {
-                "id": str(l["id"]),
-                "source": l["source"],
-                "platform_id": l["platform_id"],
-                "platform_username": l["platform_username"],
-                "platform_name": l["platform_name"],
-                "confidence": l["confidence"],
-                "link_method": l["link_method"],
-                "is_confirmed": l["is_confirmed"],
+                "id": str(link["id"]),
+                "source": link["source"],
+                "platform_id": link["platform_id"],
+                "platform_username": link["platform_username"],
+                "platform_name": link["platform_name"],
+                "confidence": link["confidence"],
+                "link_method": link["link_method"],
+                "is_confirmed": link["is_confirmed"],
             }
-            for l in links
+            for link in links
         ],
         "identity_signals": [
             {

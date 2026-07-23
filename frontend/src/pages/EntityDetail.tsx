@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Trash2, Bell, MapPin, ChevronLeft, ChevronRight } from 'lucide-react'
+import { ArrowLeft, Trash2, Bell, MapPin, ChevronLeft, ChevronRight, History } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 import {
   api,
@@ -13,6 +13,7 @@ import {
   PlatformLink,
   Signal,
   SocialCircleEntry,
+  DecisionHistoryEntry,
 } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { TimelineLanes } from '../components/TimelineLanes'
@@ -56,6 +57,30 @@ function engagementMetrics(metadata: Record<string, unknown> | null | undefined)
     out.push({ label, value: Number.isFinite(num) ? num.toLocaleString() : String(raw) })
   }
   return out
+}
+
+function compactValue(value: unknown): string {
+  if (value == null || value === '') return ''
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function decisionKeyValues(payload: Record<string, unknown>) {
+  return ['notes', 'reason', 'confidence', 'relationship_type', 'watch_status', 'source', 'platform_id']
+    .map((key) => ({ key, value: compactValue(payload[key]) }))
+    .filter((item) => item.value)
+}
+
+function decisionDurability(decision: DecisionHistoryEntry): { status: 'success' | 'warning' | 'error'; label: string } {
+  if (decision.decision_jsonl_error) return { status: 'error', label: 'JSONL error' }
+  if (decision.durable) return { status: 'success', label: 'JSONL written' }
+  return { status: 'warning', label: 'JSONL pending' }
 }
 
 /** Reused hour+day activity bars. Uses the info accent for both charts so the
@@ -135,6 +160,7 @@ type TabKey =
   | 'behavior'
   | 'connections'
   | 'intelligence'
+  | 'decisions'
   | 'settings'
 
 // Tabs that share the timeline brush (lanes + time-window filtering). The
@@ -245,6 +271,24 @@ export default function EntityDetailPage() {
   const [changelog, setChangelog] = useState<Awaited<ReturnType<typeof api.getChangelog>> | null>(null)
   const loadChangelog = () => { if (id) api.getChangelog(id).then(setChangelog).catch(() => setChangelog(null)) }
   useEffect(() => { if (id && tab === 'changes') loadChangelog() }, [id, tab])
+
+  const [decisions, setDecisions] = useState<DecisionHistoryEntry[] | null>(null)
+  const [decisionsTotal, setDecisionsTotal] = useState(0)
+  const loadDecisions = () => {
+    if (!id) return
+    api.getEntityDecisions(id).then((data) => {
+      setDecisions(data.decisions)
+      setDecisionsTotal(data.total)
+    }).catch(() => {
+      setDecisions([])
+      setDecisionsTotal(0)
+    })
+  }
+  useEffect(() => {
+    setDecisions(null)
+    setDecisionsTotal(0)
+  }, [id])
+  useEffect(() => { if (id && tab === 'decisions') loadDecisions() }, [id, tab])
 
   useEffect(() => {
     if (!id || tab !== 'intelligence') return
@@ -405,6 +449,7 @@ export default function EntityDetailPage() {
     { key: 'behavior', label: 'Behavior' },
     { key: 'connections', label: 'Connections' },
     { key: 'intelligence', label: 'Intelligence' },
+    { key: 'decisions', label: 'Decisions', badge: decisionsTotal > 0 ? String(decisionsTotal) : undefined },
     { key: 'settings', label: 'Settings' },
   ]
 
@@ -1100,6 +1145,85 @@ export default function EntityDetailPage() {
               </Card>
             )}
           </div>
+        )
+      )}
+
+      {/* ── Decisions ────────────────────────────────────────────────── */}
+      {tab === 'decisions' && (
+        decisions == null ? (
+          <LoadingSpinner label="Loading decisions…" />
+        ) : decisions.length === 0 ? (
+          <EmptyState
+            icon={<History className="h-10 w-10" />}
+            title="No decisions recorded"
+            description="Merge, split, reject, note, and confidence actions will appear here."
+          />
+        ) : (
+          <Card
+            title="Decision history"
+            actions={<StatusBadge status="idle" label={`${decisionsTotal} shown`} />}
+          >
+            <div className="divide-y divide-border">
+              {decisions.map((decision) => {
+                const durability = decisionDurability(decision)
+                const details = decisionKeyValues(decision.payload)
+                return (
+                  <div key={decision.id} className="py-3 first:pt-0 last:pb-0">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <div className="font-medium text-text-primary">{decision.action_label}</div>
+                        <div className="mt-0.5 text-sm text-text-muted">{decision.summary}</div>
+                      </div>
+                      <div className="shrink-0 text-left sm:text-right">
+                        <div className="text-xs text-text-muted">
+                          {decision.created_at ? formatDate(decision.created_at) : 'time unknown'}
+                        </div>
+                        <div className="mt-1 flex sm:justify-end">
+                          <StatusBadge status={durability.status} label={durability.label} />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {decision.entity_ids.map((entityId) => (
+                        <span key={entityId} className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
+                          {decision.entity_names[entityId] || entityId.slice(0, 8)}
+                        </span>
+                      ))}
+                    </div>
+
+                    {details.length > 0 && (
+                      <div className="mt-2 grid gap-1 text-xs text-text-muted sm:grid-cols-2">
+                        {details.map((detail) => (
+                          <div key={detail.key} className="min-w-0">
+                            <span className="text-text-secondary">{detail.key.replace(/_/g, ' ')}:</span>{' '}
+                            <span className="break-words">{detail.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-muted">
+                      <span>Actor: {decision.actor || 'unknown'}</span>
+                      {decision.decision_jsonl_path && (
+                        <span className="font-mono">{decision.decision_jsonl_path}</span>
+                      )}
+                      {decision.decision_jsonl_error && (
+                        <span className="text-error">{decision.decision_jsonl_error}</span>
+                      )}
+                    </div>
+
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-xs text-text-muted hover:text-text-primary">Payload</summary>
+                      <pre className="mt-2 max-h-64 overflow-auto rounded-md bg-background p-2 text-xs text-text-secondary">
+                        {JSON.stringify(decision.payload, null, 2)}
+                      </pre>
+                    </details>
+                  </div>
+                )
+              })}
+            </div>
+          </Card>
         )
       )}
 

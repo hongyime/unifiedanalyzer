@@ -135,6 +135,22 @@ export interface TimelineEvent {
   metadata: Record<string, unknown>
 }
 
+export interface DecisionHistoryEntry {
+  id: number
+  action: string
+  action_label: string
+  actor: string | null
+  entity_ids: string[]
+  entity_names: Record<string, string | null>
+  payload: Record<string, unknown>
+  summary: string
+  created_at: string | null
+  decision_jsonl_path: string | null
+  decision_jsonl_written_at: string | null
+  decision_jsonl_error: string | null
+  durable: boolean
+}
+
 export interface Alert {
   id: string
   entity_id: string | null
@@ -556,6 +572,11 @@ export const api = {
   },
 
   getEntity: (id: string) => get<EntityDetail>(`/entities/${id}`),
+
+  getEntityDecisions: (entityId: string, limit = 50) =>
+    get<{ entity_id: string; decisions: DecisionHistoryEntry[]; total: number }>(
+      `/entities/${entityId}/decisions?limit=${limit}`,
+    ),
 
   getChangelog: (entityId: string) =>
     get<{
