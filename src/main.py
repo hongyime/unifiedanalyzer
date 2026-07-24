@@ -89,6 +89,10 @@ def main():
                           help="Do not drop the scratch DB after the drill")
     recovery.add_argument("--dry-run", action="store_true",
                           help="Select backup and scratch DB only; do not restore")
+    recovery.add_argument("--recompute-derived", action="store_true",
+                          help="After replay, run a full derived rebuild against the scratch DB")
+    recovery.add_argument("--recompute-timeout-seconds", type=int, default=None,
+                          help="Timeout for --recompute-derived (default: ANALYZER_RECOVERY_RECOMPUTE_TIMEOUT_SECONDS or 7200)")
     recovery.add_argument("--report-path", type=str, default=None,
                           help="Optional path to write the drill JSON report")
     recovery.add_argument("--skip-restore-item", action="append", default=None,
@@ -323,6 +327,8 @@ def main():
                 decision_limit=args.decision_limit,
                 keep_scratch=args.keep_scratch,
                 dry_run=args.dry_run,
+                recompute_derived=args.recompute_derived,
+                recompute_timeout_seconds=args.recompute_timeout_seconds,
                 skip_restore_item_patterns=args.skip_restore_item,
             )
             report = await run_recovery_drill(config)

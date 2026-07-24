@@ -223,7 +223,7 @@
 - [x] Implement retention: 7 daily, 4 weekly, 3 monthly.
 - [x] Run restore into scratch DB.
 - [x] Replay decision logs into scratch DB.
-- [ ] Recompute derived scores/clusters/timelines.
+- [x] Add explicit scratch-only recompute path for derived scores/clusters/timelines.
 - [x] Produce recovery gap report.
 - **Deliverables**: Backup job, replay drill, recovery report.
 - **Time**: 3-5 days.
@@ -251,9 +251,10 @@
 - Live recovery drill on 2026-07-24 restored `/app/backups/db/daily/unifiedanalyzer_daily_20260723T074929Z.dump` into scratch DB `ua_restore_drill_20260724_011451` in `2292.021s`, then dropped the scratch DB. Restored table counts included `entities=8849`, `entity_platform_links=9648`, `identity_labels=75`, `audit_log=42`, `analysis_runs=358`, and `timeline_events=9443756`.
 - The drill intentionally skipped derived restore items `TABLE DATA public timeline_embeddings` and `idx_timeline_emb_hnsw`; those are rebuildable artifacts, not source-of-truth decision rows.
 - The same drill replayed `/app/decisions` and scanned 42 legacy JSONL decisions: `Invalid=0`, `Ambiguous=0`, `Unresolved=42`, `Restorable=0`. The restored backup already contained the 42 audit rows, but JSONL effects were skipped because the legacy events do not include stable platform references. The gap report lists derived rebuild needs for `identity_scores=42`, `review_candidates=28`, `entity_graph=14`, and `timeline_events=14`.
+- Recovery drill reports now include a structured `derived_rebuild_plan` that maps replay-required rebuilds to real pipeline phases and commands. Passing `--recompute-derived` runs `python -m src.main full` against the scratch DB URL after replay, so derived scores, clusters, timelines, graph views, and face-derived views can be proven without touching production. Large skipped `timeline_embeddings` remain an explicit `python -m src.main embed-backfill` follow-up because a full embedding drain can be multi-hour.
 - Analyzer media resolution now accepts collector paths stored as `/media/...`, `/vault/media/...`, and Windows `Z:\unifiedcollector\media\...`, rebasing them into the analyzer container's mounted `/app/collector_root/media` path before thumbnail, face-crop, media-analysis, and face-worker access. This fixes dashboard rendering for new vault-backed collector blobs.
 - Face gallery prefilters include vault-backed collector media paths, and face-worker collector ingest now dedupes by stable collector `media_items.id` in addition to file path so path migrations do not create duplicate `faces.embedding_id` errors.
-- The remaining recovery milestone is proving replay with new-schema decisions that include stable references, then running a derived-table recompute pass after restore.
+- The remaining recovery milestone is proving replay with new-schema decisions that include stable references, then running a live scratch drill with `--recompute-derived` and any needed `embed-backfill` follow-up.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

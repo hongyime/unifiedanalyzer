@@ -6,16 +6,18 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 
-from src.db.backup import BackupConfig, BackupError, list_backups, _parse_database_url
+from src.db.backup import BackupConfig, list_backups, _parse_database_url
 from src.pipeline.decision_replay import apply_decision_replay
 
 
@@ -24,6 +26,101 @@ DEFAULT_SKIP_RESTORE_ITEM_PATTERNS = (
     "idx_timeline_emb_hnsw",
     "table data public timeline_embeddings",
 )
+DEFAULT_RECOMPUTE_TIMEOUT_SECONDS = int(os.getenv("ANALYZER_RECOVERY_RECOMPUTE_TIMEOUT_SECONDS", "7200"))
+
+DERIVED_REBUILD_CATALOG: dict[str, dict[str, Any]] = {
+    "entity_graph": {
+        "order": 10,
+        "pipeline_phases": ["resolve_entities", "interactions", "account_proximity", "graph_analytics"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute",
+        "reason": "Entity/link decisions can change graph edges, graph analytics, and relationship context.",
+    },
+    "timeline_events": {
+        "order": 20,
+        "pipeline_phases": ["timeline", "entity_event_ranges", "content_embedding"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute",
+        "reason": "Entity attribution changes require a full timeline rebuild and event range refresh.",
+    },
+    "identity_scores": {
+        "order": 30,
+        "pipeline_phases": ["identity_scoring"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute",
+        "reason": "Human labels and source-confidence decisions feed the identity scorer.",
+    },
+    "review_candidates": {
+        "order": 40,
+        "pipeline_phases": ["auto_label_seed", "identity_scoring"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute",
+        "reason": "Dismissed candidates must suppress future review candidates after scoring refresh.",
+    },
+    "relationship_views": {
+        "order": 50,
+        "pipeline_phases": ["interactions", "group_graph", "relationship_intelligence", "graph_analytics"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute",
+        "reason": "Relationship decisions change person connection views and relationship rollups.",
+    },
+    "location_claims": {
+        "order": 60,
+        "pipeline_phases": ["location_inference", "media_exif", "route_similarity"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute",
+        "reason": "Location accept/reject decisions must be reflected in materialized location evidence.",
+    },
+    "map_layers": {
+        "order": 70,
+        "pipeline_phases": ["location_inference", "timeline", "route_similarity"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute",
+        "reason": "Map pins/routes are derived from timeline and location-evidence state.",
+    },
+    "media_attribution": {
+        "order": 80,
+        "pipeline_phases": ["media_faces", "face_clustering", "face_associations"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute_manual_effects",
+        "reason": "Media-owner decisions need normalized destination rows before replay can directly mutate them.",
+    },
+    "face_links": {
+        "order": 90,
+        "pipeline_phases": ["face_clustering", "face_match_signals", "social_face_link"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute_manual_effects",
+        "reason": "Person-in-photo decisions need face-link rebuilds and direct replay support before they are fully automatic.",
+    },
+    "priority_hints": {
+        "order": 100,
+        "pipeline_phases": ["collector_priority_hints"],
+        "recommended_command": "python -m src.main priority-hints --write",
+        "automation": "followup_command",
+        "reason": "Target-tier decisions should be exported after analyzer entities and scores settle.",
+    },
+    "watch_views": {
+        "order": 110,
+        "pipeline_phases": ["alerts", "watch_views"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute",
+        "reason": "Watch status changes affect freshness and alert views.",
+    },
+    "person_views": {
+        "order": 120,
+        "pipeline_phases": ["person_views"],
+        "recommended_command": "python -m src.main full",
+        "automation": "full_recompute",
+        "reason": "Notes and profile summaries should be refreshed after replay.",
+    },
+    "timeline_embeddings": {
+        "order": 130,
+        "pipeline_phases": ["content_embedding"],
+        "recommended_command": "python -m src.main embed-backfill",
+        "automation": "followup_command",
+        "reason": "Embedding table data is intentionally skipped during restore because it is rebuildable and large.",
+    },
+}
 
 
 class RecoveryDrillError(RuntimeError):
@@ -41,6 +138,8 @@ class RecoveryDrillConfig:
     decision_limit: int | None = None
     keep_scratch: bool = False
     dry_run: bool = False
+    recompute_derived: bool = False
+    recompute_timeout_seconds: int = DEFAULT_RECOMPUTE_TIMEOUT_SECONDS
     skip_restore_item_patterns: tuple[str, ...] = DEFAULT_SKIP_RESTORE_ITEM_PATTERNS
 
 
@@ -57,6 +156,8 @@ class RecoveryDrillReport:
     skipped_restore_items: list[str] = field(default_factory=list)
     table_counts: dict[str, int | None] = field(default_factory=dict)
     replay_apply: dict[str, Any] | None = None
+    derived_rebuild_plan: list[dict[str, Any]] = field(default_factory=list)
+    derived_recompute: dict[str, Any] | None = None
     gaps: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -72,6 +173,8 @@ class RecoveryDrillReport:
             "skipped_restore_items": self.skipped_restore_items,
             "table_counts": self.table_counts,
             "replay_apply": self.replay_apply,
+            "derived_rebuild_plan": self.derived_rebuild_plan,
+            "derived_recompute": self.derived_recompute,
             "gaps": self.gaps,
         }
 
@@ -111,6 +214,24 @@ class RecoveryDrillReport:
                 f"unresolved={replay.get('unresolved', 0)}; "
                 f"ambiguous={replay.get('ambiguous', 0)}; "
                 f"invalid={replay.get('invalid', 0)}"
+            )
+        if self.derived_rebuild_plan:
+            lines.append("")
+            lines.append("Derived rebuild plan:")
+            for step in self.derived_rebuild_plan:
+                count = step.get("required_count")
+                suffix = f" ({count})" if count else ""
+                lines.append(
+                    f"  - {step.get('name')}{suffix}: {step.get('automation')} via "
+                    f"{step.get('recommended_command')}"
+                )
+        if self.derived_recompute:
+            lines.append("")
+            lines.append("Derived recompute:")
+            lines.append(
+                f"  status={self.derived_recompute.get('status')}; "
+                f"command={self.derived_recompute.get('command')}; "
+                f"seconds={self.derived_recompute.get('seconds')}"
             )
         if self.gaps:
             lines.append("")
@@ -231,6 +352,22 @@ async def run_recovery_drill(config: RecoveryDrillConfig) -> RecoveryDrillReport
                 )
                 report.replay_apply = replay.to_dict()
                 report.gaps.extend(gaps_from_replay(report.replay_apply))
+                report.derived_rebuild_plan = build_derived_rebuild_plan(
+                    report.replay_apply,
+                    skipped_restore_items=report.skipped_restore_items,
+                )
+                if config.recompute_derived:
+                    report.derived_recompute = await asyncio.to_thread(
+                        _run_derived_recompute,
+                        config,
+                        scratch_database,
+                        report.derived_rebuild_plan,
+                    )
+                    if report.derived_recompute.get("status") != "completed":
+                        report.gaps.append(
+                            f"derived recompute {report.derived_recompute.get('status')}: "
+                            f"{report.derived_recompute.get('error') or report.derived_recompute.get('stderr_tail') or 'see report'}"
+                        )
             finally:
                 await scratch_conn.close()
         except Exception as exc:
@@ -267,6 +404,115 @@ def gaps_from_replay(replay_apply: dict[str, Any]) -> list[str]:
     for name, count in sorted(derived.items()):
         gaps.append(f"derived rebuild required: {name} ({count})")
     return gaps
+
+
+def build_derived_rebuild_plan(
+    replay_apply: dict[str, Any] | None,
+    *,
+    skipped_restore_items: list[str] | tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    replay = (replay_apply or {}).get("replay") or {}
+    derived_counts = {
+        str(name): int(count or 0)
+        for name, count in (replay.get("derived_rebuild_required") or {}).items()
+    }
+    if any("timeline_embeddings" in item.lower() for item in skipped_restore_items):
+        derived_counts.setdefault("timeline_embeddings", 0)
+
+    plan: list[dict[str, Any]] = []
+    for name, count in sorted(
+        derived_counts.items(),
+        key=lambda item: (DERIVED_REBUILD_CATALOG.get(item[0], {}).get("order", 999), item[0]),
+    ):
+        spec = DERIVED_REBUILD_CATALOG.get(name, {})
+        plan.append({
+            "name": name,
+            "required_count": count,
+            "pipeline_phases": list(spec.get("pipeline_phases", [])),
+            "recommended_command": spec.get("recommended_command", "python -m src.main full"),
+            "automation": spec.get("automation", "manual"),
+            "reason": spec.get("reason", "No rebuild catalog entry exists yet; inspect manually."),
+        })
+    return plan
+
+
+def _run_derived_recompute(
+    config: RecoveryDrillConfig,
+    scratch_database: str,
+    plan: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not plan:
+        return {
+            "status": "skipped",
+            "reason": "no derived rebuild plan entries",
+            "command": None,
+            "seconds": 0,
+        }
+
+    command = [sys.executable, "-m", "src.main", "full"]
+    env = os.environ.copy()
+    env["ANALYZER_DATABASE_URL"] = _database_url_for_database(config.database_url, scratch_database)
+    env.setdefault("REQUIRE_COLLECTOR_DATABASE", "false")
+    env["ANALYZER_RECOVERY_RECOMPUTE_SCRATCH_DB"] = scratch_database
+
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(_repo_root()),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=config.recompute_timeout_seconds,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "timeout",
+            "command": " ".join(command),
+            "scratch_database": scratch_database,
+            "seconds": round(time.monotonic() - started, 3),
+            "timeout_seconds": config.recompute_timeout_seconds,
+            "stdout_tail": _tail_text(exc.stdout),
+            "stderr_tail": _tail_text(exc.stderr),
+        }
+
+    status = "completed" if proc.returncode == 0 else "failed"
+    return {
+        "status": status,
+        "command": " ".join(command),
+        "scratch_database": scratch_database,
+        "seconds": round(time.monotonic() - started, 3),
+        "returncode": proc.returncode,
+        "stdout_tail": _tail_text(proc.stdout),
+        "stderr_tail": _tail_text(proc.stderr),
+        "followup_commands": sorted({
+            str(step["recommended_command"])
+            for step in plan
+            if step.get("automation") == "followup_command"
+        }),
+    }
+
+
+def _database_url_for_database(database_url: str, database: str) -> str:
+    validate_scratch_database_name(database)
+    parsed = urlparse(database_url)
+    return urlunparse(parsed._replace(path=f"/{database}"))
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _tail_text(value: Any, limit: int = 4000) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    return text[-limit:]
 
 
 def _resolve_pg_restore(pg_restore_bin: str) -> str:
@@ -437,6 +683,8 @@ def config_from_env(
     decision_limit: int | None = None,
     keep_scratch: bool = False,
     dry_run: bool = False,
+    recompute_derived: bool = False,
+    recompute_timeout_seconds: int | None = None,
     skip_restore_item_patterns: tuple[str, ...] | list[str] | None = None,
 ) -> RecoveryDrillConfig:
     backup_config = BackupConfig.from_env(
@@ -470,6 +718,8 @@ def config_from_env(
         decision_limit=decision_limit,
         keep_scratch=keep_scratch,
         dry_run=dry_run,
+        recompute_derived=recompute_derived,
+        recompute_timeout_seconds=recompute_timeout_seconds or DEFAULT_RECOMPUTE_TIMEOUT_SECONDS,
         skip_restore_item_patterns=resolved_skip_patterns,
     )
 

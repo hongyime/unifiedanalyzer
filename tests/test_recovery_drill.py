@@ -248,3 +248,120 @@ def test_gaps_from_replay_surfaces_unresolved_and_derived_work():
     assert "1 decision effect(s) skipped because references were unresolved" in gaps
     assert "2 decision effect(s) still require derived-table rebuild or manual replay" in gaps
     assert "derived rebuild required: identity_scores (4)" in gaps
+
+
+def test_build_derived_rebuild_plan_groups_replay_and_skipped_embeddings():
+    plan = rd.build_derived_rebuild_plan(
+        {
+            "replay": {
+                "derived_rebuild_required": {
+                    "identity_scores": 4,
+                    "timeline_events": 2,
+                    "media_attribution": 1,
+                },
+            },
+        },
+        skipped_restore_items=[
+            "2; 0 0 TABLE DATA public timeline_embeddings collector",
+        ],
+    )
+
+    assert [step["name"] for step in plan] == [
+        "timeline_events",
+        "identity_scores",
+        "media_attribution",
+        "timeline_embeddings",
+    ]
+    timeline = next(step for step in plan if step["name"] == "timeline_events")
+    media = next(step for step in plan if step["name"] == "media_attribution")
+    embeddings = next(step for step in plan if step["name"] == "timeline_embeddings")
+
+    assert timeline["automation"] == "full_recompute"
+    assert "timeline" in timeline["pipeline_phases"]
+    assert media["automation"] == "full_recompute_manual_effects"
+    assert embeddings["required_count"] == 0
+    assert embeddings["recommended_command"] == "python -m src.main embed-backfill"
+
+
+def test_recovery_report_includes_derived_rebuild_plan_in_text_and_json():
+    report = rd.RecoveryDrillReport(
+        derived_rebuild_plan=[
+            {
+                "name": "identity_scores",
+                "required_count": 4,
+                "pipeline_phases": ["identity_scoring"],
+                "recommended_command": "python -m src.main full",
+                "automation": "full_recompute",
+                "reason": "labels changed",
+            },
+        ],
+        derived_recompute={
+            "status": "completed",
+            "command": "python -m src.main full",
+            "seconds": 1.25,
+        },
+    )
+
+    payload = report.to_dict()
+    text = report.to_text()
+
+    assert payload["derived_rebuild_plan"][0]["name"] == "identity_scores"
+    assert "Derived rebuild plan:" in text
+    assert "identity_scores (4): full_recompute via python -m src.main full" in text
+    assert "Derived recompute:" in text
+
+
+def test_run_derived_recompute_uses_scratch_database_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["env"] = kwargs["env"]
+        seen["cwd"] = kwargs["cwd"]
+        seen["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(rd.subprocess, "run", fake_run)
+    config = rd.RecoveryDrillConfig(
+        database_url="postgres://collector:s3cret@localhost:5500/unifiedanalyzer?sslmode=disable",
+        backup_dir=tmp_path,
+        recompute_timeout_seconds=123,
+    )
+
+    result = rd._run_derived_recompute(
+        config,
+        "ua_restore_drill_20260723_123456",
+        [{"name": "identity_scores", "recommended_command": "python -m src.main full"}],
+    )
+
+    assert result["status"] == "completed"
+    assert seen["cmd"][1:] == ["-m", "src.main", "full"]
+    assert seen["timeout"] == 123
+    assert seen["env"]["ANALYZER_DATABASE_URL"] == (
+        "postgres://collector:s3cret@localhost:5500/ua_restore_drill_20260723_123456?sslmode=disable"
+    )
+    assert seen["env"]["REQUIRE_COLLECTOR_DATABASE"] == "false"
+    assert "s3cret" not in result["command"]
+
+
+def test_run_derived_recompute_reports_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, timeout=kwargs["timeout"], output="stdout tail", stderr="stderr tail")
+
+    monkeypatch.setattr(rd.subprocess, "run", fake_run)
+    config = rd.RecoveryDrillConfig(
+        database_url="postgres://collector:collector@localhost:5500/unifiedanalyzer",
+        backup_dir=tmp_path,
+        recompute_timeout_seconds=1,
+    )
+
+    result = rd._run_derived_recompute(
+        config,
+        "ua_restore_drill_20260723_123456",
+        [{"name": "identity_scores"}],
+    )
+
+    assert result["status"] == "timeout"
+    assert result["timeout_seconds"] == 1
+    assert result["stdout_tail"] == "stdout tail"
+    assert result["stderr_tail"] == "stderr tail"
