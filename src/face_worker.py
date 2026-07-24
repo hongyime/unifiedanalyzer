@@ -208,6 +208,13 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
     # Already-indexed collector file_paths (dedupe cursor).
     with analyzer_engine.connect() as aconn:
         done = {r[0] for r in aconn.execute(text("SELECT file_path FROM images")).fetchall()}
+        done_media_ids = {
+            r[0] for r in aconn.execute(text(
+                "SELECT file_hash FROM images "
+                "WHERE file_hash IS NOT NULL "
+                "AND COALESCE(status, 'completed') IN ('completed', 'failed')"
+            )).fetchall()
+        }
         entity_lookup = _build_entity_lookup(aconn)
 
     # Candidate collector media.
@@ -264,7 +271,7 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
     for r in rows:
         if stats["images_indexed"] >= limit:
             break
-        if r.file_path in done:
+        if r.file_path in done or r.id in done_media_ids:
             continue
         stats["scanned"] += 1
         disk = resolve_media_path(r.file_path)
@@ -333,6 +340,8 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
                     stats["linked"] += 1
             sess.commit()
             stats["images_indexed"] += 1
+            done.add(r.file_path)
+            done_media_ids.add(r.id)
         except Exception:
             sess.rollback()
             logger.exception("ingest failed for media_item %s", r.id)
@@ -834,6 +843,13 @@ def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
 
     with analyzer_engine.connect() as aconn:
         done = {r[0] for r in aconn.execute(text("SELECT file_path FROM images")).fetchall()}
+        done_media_ids = {
+            r[0] for r in aconn.execute(text(
+                "SELECT file_hash FROM images "
+                "WHERE file_hash IS NOT NULL "
+                "AND COALESCE(status, 'completed') IN ('completed', 'failed')"
+            )).fetchall()
+        }
         entity_lookup = _build_entity_lookup(aconn)
 
     # Candidate videos. Restrict source when FACE_VIDEO_SOURCES is set.
@@ -893,7 +909,7 @@ def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
     for r in rows:
         if stats["videos_indexed"] >= limit:
             break
-        if r.file_path in done:
+        if r.file_path in done or r.id in done_media_ids:
             continue
         stats["scanned"] += 1
         disk = resolve_media_path(r.file_path)
@@ -929,6 +945,7 @@ def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
                 finally:
                     s.close()
                 done.add(r.file_path)
+                done_media_ids.add(r.id)
                 continue
 
             if detector is None:
@@ -999,6 +1016,7 @@ def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
                 sess.commit()
                 stats["videos_indexed"] += 1
                 done.add(r.file_path)
+                done_media_ids.add(r.id)
             except Exception:
                 sess.rollback()
                 logger.exception("video ingest failed for media_item %s", r.id)

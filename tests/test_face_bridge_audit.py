@@ -99,6 +99,15 @@ def test_face_owner_attribution_is_single_face_gated():
     assert "COALESCE(i.face_count, :unknown_face_count) <= :max_faces" in source
 
 
+def test_face_worker_dedupes_collector_media_by_stable_media_id():
+    source = (REPO_ROOT / "src" / "face_worker.py").read_text(encoding="utf-8")
+
+    assert "done_media_ids" in source
+    assert "SELECT file_hash FROM images" in source
+    assert "if r.file_path in done or r.id in done_media_ids:" in source
+    assert source.count("done_media_ids.add(r.id)") >= 2
+
+
 def test_face_signals_ignore_contested_clusters():
     tier1 = (REPO_ROOT / "src" / "pipeline" / "media_analysis_tier1.py").read_text(encoding="utf-8")
     pair = (REPO_ROOT / "src" / "pipeline" / "face_pair_signals.py").read_text(encoding="utf-8")
