@@ -704,6 +704,8 @@ export const api = {
         date: string | null
         source: string
         evidence_type?: string | null
+        evidence_key?: string | null
+        status?: string | null
         confidence?: number | null
         source_table?: string | null
         source_record_id?: string | null
@@ -716,11 +718,13 @@ export const api = {
         source: string
         occurred_at: string | null
         evidence_type?: string | null
+        evidence_key?: string | null
+        status?: string | null
         confidence?: number | null
         source_table?: string | null
         source_record_id?: string | null
       }[]
-      counts: { routes: number; points: number; evidence_types?: Record<string, number> }
+      counts: { routes: number; points: number; evidence_types?: Record<string, number>; suppressed?: number }
     }>(`/entities/${entityId}/geo${suffix}`)
   },
 

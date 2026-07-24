@@ -485,6 +485,39 @@ CREATE TABLE IF NOT EXISTS geocode_cache (
 );
 CREATE INDEX IF NOT EXISTS idx_geocode_pending ON geocode_cache(status) WHERE status = 'pending';
 
+-- Canonical, analyzer-owned location evidence registry. Collector tables remain
+-- the raw source of truth; this table records the normalized claim shown on maps
+-- and the human decision state for that claim.
+CREATE TABLE IF NOT EXISTS location_evidence (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    evidence_key       CHAR(64) NOT NULL UNIQUE,
+    entity_id          UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    source             VARCHAR(30) NOT NULL,
+    evidence_type      VARCHAR(50) NOT NULL, -- gps | exif_gps | route_polyline | venue_tag | caption_derived | inferred | ...
+    source_table       VARCHAR(100),
+    source_record_id   TEXT,
+    occurred_at        TIMESTAMP WITH TIME ZONE,
+    lat                DOUBLE PRECISION,
+    lng                DOUBLE PRECISION,
+    label              TEXT,
+    confidence         FLOAT DEFAULT 0.0,
+    geometry           JSONB DEFAULT '{}',
+    payload            JSONB DEFAULT '{}',
+    status             VARCHAR(20) NOT NULL DEFAULT 'active', -- active | confirmed | rejected | suppressed
+    decision_audit_id  BIGINT REFERENCES audit_log(id) ON DELETE SET NULL,
+    decision_actor     VARCHAR(100),
+    decision_notes     TEXT,
+    decided_at         TIMESTAMP WITH TIME ZONE,
+    created_at         TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at         TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_location_evidence_entity_time
+    ON location_evidence(entity_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_location_evidence_status
+    ON location_evidence(status);
+CREATE INDEX IF NOT EXISTS idx_location_evidence_source_record
+    ON location_evidence(source, source_table, source_record_id);
+
 -- Saved investigations ("cases"): a pinboard of entities/media/notes/links.
 CREATE TABLE IF NOT EXISTS cases (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

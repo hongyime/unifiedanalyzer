@@ -199,7 +199,7 @@
 **Goal**: Make the analyzer usable as the main investigation surface.
 - [x] Redesign person overview with accounts, tiers, confidence, latest activity, and evidence summary.
 - [x] Add timeline tab with filters by source, event type, confidence, and date.
-- [ ] Add map tab with GPS/photo/route/location inference layers and evidence drawers.
+- [x] Add map tab with GPS/photo/route/location inference layers and evidence drawers.
 - [x] Add relationships tab with why/how evidence and confirm/reject controls.
 - [x] Add media/faces tab with owner/person-in-photo correction actions.
 - [x] Add decision history and notes.
@@ -209,11 +209,11 @@
 ### Phase 5: Physical World Model
 **Goal**: Turn GPS/routes/media into evidence-backed location and co-presence views.
 - [ ] Normalize location evidence types: GPS, EXIF, route polyline, venue tag, caption-derived, inferred.
-- [ ] Store confidence and source for each location claim.
-- [ ] Link photos to where/when/who when evidence supports it.
+- [x] Store confidence and source for each location claim.
+- [x] Link photos to where/when/who when evidence supports it.
 - [ ] Build person-location timeline and map pins.
 - [ ] Build group co-presence claims only when evidence supports same place/time.
-- [ ] Add reject/suppress workflow for bad inferences.
+- [x] Add reject/suppress workflow for bad inferences.
 - **Deliverables**: Location evidence registry, map layers, co-presence claims.
 - **Time**: 5-10 days.
 
@@ -237,10 +237,12 @@
 - Connections now expose relationship evidence with one-click confirm/reject controls backed by `/api/entities/relationship-decision`; decisions write to audit DB rows and append-only JSONL.
 - Person pages now include a Media/Faces tab backed by `/api/entities/{entity_id}/media-faces`, with account-linked media, face links, and owner/person-in-photo confirm/reject actions wired to durable media decision events.
 - Timeline now supports source, event-type, confidence, and date filters. Confidence is derived from semantic metadata when present, with `entity_platform_links.confidence` as a source-attribution fallback; unknown rows remain visible as unscored unless a confidence floor is selected.
-- Map geo payloads now classify route polylines, GPS starts, venue tags, venue geocodes, and message locations with confidence and source references; the map drawer shows those details before confirm/reject actions. A normalized durable location-evidence table is still pending.
+- Map geo payloads now classify route polylines, GPS starts, drive-photo EXIF GPS, venue tags, venue geocodes, Telegram locations, and WhatsApp locations with confidence and source references. The map drawer shows those details before confirm/reject actions.
+- Location evidence is now materialized into analyzer-owned `location_evidence` rows keyed by deterministic `evidence_key`; rejected/suppressed claims stay in the table but are hidden from normal map results.
+- Remaining physical-world gaps: caption-derived/inferred location producers, a first-class person-location timeline, and co-presence claims backed by the normalized location evidence registry.
 - Platform links now show link confidence and expose a source-confidence adjustment menu backed by `/api/entities/{entity_id}/source-confidence`.
 - Person pages now open on an Overview tab that summarizes confidence, account spread, identity evidence, latest activity, mapped evidence counts, relationship leads, and decision count before the deeper tabs.
-- Replay apply safely restores audit rows, dismissed identity candidates, same-person relationship confirm/reject labels, target tiers, notes, and source-confidence adjustments. Merge/split, location decisions, and media/person-in-photo decisions still require derived-table rebuilds or future normalized destination tables.
+- Replay apply safely restores audit rows, dismissed identity candidates, same-person relationship confirm/reject labels, location confirm/reject decisions, target tiers, notes, and source-confidence adjustments. Merge/split and media/person-in-photo decisions still require derived-table rebuilds or future normalized destination tables.
 - Live decision replay dry-run on 2026-07-23 scanned 42 legacy JSONL decisions: `Invalid=0`, `Unresolved=42`. These were old `dismiss_match`/`merge_entities` events with empty payloads and no stable platform refs, so replay now reports them correctly instead of treating them as schema-invalid.
 - Scheduler now mounts `Z:\unifiedanalyzer\decisions` at `/app/decisions`, so scheduler-side recovery drills and replay tools read the same durable JSONL as the API.
 - Live recovery drill on 2026-07-24 restored `/app/backups/db/daily/unifiedanalyzer_daily_20260723T074929Z.dump` into scratch DB `ua_restore_drill_20260724_011451` in `2292.021s`, then dropped the scratch DB. Restored table counts included `entities=8849`, `entity_platform_links=9648`, `identity_labels=75`, `audit_log=42`, `analysis_runs=358`, and `timeline_events=9443756`.

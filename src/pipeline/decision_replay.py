@@ -432,6 +432,26 @@ async def apply_decision_effect(conn, event: dict[str, Any], replay_event: Decis
             )
         return "applied"
 
+    if event_type in {"confirm_location", "reject_location"}:
+        if len(entity_ids) != 1:
+            return "skipped_unresolved"
+        location_ref = payload.get("location_ref")
+        if not isinstance(location_ref, dict):
+            return "unsupported"
+        from src.pipeline.location_evidence import apply_location_decision
+
+        result = await apply_location_decision(
+            conn,
+            entity_id=entity_ids[0],
+            location_ref=location_ref,
+            is_correct=event_type == "confirm_location",
+            confidence=payload.get("confidence"),
+            notes=payload.get("notes"),
+            audit_id=event.get("audit_id"),
+            actor=event.get("actor") or "decision_replay",
+        )
+        return "applied" if result.get("updated") else "unsupported"
+
     if event_type == "assign_target_tier":
         if len(entity_ids) != 1:
             return "skipped_unresolved"

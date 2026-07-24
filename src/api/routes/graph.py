@@ -6,6 +6,12 @@ from fastapi import APIRouter, Query
 from src.db.connection import get_analyzer_pool, get_collector_pool
 from src.api.face_lookup import representative_faces, face_crop_url
 from src.merge_candidates import merge_candidate_min_weight
+from src.pipeline.location_evidence import (
+    attach_location_evidence_key,
+    fetch_location_evidence_statuses,
+    is_location_suppressed,
+    upsert_location_evidence_batch,
+)
 
 router = APIRouter(tags=["graph"])
 logger = logging.getLogger(__name__)
@@ -149,6 +155,7 @@ async def entity_geo(
             continue
     ig_ids = [l["platform_id"] for l in links if l["source"] == "instagram" and l["platform_id"]]
     telegram_ids = [l["platform_id"] for l in links if l["source"] == "telegram" and l["platform_id"]]
+    whatsapp_ids = [l["platform_id"] for l in links if l["source"] == "whatsapp" and l["platform_id"]]
 
     routes: list[dict] = []
     points: list[dict] = []
@@ -284,6 +291,38 @@ async def entity_geo(
                     "source_record_id": str(row["platform_message_id"]),
                     "occurred_at": row["platform_created_at"].isoformat() if row["platform_created_at"] else None,
                 })
+        if whatsapp_ids:
+            wa_filters = ["u.platform_user_id = ANY($1::text[])"]
+            wa_params: list = [whatsapp_ids]
+            if from_date:
+                wa_filters.append(f"m.timestamp >= ${len(wa_params) + 1}")
+                wa_params.append(from_date)
+            if to_date:
+                wa_filters.append(f"m.timestamp <= ${len(wa_params) + 1}")
+                wa_params.append(to_date)
+            wa_rows = await cc.fetch(f"""
+                SELECT m.platform_message_id, l.latitude, l.longitude,
+                       COALESCE(NULLIF(l.name, ''), NULLIF(l.address, ''), LEFT(COALESCE(m.text, ''), 120)) AS label,
+                       m.timestamp
+                FROM whatsapp_message_locations l
+                JOIN whatsapp_messages m ON m.platform_message_id = l.platform_message_id
+                JOIN whatsapp_users u ON u.id = m.sender_id
+                WHERE {' AND '.join(wa_filters)}
+                ORDER BY m.timestamp DESC NULLS LAST
+                LIMIT 200
+            """, *wa_params)
+            for row in wa_rows:
+                points.append({
+                    "lat": float(row["latitude"]),
+                    "lng": float(row["longitude"]),
+                    "label": row["label"],
+                    "source": "whatsapp",
+                    "evidence_type": "message_location",
+                    "confidence": 0.9,
+                    "source_table": "whatsapp_message_locations",
+                    "source_record_id": str(row["platform_message_id"]),
+                    "occurred_at": row["timestamp"].isoformat() if row["timestamp"] else None,
+                })
 
     # Geocoded IG place-name pins (cache lives in the analyzer DB).
     if ig_place_names:
@@ -304,12 +343,73 @@ async def entity_geo(
                 "occurred_at": None,
             })
 
+    # Drive-original EXIF GPS is analyzer-owned and attributed through the face
+    # bridge. Keep it in the same map payload as collector-sourced evidence.
+    async with analyzer.acquire() as conn:
+        try:
+            drive_rows = await conn.fetch("""
+                SELECT DISTINCT ma.media_item_id, ma.gps_lat, ma.gps_lon, ma.taken_at
+                FROM media_analysis ma
+                JOIN facetracker.images i ON i.file_hash = ma.media_item_id
+                JOIN facetracker.faces f ON f.image_id = i.id
+                JOIN public.entity_faces ef ON ef.face_id = f.id
+                WHERE ef.entity_id = $1::uuid
+                  AND ma.analysis_type = 'exif_gps'
+                  AND ma.gps_lat IS NOT NULL
+                  AND ma.gps_lon IS NOT NULL
+                ORDER BY ma.taken_at DESC NULLS LAST
+                LIMIT 300
+            """, entity_id)
+        except Exception as exc:  # noqa: BLE001 - facetracker may be unavailable in tests/scratch DBs
+            logger.debug("entity_geo drive EXIF read skipped: %s", exc)
+            drive_rows = []
+    for row in drive_rows:
+        points.append({
+            "lat": float(row["gps_lat"]),
+            "lng": float(row["gps_lon"]),
+            "label": row["media_item_id"],
+            "source": "drive",
+            "evidence_type": "exif_gps",
+            "confidence": 0.85,
+            "source_table": "media_analysis",
+            "source_record_id": str(row["media_item_id"]),
+            "occurred_at": row["taken_at"].isoformat() if row["taken_at"] else None,
+        })
+
+    routes = [attach_location_evidence_key(entity_id, item) for item in routes]
+    points = [attach_location_evidence_key(entity_id, item) for item in points]
+    evidence_keys = [item["evidence_key"] for item in [*routes, *points] if item.get("evidence_key")]
+    async with analyzer.acquire() as conn:
+        await upsert_location_evidence_batch(conn, entity_id, [*routes, *points])
+        statuses = await fetch_location_evidence_statuses(conn, evidence_keys)
+
+    suppressed = 0
+    visible_routes: list[dict] = []
+    for item in routes:
+        status = statuses.get(item.get("evidence_key"), {})
+        item.update(status)
+        if is_location_suppressed(item.get("status")):
+            suppressed += 1
+            continue
+        visible_routes.append(item)
+    visible_points: list[dict] = []
+    for item in points:
+        status = statuses.get(item.get("evidence_key"), {})
+        item.update(status)
+        if is_location_suppressed(item.get("status")):
+            suppressed += 1
+            continue
+        visible_points.append(item)
+    routes = visible_routes
+    points = visible_points
+
     evidence_counts: dict[str, int] = {}
     for item in [*routes, *points]:
         key = str(item.get("evidence_type") or "unknown")
         evidence_counts[key] = evidence_counts.get(key, 0) + 1
     return {"routes": routes, "points": points,
-            "counts": {"routes": len(routes), "points": len(points), "evidence_types": evidence_counts}}
+            "counts": {"routes": len(routes), "points": len(points),
+                       "evidence_types": evidence_counts, "suppressed": suppressed}}
 
 
 @router.get("/entities/{entity_id}/associates")

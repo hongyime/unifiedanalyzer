@@ -510,6 +510,43 @@ def test_apply_decision_replay_applies_source_confidence(tmp_path):
     assert update_args == (87.5, "eeeeeeee-0000-0000-0000-000000000001", "instagram", "123")
 
 
+def test_apply_decision_replay_applies_location_decision(tmp_path):
+    _write_event(tmp_path, _event(
+        event_type="reject_location",
+        payload={
+            "is_correct": False,
+            "location_ref": {
+                "source": "strava",
+                "evidence_type": "route_polyline",
+                "source_table": "strava_activities",
+                "source_record_id": "activity-1",
+                "evidence_key": "c" * 64,
+                "confidence": 0.75,
+            },
+            "entity_snapshot": [_snapshot("strava", "72101656", "bryanseah234")],
+        },
+    ))
+    conn = FakeConn(
+        {"strava": [{"entity_id": "eeeeeeee-0000-0000-0000-000000000001"}]},
+        backup_row={
+            "path": "/backup.dump",
+            "size_bytes": 1,
+            "finished_at": datetime.now(timezone.utc),
+            "restore_validation": "ok",
+        },
+    )
+
+    report = asyncio.run(apply_decision_replay(conn, log_dir=tmp_path))
+
+    assert report.effect_applied == 1
+    location_sql, location_args = next(
+        (sql, args) for sql, args in conn.executed if "INSERT INTO location_evidence" in sql
+    )
+    assert "status = EXCLUDED.status" in location_sql
+    assert location_args[0] == "c" * 64
+    assert location_args[13] == "rejected"
+
+
 def test_reject_media_decisions_have_rebuild_mapping():
     assert DERIVED_REBUILD_BY_EVENT["reject_media_owner"] == ("media_attribution", "timeline_events")
     assert DERIVED_REBUILD_BY_EVENT["reject_person_in_photo"] == ("face_links", "timeline_events")

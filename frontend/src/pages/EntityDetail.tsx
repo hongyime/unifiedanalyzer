@@ -1274,6 +1274,7 @@ export default function EntityDetailPage() {
               <div className="text-sm font-semibold">Geo footprint</div>
               <div className="text-xs text-text-muted">
                 {geo.counts.routes} routes · {geo.counts.points} places
+                {geo.counts.suppressed ? ` · ${geo.counts.suppressed} hidden` : ''}
               </div>
             </div>
             {lanes && lanes.total > 0 && (
@@ -1306,6 +1307,11 @@ export default function EntityDetailPage() {
                       <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
                         {evidenceTypeLabel(selectedGeoEvent.evidence_type)}
                       </span>
+                      {selectedGeoEvent.status && selectedGeoEvent.status !== 'active' && (
+                        <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
+                          {selectedGeoEvent.status}
+                        </span>
+                      )}
                       {selectedGeoEvent.confidence != null && (
                         <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
                           {Math.round(selectedGeoEvent.confidence * 100)}% confidence

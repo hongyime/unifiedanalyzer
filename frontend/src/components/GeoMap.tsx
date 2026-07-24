@@ -14,6 +14,8 @@ type Geo = {
     date: string | null
     source: string
     evidence_type?: string | null
+    evidence_key?: string | null
+    status?: string | null
     confidence?: number | null
     source_table?: string | null
     source_record_id?: string | null
@@ -26,11 +28,13 @@ type Geo = {
     source: string
     occurred_at: string | null
     evidence_type?: string | null
+    evidence_key?: string | null
+    status?: string | null
     confidence?: number | null
     source_table?: string | null
     source_record_id?: string | null
   }[]
-  counts: { routes: number; points: number; evidence_types?: Record<string, number> }
+  counts: { routes: number; points: number; evidence_types?: Record<string, number>; suppressed?: number }
 }
 
 export type GeoSelectedEvent = {
@@ -45,6 +49,8 @@ export type GeoSelectedEvent = {
   start?: [number, number] | null
   end?: [number, number] | null
   evidence_type?: string | null
+  evidence_key?: string | null
+  status?: string | null
   confidence?: number | null
   source_table?: string | null
   source_record_id?: string | null
@@ -100,6 +106,8 @@ export function GeoMap({
             start: latlngs[0] ?? null,
             end: latlngs[latlngs.length - 1] ?? null,
             evidence_type: r.evidence_type,
+            evidence_key: r.evidence_key,
+            status: r.status,
             confidence: r.confidence,
             source_table: r.source_table,
             source_record_id: r.source_record_id,
@@ -123,6 +131,8 @@ export function GeoMap({
           lat: p.lat,
           lng: p.lng,
           evidence_type: p.evidence_type,
+          evidence_key: p.evidence_key,
+          status: p.status,
           confidence: p.confidence,
           source_table: p.source_table,
           source_record_id: p.source_record_id,

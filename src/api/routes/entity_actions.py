@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from src.db.connection import get_analyzer_pool
 from src.pipeline.identity_calibration import record_label
+from src.pipeline.location_evidence import apply_location_decision
 from src.util.audit_log import append_audit
 
 router = APIRouter(tags=["entity-actions"])
@@ -189,7 +190,7 @@ async def decide_location(entity_id: str, req: LocationDecisionRequest):
     async with pool.acquire() as conn:
         await _require_entities(conn, [entity_id])
         action = "confirm_location" if req.is_correct else "reject_location"
-        await append_audit(
+        audit_id = await append_audit(
             conn,
             action=action,
             actor="dashboard",
@@ -204,7 +205,17 @@ async def decide_location(entity_id: str, req: LocationDecisionRequest):
                 "entity_snapshot": (await _entity_snapshots(conn, [entity_id]))[0:1],
             },
         )
-    return {"ok": True, "action": action}
+        location_result = await apply_location_decision(
+            conn,
+            entity_id=entity_id,
+            location_ref=req.location_ref,
+            is_correct=req.is_correct,
+            confidence=req.confidence,
+            notes=req.notes,
+            audit_id=audit_id,
+            actor="dashboard",
+        )
+    return {"ok": True, "action": action, **location_result}
 
 
 @router.post("/entities/{entity_id}/media-person-decision")

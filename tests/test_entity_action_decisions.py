@@ -106,3 +106,45 @@ def test_media_person_decision_rejects_unknown_role(monkeypatch):
         )
 
     assert exc.value.status_code == 400
+
+
+def test_location_decision_records_audit_and_updates_registry(monkeypatch):
+    audits = []
+    updates = []
+    monkeypatch.setattr(entity_actions, "get_analyzer_pool", lambda: _Pool(_Conn()))
+
+    async def fake_append_audit(conn, **kwargs):
+        audits.append(kwargs)
+        return 44
+
+    async def fake_apply_location_decision(conn, **kwargs):
+        updates.append(kwargs)
+        return {
+            "updated": 1,
+            "evidence_key": "a" * 64,
+            "status": "confirmed",
+        }
+
+    monkeypatch.setattr(entity_actions, "append_audit", fake_append_audit)
+    monkeypatch.setattr(entity_actions, "apply_location_decision", fake_apply_location_decision)
+
+    result = asyncio.run(
+        entity_actions.decide_location(
+            "00000000-0000-0000-0000-000000000001",
+            entity_actions.LocationDecisionRequest(
+                is_correct=True,
+                location_ref={
+                    "source": "strava",
+                    "evidence_type": "route_polyline",
+                    "source_table": "strava_activities",
+                    "source_record_id": "activity-1",
+                },
+            ),
+        )
+    )
+
+    assert result["action"] == "confirm_location"
+    assert result["status"] == "confirmed"
+    assert audits[0]["action"] == "confirm_location"
+    assert updates[0]["audit_id"] == 44
+    assert updates[0]["is_correct"] is True
