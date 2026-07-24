@@ -208,7 +208,7 @@
 
 ### Phase 5: Physical World Model
 **Goal**: Turn GPS/routes/media into evidence-backed location and co-presence views.
-- [ ] Normalize location evidence types: GPS, EXIF, route polyline, venue tag, caption-derived, inferred.
+- [x] Normalize location evidence types: GPS, EXIF, route polyline, venue tag, caption-derived, inferred.
 - [x] Store confidence and source for each location claim.
 - [x] Link photos to where/when/who when evidence supports it.
 - [x] Build person-location timeline and map pins.
@@ -241,7 +241,8 @@
 - Location evidence is now materialized into analyzer-owned `location_evidence` rows keyed by deterministic `evidence_key`; rejected/suppressed claims stay in the table but are hidden from normal map results.
 - Intersect/co-presence now attaches the same evidence keys to physical points, materializes bounded point sets into `location_evidence`, hides rejected/suppressed points, and includes registry-only analyzer evidence such as drive EXIF GPS.
 - The person map tab now includes a location evidence timeline derived from the normalized map payload, so routes, pins, EXIF GPS, and message locations are visible as a where/when list as well as map layers.
-- Remaining physical-world gaps: caption-derived/inferred location producers backed by the normalized location evidence registry.
+- Caption-derived location evidence is now deliberately conservative: person map queries emit low-confidence `caption_derived` points only when an Instagram caption exactly mentions a place already resolved in `geocode_cache`; the evidence row keeps the matched place and caption preview in payload.
+- Entity-level inferred locations from `location_inference` now materialize geocoded place names into `location_evidence` as `inferred_location` rows, so inferred claims can be confirmed/rejected through the same location decision workflow as GPS, EXIF, routes, and venue tags.
 - Face bridge collision audit now reports direct face-to-multiple-entity and cluster-to-multiple-entity collisions in `/api/health` and triage coverage. Unsafe derived bridge rows are purged from contested clusters, media-owner face attribution is single-face gated, drive kNN cross-reference is drive-only, and face-derived identity/location signals ignore contested clusters.
 - Platform links now show link confidence and expose a source-confidence adjustment menu backed by `/api/entities/{entity_id}/source-confidence`.
 - Person pages now open on an Overview tab that summarizes confidence, account spread, identity evidence, latest activity, mapped evidence counts, relationship leads, and decision count before the deeper tabs.

@@ -290,6 +290,9 @@ def _row_from_item(entity_id: str, item: Mapping[str, Any]) -> tuple | None:
         "route_type": item.get("route_type") or item.get("type"),
         "point_count": item.get("point_count") or len(item.get("points") or []),
     }
+    extra_payload = item.get("payload")
+    if isinstance(extra_payload, Mapping):
+        payload.update(extra_payload)
     payload = {key: value for key, value in payload.items() if value not in (None, "", 0)}
     return (
         evidence_key,

@@ -95,6 +95,38 @@ def test_upsert_location_evidence_batch_materializes_rows():
     assert row[10] == 0.9
 
 
+def test_upsert_location_evidence_preserves_payload_details():
+    conn = FakeConn()
+    asyncio.run(
+        upsert_location_evidence_batch(
+            conn,
+            ENTITY_ID,
+            [
+                attach_location_evidence_key(
+                    ENTITY_ID,
+                    {
+                        "source": "instagram",
+                        "evidence_type": "caption_derived",
+                        "source_table": "instagram_posts",
+                        "source_record_id": "post-1",
+                        "lat": 1.283,
+                        "lng": 103.86,
+                        "confidence": 0.35,
+                        "payload": {
+                            "derivation": "caption_exact_geocache_match",
+                            "matched_place": "Marina Bay Sands",
+                        },
+                    },
+                )
+            ],
+        )
+    )
+
+    row = conn.executemany_calls[0][1][0]
+    assert '"derivation": "caption_exact_geocache_match"' in row[12]
+    assert '"matched_place": "Marina Bay Sands"' in row[12]
+
+
 def test_apply_location_decision_marks_rejected_by_key():
     conn = FakeConn()
     ref = attach_location_evidence_key(

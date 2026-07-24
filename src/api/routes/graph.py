@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Query
@@ -15,6 +16,7 @@ from src.pipeline.location_evidence import (
 
 router = APIRouter(tags=["graph"])
 logger = logging.getLogger(__name__)
+_WORD_RE = re.compile(r"[A-Za-z]")
 
 
 def _relationship_why(relationship_type: str, sources) -> str | None:
@@ -100,6 +102,19 @@ def _parse_latlng(s) -> list[float] | None:
         return None
 
 
+def _caption_mentions_place(caption: str | None, place_name: str | None) -> bool:
+    if not caption or not place_name:
+        return False
+    place = str(place_name).strip()
+    if len(place) < 4 or not _WORD_RE.search(place):
+        return False
+    caption_text = str(caption)
+    if place.lower() not in caption_text.lower():
+        return False
+    pattern = re.compile(rf"(?<!\w){re.escape(place)}(?!\w)", re.IGNORECASE)
+    return bool(pattern.search(caption_text))
+
+
 def _as_latlng_list(raw) -> list[list[float]]:
     """strava_gps_streams.latlng -> [[lat,lng],...]. asyncpg may hand back jsonb
     as a str; normalize."""
@@ -183,13 +198,14 @@ async def entity_geo(
             strava_ids.append(int(link["platform_id"]))
         except (TypeError, ValueError):
             continue
-    ig_ids = [l["platform_id"] for l in links if l["source"] == "instagram" and l["platform_id"]]
-    telegram_ids = [l["platform_id"] for l in links if l["source"] == "telegram" and l["platform_id"]]
-    whatsapp_ids = [l["platform_id"] for l in links if l["source"] == "whatsapp" and l["platform_id"]]
+    ig_ids = [link["platform_id"] for link in links if link["source"] == "instagram" and link["platform_id"]]
+    telegram_ids = [link["platform_id"] for link in links if link["source"] == "telegram" and link["platform_id"]]
+    whatsapp_ids = [link["platform_id"] for link in links if link["source"] == "whatsapp" and link["platform_id"]]
 
     routes: list[dict] = []
     points: list[dict] = []
     ig_place_names: list[str] = []
+    ig_caption_rows: list[dict] = []
     async with collector.acquire() as cc:
         if strava_ids:
             strava_filters = ["a.athlete_id = ANY(SELECT id FROM target_athletes)"]
@@ -289,6 +305,24 @@ async def entity_geo(
                 LIMIT 500
             """, *named_params)
             ig_place_names = [r["location_name"] for r in named]
+
+            caption_filters = ["pr.platform_user_id::text = ANY($1::text[])", "p.caption IS NOT NULL", "p.caption <> ''"]
+            caption_params: list = [ig_ids]
+            if from_date:
+                caption_filters.append(f"p.platform_created_at >= ${len(caption_params) + 1}")
+                caption_params.append(from_date)
+            if to_date:
+                caption_filters.append(f"p.platform_created_at <= ${len(caption_params) + 1}")
+                caption_params.append(to_date)
+            captions = await cc.fetch(f"""
+                SELECT p.platform_post_id, p.caption, p.platform_created_at
+                FROM instagram_posts p
+                JOIN instagram_profiles pr ON pr.id = p.profile_id
+                WHERE {' AND '.join(caption_filters)}
+                ORDER BY p.platform_created_at DESC NULLS LAST
+                LIMIT 300
+            """, *caption_params)
+            ig_caption_rows = [dict(row) for row in captions]
         if telegram_ids:
             tg_filters = ["u.platform_user_id = ANY($1::text[])"]
             tg_params: list = [telegram_ids]
@@ -372,6 +406,48 @@ async def entity_geo(
                 "source_record_id": g["place_name"],
                 "occurred_at": None,
             })
+
+    # Caption-derived pins are deliberately conservative: only exact mentions
+    # of places already resolved in geocode_cache become low-confidence points.
+    if ig_caption_rows:
+        async with analyzer.acquire() as conn:
+            caption_places = await conn.fetch(
+                """
+                SELECT place_name, lat, lng
+                FROM geocode_cache
+                WHERE status = 'ok'
+                  AND char_length(place_name) >= 4
+                LIMIT 2000
+                """
+            )
+        emitted = 0
+        for row in ig_caption_rows:
+            caption = row.get("caption")
+            for place in caption_places:
+                if not _caption_mentions_place(caption, place["place_name"]):
+                    continue
+                points.append({
+                    "lat": place["lat"],
+                    "lng": place["lng"],
+                    "label": place["place_name"],
+                    "source": "instagram",
+                    "evidence_type": "caption_derived",
+                    "confidence": 0.35,
+                    "source_table": "instagram_posts",
+                    "source_record_id": str(row["platform_post_id"]),
+                    "occurred_at": row["platform_created_at"].isoformat() if row["platform_created_at"] else None,
+                    "kind": "caption_derived",
+                    "payload": {
+                        "derivation": "caption_exact_geocache_match",
+                        "matched_place": place["place_name"],
+                        "caption_preview": str(caption or "")[:240],
+                    },
+                })
+                emitted += 1
+                if emitted >= 100:
+                    break
+            if emitted >= 100:
+                break
 
     # Drive-original EXIF GPS is analyzer-owned and attributed through the face
     # bridge. Keep it in the same map payload as collector-sourced evidence.
@@ -463,8 +539,8 @@ async def entity_associates(entity_id: str, limit: int = Query(40, ge=1, le=100)
     except Exception as e:  # noqa: BLE001 - associates are collector-sourced
         logger.warning("entity_associates collector read skipped: %s", e)
         return {"associates": [], "collector_skipped": True}
-    ig_ids = [l["platform_id"] for l in links if l["platform_id"]]
-    ig_users = [l["platform_username"] for l in links if l["platform_username"]]
+    ig_ids = [link["platform_id"] for link in links if link["platform_id"]]
+    ig_users = [link["platform_username"] for link in links if link["platform_username"]]
     if not ig_ids and not ig_users:
         return {"associates": []}
 

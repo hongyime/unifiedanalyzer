@@ -16,6 +16,7 @@ import logging
 from collections import Counter
 
 from src.db.connection import get_analyzer_pool, get_collector_pool
+from src.pipeline.location_evidence import upsert_location_evidence_batch
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ async def infer_locations() -> dict:
             "SELECT entity_id::text, source, platform_id FROM entity_platform_links"
         )
         pid_to_entity: dict[tuple[str, str], str] = {
-            (l["source"], l["platform_id"]): l["entity_id"] for l in links
+            (link["source"], link["platform_id"]): link["entity_id"] for link in links
         }
 
         existing_rows = await conn.fetch(
@@ -242,6 +243,14 @@ async def infer_locations() -> dict:
     stats = {"entities_updated": 0, "entities_with_location": len(signals)}
 
     async with analyzer.acquire() as conn:
+        geocoded_places = {
+            row["place_name"]: (float(row["lat"]), float(row["lng"]))
+            for row in await conn.fetch(
+                "SELECT place_name, lat, lng FROM geocode_cache WHERE status = 'ok'"
+            )
+            if row["place_name"] and row["lat"] is not None and row["lng"] is not None
+        }
+        stats["location_evidence_upserted"] = 0
         for entity_id, s in signals.items():
             top_country = s["countries"].most_common(1)[0][0] if s["countries"] else None
             top_tz = s["timezones"].most_common(1)[0][0] if s["timezones"] else None
@@ -282,6 +291,36 @@ async def infer_locations() -> dict:
                     ON CONFLICT (entity_id) DO UPDATE SET
                         metadata = $2::jsonb, updated_at = NOW()
                 """, entity_id, json.dumps({"location_inference": inference}, default=str))
+
+            inferred_items = []
+            for place_name in unique_locations:
+                coords = geocoded_places.get(place_name)
+                if not coords:
+                    continue
+                inferred_items.append({
+                    "source": "analyzer",
+                    "evidence_type": "inferred_location",
+                    "source_table": "behavioral_profiles",
+                    "source_record_id": f"{entity_id}:{place_name}",
+                    "lat": coords[0],
+                    "lng": coords[1],
+                    "label": place_name,
+                    "confidence": 0.45,
+                    "kind": "inferred_location",
+                    "payload": {
+                        "derivation": "location_inference_geocoded_place_name",
+                        "place_name": place_name,
+                        "primary_country": top_country,
+                        "primary_timezone": top_tz,
+                        "region": top_region,
+                    },
+                })
+            if inferred_items:
+                stats["location_evidence_upserted"] += await upsert_location_evidence_batch(
+                    conn,
+                    entity_id,
+                    inferred_items,
+                )
 
             stats["entities_updated"] += 1
 
