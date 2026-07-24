@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from src.pipeline.face_bridge_audit import audit_face_bridge_collisions
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class FakeConn:
@@ -84,3 +88,34 @@ async def test_face_bridge_audit_degrades_when_unavailable():
     assert report["face_entity_collisions"] is None
     assert report["cluster_entity_collisions"] is None
     assert "facetracker schema missing" in report["error"]
+
+
+def test_face_owner_attribution_is_single_face_gated():
+    source = (REPO_ROOT / "src" / "face_worker.py").read_text(encoding="utf-8")
+
+    assert "FACE_WORKER_OWNER_ATTRIBUTION_MAX_FACES" in source
+    assert "can_attribute_owner = bool(eid) and len(faces) <= _OWNER_ATTRIBUTION_MAX_FACES" in source
+    assert "can_attribute_owner = bool(eid) and total_faces <= _OWNER_ATTRIBUTION_MAX_FACES" in source
+    assert "COALESCE(i.face_count, :unknown_face_count) <= :max_faces" in source
+
+
+def test_face_signals_ignore_contested_clusters():
+    tier1 = (REPO_ROOT / "src" / "pipeline" / "media_analysis_tier1.py").read_text(encoding="utf-8")
+    pair = (REPO_ROOT / "src" / "pipeline" / "face_pair_signals.py").read_text(encoding="utf-8")
+    exif = (REPO_ROOT / "src" / "pipeline" / "media_analysis.py").read_text(encoding="utf-8")
+
+    for source in (tier1, pair, exif):
+        assert "contested_clusters AS" in source
+        assert "HAVING count(DISTINCT ef.entity_id) > 1" in source
+        assert "NOT EXISTS (" in source
+
+
+def test_drive_xref_is_drive_only_and_purges_unsafe_rows():
+    source = (REPO_ROOT / "src" / "pipeline" / "face_clustering.py").read_text(encoding="utf-8")
+
+    assert "i.file_path LIKE '/mnt/%'" in source
+    assert "i.file_hash !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'" in source
+    assert "purge_unsafe_entity_face_links" in source
+    assert "owner_group_rows" in source
+    assert "non_drive_xref_rows" in source
+    assert "contested_propagation_rows" in source

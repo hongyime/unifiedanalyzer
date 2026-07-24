@@ -121,6 +121,9 @@ def _collector_sqlalchemy_url() -> str:
 
 # Collector media content types that may contain faces.
 _FACE_CONTENT_TYPES = ("image", "profile_photo")
+# Owner attribution is only safe for portrait-like media. Group photos/videos
+# still get indexed for search, but their faces are not labelled as the owner.
+_OWNER_ATTRIBUTION_MAX_FACES = int(os.getenv("FACE_WORKER_OWNER_ATTRIBUTION_MAX_FACES", "1"))
 
 
 def _build_entity_lookup(analyzer_conn) -> dict:
@@ -176,7 +179,14 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
         resolve_media_path, _MEDIA_CONFINEMENT_ROOT, MEDIA_DERIVED_PATH,
     )
 
-    stats = {"scanned": 0, "images_indexed": 0, "faces": 0, "linked": 0, "skipped": 0}
+    stats = {
+        "scanned": 0,
+        "images_indexed": 0,
+        "faces": 0,
+        "linked": 0,
+        "owner_link_skipped_group": 0,
+        "skipped": 0,
+    }
 
     analyzer_engine = create_engine(
         analyzer_sqlalchemy_url(),
@@ -284,6 +294,9 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
         eid = entity_lookup.get((r.source, r.entity_id)) or (
             entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None
         )
+        can_attribute_owner = bool(eid) and len(faces) <= _OWNER_ATTRIBUTION_MAX_FACES
+        if eid and faces and not can_attribute_owner:
+            stats["owner_link_skipped_group"] += 1
 
         sess = Session()
         try:
@@ -312,7 +325,7 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
                 sess.add(face_row)
                 sess.flush()  # assign face_row.id
                 stats["faces"] += 1
-                if eid:
+                if can_attribute_owner:
                     sess.execute(text(
                         "INSERT INTO public.entity_faces (entity_id, face_id, media_item_id, confidence, method) "
                         "VALUES (:e, :f, :m, :c, 'media_attribution') ON CONFLICT (entity_id, face_id) DO NOTHING"
@@ -671,11 +684,15 @@ def relink_entity_faces(limit: int | None = None) -> dict:
                 "FROM faces f JOIN images i ON i.id = f.image_id "
                 "WHERE i.file_hash ~* '^[0-9a-f-]{36}$' "
                 "AND NOT COALESCE(f.is_junk, false) "
+                "AND COALESCE(i.face_count, :unknown_face_count) <= :max_faces "
                 "AND NOT EXISTS (SELECT 1 FROM public.entity_faces ef WHERE ef.face_id = f.id)"
             )
             if limit:
                 q += f" LIMIT {int(limit)}"
-            faces = aconn.execute(text(q)).fetchall()
+            faces = aconn.execute(
+                text(q),
+                {"unknown_face_count": 999, "max_faces": _OWNER_ATTRIBUTION_MAX_FACES},
+            ).fetchall()
         stats["faces_checked"] = len(faces)
         if faces:
             # Resolve each distinct media_item -> (source, entity_id) from collector.
@@ -782,8 +799,16 @@ def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
     from src.face.storage.database import Image as FtImage, Face as FtFace
     from src.pipeline.media_common import resolve_media_path, _MEDIA_CONFINEMENT_ROOT
 
-    stats = {"scanned": 0, "videos_indexed": 0, "frames": 0, "faces": 0,
-             "linked": 0, "skipped": 0, "no_frames": 0}
+    stats = {
+        "scanned": 0,
+        "videos_indexed": 0,
+        "frames": 0,
+        "faces": 0,
+        "linked": 0,
+        "owner_link_skipped_group": 0,
+        "skipped": 0,
+        "no_frames": 0,
+    }
 
     if shutil.which("ffmpeg") is None:
         logger.warning("ingest_video_frames: ffmpeg not on PATH, skipping")
@@ -931,6 +956,9 @@ def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
                 stats["skipped"] += 1
                 continue
             _sec0, w0, h0, _ = per_frame[0]
+            can_attribute_owner = bool(eid) and total_faces <= _OWNER_ATTRIBUTION_MAX_FACES
+            if eid and total_faces and not can_attribute_owner:
+                stats["owner_link_skipped_group"] += 1
 
             sess = Session()
             try:
@@ -962,7 +990,7 @@ def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
                         sess.add(face_row)
                         sess.flush()
                         stats["faces"] += 1
-                        if eid:
+                        if can_attribute_owner:
                             sess.execute(text(
                                 "INSERT INTO public.entity_faces (entity_id, face_id, media_item_id, confidence, method) "
                                 "VALUES (:e, :f, :m, :c, 'media_attribution') ON CONFLICT (entity_id, face_id) DO NOTHING"

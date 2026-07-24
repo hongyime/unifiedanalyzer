@@ -398,6 +398,15 @@ async def _build_face_match_signals() -> int:
         # Highest-quality faces first so the bounded corpus keeps the best crops
         # as the table grows past tens of thousands of faces.
         emb_rows = await conn.fetch("""
+            WITH contested_clusters AS (
+                SELECT f.cluster_id
+                FROM facetracker.faces f
+                JOIN public.entity_faces ef ON ef.face_id = f.id
+                WHERE f.cluster_id IS NOT NULL
+                  AND NOT COALESCE(f.is_junk, FALSE)
+                GROUP BY f.cluster_id
+                HAVING count(DISTINCT ef.entity_id) > 1
+            )
             SELECT ef.entity_id::text   AS entity_id,
                    ef.media_item_id     AS media_item_id,
                    f.id                 AS face_id,
@@ -405,6 +414,15 @@ async def _build_face_match_signals() -> int:
             FROM public.entity_faces ef
             JOIN facetracker.faces f ON f.id = ef.face_id
             WHERE ef.entity_id IS NOT NULL AND f.embedding_vec IS NOT NULL
+              AND NOT COALESCE(f.is_junk, FALSE)
+              AND (
+                    f.cluster_id IS NULL
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM contested_clusters cc
+                        WHERE cc.cluster_id = f.cluster_id
+                    )
+                  )
             ORDER BY f.quality_score DESC NULLS LAST
             LIMIT $1
         """, MEDIA_FACE_MATCH_MAX)

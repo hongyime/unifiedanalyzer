@@ -67,6 +67,15 @@ async def emit_face_pair_signals() -> dict:
     analyzer = get_analyzer_pool()
     async with analyzer.acquire() as conn:
         rows = await conn.fetch("""
+            WITH contested_clusters AS (
+                SELECT f.cluster_id
+                FROM facetracker.faces f
+                JOIN public.entity_faces ef ON ef.face_id = f.id
+                WHERE f.cluster_id IS NOT NULL
+                  AND NOT COALESCE(f.is_junk, FALSE)
+                GROUP BY f.cluster_id
+                HAVING count(DISTINCT ef.entity_id) > 1
+            )
             SELECT ef.entity_id::text AS entity_id, f.id AS face_id,
                    f.embedding_vec::text AS emb,
                    COALESCE(f.quality_score, 0.0) AS q
@@ -74,8 +83,17 @@ async def emit_face_pair_signals() -> dict:
             JOIN facetracker.faces f ON f.id = ef.face_id
             JOIN facetracker.images i ON i.id = f.image_id
             WHERE f.embedding_vec IS NOT NULL
+              AND NOT COALESCE(f.is_junk, FALSE)
               AND i.face_count IS NOT NULL
               AND i.face_count <= $1
+              AND (
+                    f.cluster_id IS NULL
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM contested_clusters cc
+                        WHERE cc.cluster_id = f.cluster_id
+                    )
+                  )
         """, _PORTRAIT_MAX_FACES)
 
     if not rows:

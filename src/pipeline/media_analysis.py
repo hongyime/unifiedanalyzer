@@ -187,6 +187,15 @@ async def _build_drive_exif_signals() -> int:
     analyzer = get_analyzer_pool()
     async with analyzer.acquire() as conn:
         rows = await conn.fetch("""
+            WITH contested_clusters AS (
+                SELECT f.cluster_id
+                FROM facetracker.faces f
+                JOIN public.entity_faces ef ON ef.face_id = f.id
+                WHERE f.cluster_id IS NOT NULL
+                  AND NOT COALESCE(f.is_junk, FALSE)
+                GROUP BY f.cluster_id
+                HAVING count(DISTINCT ef.entity_id) > 1
+            )
             SELECT ma.media_item_id, ma.gps_lat, ma.gps_lon,
                    ma.result_json -> 'device' AS device, ef.entity_id::text AS eid
             FROM media_analysis ma
@@ -195,6 +204,15 @@ async def _build_drive_exif_signals() -> int:
             JOIN public.entity_faces ef ON ef.face_id = f.id
             WHERE ma.source = 'drive' AND ma.analysis_type = 'exif_gps'
               AND ef.entity_id IS NOT NULL
+              AND NOT COALESCE(f.is_junk, FALSE)
+              AND (
+                    f.cluster_id IS NULL
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM contested_clusters cc
+                        WHERE cc.cluster_id = f.cluster_id
+                    )
+                  )
         """)
 
     device_buckets: dict[str, set] = defaultdict(set)   # serial fp -> {(eid, mid)}
