@@ -93,8 +93,10 @@ def test_run_pg_restore_filters_default_derived_hnsw_index(monkeypatch: pytest.M
     monkeypatch.setattr(rd.shutil, "which", lambda name: name if name == "pg_restore" else None)
     restore_list = "\n".join([
         "1; 1259 111 TABLE public entities collector",
-        "2; 1259 222 INDEX public idx_timeline_emb_hnsw collector",
-        "3; 1259 333 INDEX public idx_entities_source collector",
+        "2; 0 0 TABLE DATA public timeline_embeddings collector",
+        "3; 1259 222 INDEX public idx_timeline_emb_hnsw collector",
+        "4; 1259 444 TABLE public timeline_embeddings collector",
+        "5; 1259 333 INDEX public idx_entities_source collector",
     ])
     seen_restore_list = {}
 
@@ -114,9 +116,52 @@ def test_run_pg_restore_filters_default_derived_hnsw_index(monkeypatch: pytest.M
 
     skipped = rd._run_pg_restore(config, dump, "ua_restore_drill_20260723_123456")
 
-    assert skipped == ["2; 1259 222 INDEX public idx_timeline_emb_hnsw collector"]
+    assert skipped == [
+        "2; 0 0 TABLE DATA public timeline_embeddings collector",
+        "3; 1259 222 INDEX public idx_timeline_emb_hnsw collector",
+    ]
+    assert "TABLE DATA public timeline_embeddings" not in seen_restore_list["text"]
     assert "idx_timeline_emb_hnsw" not in seen_restore_list["text"]
+    assert "TABLE public timeline_embeddings" in seen_restore_list["text"]
     assert "idx_entities_source" in seen_restore_list["text"]
+
+
+def test_restore_list_broad_pattern_does_not_skip_table_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    dump = _write_backup(tmp_path, "daily", "20260723T010000Z")
+    monkeypatch.setattr(rd.shutil, "which", lambda name: name if name == "pg_restore" else None)
+    restore_list = "\n".join([
+        "1; 1259 111 TABLE public timeline_embeddings collector",
+        "2; 0 0 TABLE DATA public timeline_embeddings collector",
+        "3; 1259 222 INDEX public idx_timeline_embeddings_event collector",
+    ])
+    seen_restore_list = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["pg_restore", "-l"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=restore_list, stderr="")
+        if "--use-list" in cmd:
+            path = Path(cmd[cmd.index("--use-list") + 1])
+            seen_restore_list["text"] = path.read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(rd.subprocess, "run", fake_run)
+    config = rd.RecoveryDrillConfig(
+        database_url="postgres://collector:collector@localhost:5500/unifiedanalyzer",
+        backup_dir=tmp_path,
+        skip_restore_item_patterns=("timeline_embeddings",),
+    )
+
+    skipped = rd._run_pg_restore(config, dump, "ua_restore_drill_20260723_123456")
+
+    assert skipped == [
+        "2; 0 0 TABLE DATA public timeline_embeddings collector",
+        "3; 1259 222 INDEX public idx_timeline_embeddings_event collector",
+    ]
+    assert "TABLE public timeline_embeddings" in seen_restore_list["text"]
+    assert "TABLE DATA public timeline_embeddings" not in seen_restore_list["text"]
 
 
 def test_run_pg_restore_raises_useful_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

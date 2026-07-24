@@ -20,7 +20,10 @@ from src.pipeline.decision_replay import apply_decision_replay
 
 
 SCRATCH_DB_RE = re.compile(r"^ua_restore_drill_[a-z0-9_]{8,80}$")
-DEFAULT_SKIP_RESTORE_ITEM_PATTERNS = ("idx_timeline_emb_hnsw",)
+DEFAULT_SKIP_RESTORE_ITEM_PATTERNS = (
+    "idx_timeline_emb_hnsw",
+    "table data public timeline_embeddings",
+)
 
 
 class RecoveryDrillError(RuntimeError):
@@ -328,8 +331,7 @@ def _write_filtered_restore_list(
     kept: list[str] = []
     skipped: list[str] = []
     for line in proc.stdout.splitlines():
-        normalized = line.lower()
-        if " index " in f" {normalized} " and any(pattern in normalized for pattern in patterns):
+        if _is_skippable_restore_item(line, patterns):
             skipped.append(line.strip())
             continue
         kept.append(line)
@@ -337,6 +339,13 @@ def _write_filtered_restore_list(
         return None, []
     list_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
     return list_path, skipped
+
+
+def _is_skippable_restore_item(line: str, patterns: tuple[str, ...]) -> bool:
+    normalized = f" {line.lower()} "
+    if not any(pattern in normalized for pattern in patterns):
+        return False
+    return " index " in normalized or " table data " in normalized
 
 
 def _is_only_transaction_timeout_restore_warning(detail: str) -> bool:

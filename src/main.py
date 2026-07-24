@@ -92,7 +92,7 @@ def main():
     recovery.add_argument("--report-path", type=str, default=None,
                           help="Optional path to write the drill JSON report")
     recovery.add_argument("--skip-restore-item", action="append", default=None,
-                          help="Skip a matching derived pg_restore item, e.g. idx_timeline_emb_hnsw")
+                          help="Skip a matching derived pg_restore INDEX or TABLE DATA item")
     recovery.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     outbox = sub.add_parser("decision-outbox", help="Retry pending audit_log -> decision JSONL writes")
     outbox.add_argument("--limit", type=int, default=100, help="Maximum pending rows to retry")
