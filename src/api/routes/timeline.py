@@ -1,9 +1,142 @@
+import math
+import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from fastapi import APIRouter, Query, HTTPException
 
 from src.db.connection import get_analyzer_pool
 
 router = APIRouter(tags=["timeline"])
+
+_CONFIDENCE_METADATA_PATHS: tuple[tuple[str, ...], ...] = (
+    ("confidence",),
+    ("confidence_score",),
+    ("source_confidence",),
+    ("matched_confidence",),
+    ("link_confidence",),
+    ("detection_confidence",),
+    ("attribution_confidence",),
+    ("match_confidence",),
+    ("evidence", "confidence"),
+    ("source_evidence", "confidence"),
+    ("source", "confidence"),
+    ("attribution", "confidence"),
+    ("match", "confidence"),
+)
+_NUMERIC_CONFIDENCE_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)%?$")
+_SQL_NUMERIC_CONFIDENCE_RE = (
+    "'^[[:space:]]*[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)[[:space:]]*%?[[:space:]]*$'"
+)
+_SOURCE_LINK_CONFIDENCE_SOURCE = "entity_platform_links.confidence"
+_SOURCE_LINK_CONFIDENCE_JOIN = """
+LEFT JOIN LATERAL (
+    SELECT MAX(epl.confidence) AS confidence
+    FROM entity_platform_links epl
+    WHERE epl.entity_id = t.entity_id
+      AND epl.source = t.source
+      AND epl.retracted_at IS NULL
+) link ON TRUE
+"""
+
+
+def _coerce_confidence(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        raw = float(value)
+    elif isinstance(value, str):
+        normalized = value.strip().replace(" ", "")
+        if not _NUMERIC_CONFIDENCE_RE.match(normalized):
+            return None
+        raw = float(normalized.rstrip("%"))
+    else:
+        return None
+
+    if not math.isfinite(raw) or raw < 0:
+        return None
+    if raw > 1:
+        raw = raw / 100.0
+    return min(raw, 1.0)
+
+
+def _metadata_path_value(metadata: object, path: tuple[str, ...]) -> object:
+    current = metadata
+    for key in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _derive_timeline_confidence(metadata: object) -> tuple[float | None, str | None]:
+    for path in _CONFIDENCE_METADATA_PATHS:
+        confidence = _coerce_confidence(_metadata_path_value(metadata, path))
+        if confidence is not None:
+            return round(confidence, 4), "metadata." + ".".join(path)
+    return None, None
+
+
+def _timeline_confidence_expr(alias: str = "t") -> str:
+    candidates: list[str] = []
+    for path in _CONFIDENCE_METADATA_PATHS:
+        pg_path = "{" + ",".join(path) + "}"
+        raw = f"NULLIF({alias}.metadata #>> '{pg_path}', '')"
+        cleaned = f"replace(regexp_replace({raw}, '[[:space:]]', '', 'g'), '%', '')"
+        candidates.append(
+            f"CASE WHEN {raw} ~ {_SQL_NUMERIC_CONFIDENCE_RE} "
+            f"THEN ({cleaned})::float8 END"
+        )
+    raw_expr = "COALESCE(" + ", ".join(candidates) + ")"
+    return (
+        "CASE "
+        f"WHEN ({raw_expr}) IS NULL THEN NULL "
+        f"WHEN ({raw_expr}) < 0 THEN NULL "
+        f"WHEN ({raw_expr}) > 1 THEN LEAST(1.0, ({raw_expr}) / 100.0) "
+        f"ELSE ({raw_expr}) "
+        "END"
+    )
+
+
+def _source_link_confidence_expr(alias: str = "link") -> str:
+    return (
+        "CASE "
+        f"WHEN {alias}.confidence IS NULL THEN NULL "
+        f"WHEN {alias}.confidence < 0 THEN NULL "
+        f"WHEN {alias}.confidence > 1 THEN LEAST(1.0, {alias}.confidence / 100.0) "
+        f"ELSE {alias}.confidence "
+        "END"
+    )
+
+
+def _effective_timeline_confidence_expr(alias: str = "t", link_alias: str = "link") -> str:
+    return f"COALESCE({_timeline_confidence_expr(alias)}, {_source_link_confidence_expr(link_alias)})"
+
+
+def _optional_row_value(row, key: str):
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def _timeline_event_payload(row) -> dict:
+    confidence, confidence_source = _derive_timeline_confidence(row["metadata"])
+    if confidence is None:
+        confidence = _coerce_confidence(_optional_row_value(row, "source_confidence"))
+        if confidence is not None:
+            confidence = round(confidence, 4)
+            confidence_source = _SOURCE_LINK_CONFIDENCE_SOURCE
+    return {
+        "id": str(row["id"]),
+        "source": row["source"],
+        "event_type": row["event_type"],
+        "source_record_id": row["source_record_id"],
+        "occurred_at": row["occurred_at"].isoformat(),
+        "title": row["title"],
+        "metadata": row["metadata"],
+        "confidence": confidence,
+        "confidence_source": confidence_source,
+    }
 
 
 def _partition_names_desc(start: datetime | None = None, floor_year: int = 2010) -> list[str]:
@@ -28,25 +161,35 @@ async def _fetch_recent_timeline_rows(conn, entity_id: str, limit: int) -> list:
         entity_id,
     )
     if rng and rng["first_event_at"] is not None:
-        return await conn.fetch("""
-            SELECT id, source, event_type, source_record_id, occurred_at, title, metadata
-            FROM timeline_events
-            WHERE entity_id = $1::uuid
-              AND occurred_at >= $3 AND occurred_at <= $4
+        return await conn.fetch(f"""
+            SELECT t.id, t.source, t.event_type, t.source_record_id,
+                   t.occurred_at, t.title, t.metadata,
+                   {_source_link_confidence_expr()} AS source_confidence
+            FROM timeline_events t
+            {_SOURCE_LINK_CONFIDENCE_JOIN}
+            WHERE t.entity_id = $1::uuid
+              AND t.occurred_at >= $3 AND t.occurred_at <= $4
             ORDER BY occurred_at DESC
             LIMIT $2
         """, entity_id, limit, rng["first_event_at"], rng["last_event_at"])
-    return await conn.fetch("""
-        SELECT id, source, event_type, source_record_id, occurred_at, title, metadata
-        FROM timeline_events
-        WHERE entity_id = $1::uuid AND occurred_at > now() - interval '5 years'
+    return await conn.fetch(f"""
+        SELECT t.id, t.source, t.event_type, t.source_record_id,
+               t.occurred_at, t.title, t.metadata,
+               {_source_link_confidence_expr()} AS source_confidence
+        FROM timeline_events t
+        {_SOURCE_LINK_CONFIDENCE_JOIN}
+        WHERE t.entity_id = $1::uuid AND t.occurred_at > now() - interval '5 years'
         ORDER BY occurred_at DESC
         LIMIT $2
     """, entity_id, limit)
 
 
 @router.get("/entities/{entity_id}/timeline-lanes")
-async def timeline_lanes(entity_id: str, max_events: int = Query(2500, ge=1, le=8000)):
+async def timeline_lanes(
+    entity_id: str,
+    max_events: int = Query(2500, ge=1, le=8000),
+    min_confidence: float | None = Query(None, ge=0, le=1),
+):
     """Per-platform event timestamps for the swimlane timeline chart, plus alert
     markers and the overall time range. Epochs (float seconds) keep the payload
     small and let the client lay out the x-axis without date parsing per point.
@@ -65,24 +208,42 @@ async def timeline_lanes(entity_id: str, max_events: int = Query(2500, ge=1, le=
             entity_id,
         )
         if rng and rng["first_event_at"] is not None:
+            params = [entity_id, max_events, rng["first_event_at"], rng["last_event_at"]]
+            confidence_clause = ""
+            confidence_join = ""
+            if min_confidence is not None:
+                params.append(min_confidence)
+                confidence_join = _SOURCE_LINK_CONFIDENCE_JOIN
+                confidence_clause = f" AND {_effective_timeline_confidence_expr('t')} >= $5"
             rows = await conn.fetch("""
                 SELECT source, event_type, extract(epoch FROM occurred_at) AS ts
-                FROM timeline_events
-                WHERE entity_id = $1::uuid
-                  AND occurred_at >= $3 AND occurred_at <= $4
+                FROM timeline_events t
+                {confidence_join}
+                WHERE t.entity_id = $1::uuid
+                  AND t.occurred_at >= $3 AND t.occurred_at <= $4
+                  {confidence_clause}
                 ORDER BY occurred_at DESC
                 LIMIT $2
-            """, entity_id, max_events, rng["first_event_at"], rng["last_event_at"])
+            """.format(confidence_join=confidence_join, confidence_clause=confidence_clause), *params)
         else:
             # Range not computed yet (new entity, pre-first-pipeline-run): recent
             # fallback so we still prune rather than scan all 373 partitions.
+            params = [entity_id, max_events]
+            confidence_clause = ""
+            confidence_join = ""
+            if min_confidence is not None:
+                params.append(min_confidence)
+                confidence_join = _SOURCE_LINK_CONFIDENCE_JOIN
+                confidence_clause = f" AND {_effective_timeline_confidence_expr('t')} >= $3"
             rows = await conn.fetch("""
                 SELECT source, event_type, extract(epoch FROM occurred_at) AS ts
-                FROM timeline_events
-                WHERE entity_id = $1::uuid AND occurred_at > now() - interval '5 years'
+                FROM timeline_events t
+                {confidence_join}
+                WHERE t.entity_id = $1::uuid AND t.occurred_at > now() - interval '5 years'
+                  {confidence_clause}
                 ORDER BY occurred_at DESC
                 LIMIT $2
-            """, entity_id, max_events)
+            """.format(confidence_join=confidence_join, confidence_clause=confidence_clause), *params)
         alert_rows = await conn.fetch("""
             SELECT alert_type, extract(epoch FROM detected_at) AS ts
             FROM alerts
@@ -112,6 +273,7 @@ async def get_entity_timeline(
     event_type: str | None = None,
     from_date: datetime | None = Query(None, alias="from"),
     to_date: datetime | None = Query(None, alias="to"),
+    min_confidence: float | None = Query(None, ge=0, le=1),
 ):
     pool = get_analyzer_pool()
     offset = (page - 1) * per_page
@@ -140,8 +302,13 @@ async def get_entity_timeline(
         params.append(to_date)
         idx += 1
 
+    if min_confidence is not None:
+        conditions.append(f"{_effective_timeline_confidence_expr('t')} >= ${idx}")
+        params.append(min_confidence)
+        idx += 1
+
     where = "WHERE " + " AND ".join(conditions)
-    use_fast_path = not source and not event_type and not from_date and not to_date
+    use_fast_path = not source and not event_type and not from_date and not to_date and min_confidence is None
 
     async with pool.acquire() as conn:
         # Verify entity exists
@@ -179,33 +346,25 @@ async def get_entity_timeline(
             rows = rows[offset: offset + per_page]
             total = max(int(total or 0), offset + len(rows))
         else:
+            confidence_join = _SOURCE_LINK_CONFIDENCE_JOIN if min_confidence is not None else ""
             total = await conn.fetchval(
-                f"SELECT COUNT(*) FROM timeline_events t {where}", *params
+                f"SELECT COUNT(*) FROM timeline_events t {confidence_join} {where}", *params
             )
 
             params.extend([per_page, offset])
             rows = await conn.fetch(f"""
                 SELECT t.id, t.source, t.event_type, t.source_record_id,
-                       t.occurred_at, t.title, t.metadata
+                       t.occurred_at, t.title, t.metadata,
+                       {_source_link_confidence_expr()} AS source_confidence
                 FROM timeline_events t
+                {_SOURCE_LINK_CONFIDENCE_JOIN}
                 {where}
                 ORDER BY t.occurred_at DESC
                 LIMIT ${idx} OFFSET ${idx + 1}
             """, *params)
 
     return {
-        "data": [
-            {
-                "id": str(r["id"]),
-                "source": r["source"],
-                "event_type": r["event_type"],
-                "source_record_id": r["source_record_id"],
-                "occurred_at": r["occurred_at"].isoformat(),
-                "title": r["title"],
-                "metadata": r["metadata"],
-            }
-            for r in rows
-        ],
+        "data": [_timeline_event_payload(r) for r in rows],
         "total": total,
         "page": page,
         "per_page": per_page,

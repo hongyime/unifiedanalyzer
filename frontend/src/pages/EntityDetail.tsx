@@ -207,6 +207,34 @@ type TabKey =
 // consolidated Connections tab keeps interactions windowable, so it is included.
 const TIMELINE_TABS = new Set<TabKey>(['timeline', 'map', 'connections'])
 
+type TimelineConfidenceFilter = 'all' | 'known' | '0.5' | '0.7' | '0.9'
+
+const TIMELINE_CONFIDENCE_OPTIONS: { value: TimelineConfidenceFilter; label: string }[] = [
+  { value: 'all', label: 'Any confidence' },
+  { value: 'known', label: 'Has confidence score' },
+  { value: '0.5', label: 'Confidence >= 50%' },
+  { value: '0.7', label: 'Confidence >= 70%' },
+  { value: '0.9', label: 'Confidence >= 90%' },
+]
+
+function timelineMinConfidence(filter: TimelineConfidenceFilter): number | null {
+  if (filter === 'all') return null
+  if (filter === 'known') return 0
+  return Number(filter)
+}
+
+function timelineConfidenceLabel(event: TimelineEvent): string {
+  if (event.confidence == null) return 'No confidence score'
+  return `${Math.round(event.confidence * 100)}% confidence`
+}
+
+function timelineConfidenceClass(event: TimelineEvent): string {
+  if (event.confidence == null) return 'bg-hover text-text-muted'
+  if (event.confidence >= 0.7) return 'bg-success/15 text-success'
+  if (event.confidence >= 0.5) return 'bg-warning/15 text-warning'
+  return 'bg-hover text-text-secondary'
+}
+
 export default function EntityDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -216,6 +244,7 @@ export default function EntityDetailPage() {
   const [eventsPage, setEventsPage] = useState(1)
   const [timelineSource, setTimelineSource] = useState('')
   const [timelineType, setTimelineType] = useState('')
+  const [timelineConfidence, setTimelineConfidence] = useState<TimelineConfidenceFilter>('all')
   const [tab, setTab] = useState<TabKey>('overview')
   const [loading, setLoading] = useState(true)
   const [behavior, setBehavior] = useState<BehaviorProfile | null>(null)
@@ -242,6 +271,7 @@ export default function EntityDetailPage() {
     setLanes(null)
     setTimelineSource('')
     setTimelineType('')
+    setTimelineConfidence('all')
     setEventsPage(1)
     setGeo(null)
     setOverviewEvents([])
@@ -271,21 +301,23 @@ export default function EntityDetailPage() {
       timelineType,
       isoFromEpoch(brushRange?.[0] ?? null),
       isoFromEpoch(brushRange?.[1] ?? null),
+      timelineMinConfidence(timelineConfidence),
     ).then(r => {
       setEvents(r.data)
       setEventsTotal(r.total)
     })
-  }, [id, tab, eventsPage, brushRange, timelineSource, timelineType])
+  }, [id, tab, eventsPage, brushRange, timelineSource, timelineType, timelineConfidence])
   useEffect(() => {
     if (!id || !TIMELINE_TABS.has(tab)) return
-    api.getTimelineLanes(id, 2000).then((data) => {
+    const confidenceFloor = tab === 'timeline' ? timelineMinConfidence(timelineConfidence) : null
+    api.getTimelineLanes(id, 2000, confidenceFloor).then((data) => {
       setLanes(data)
       setBrushRange((current) => current ?? (data.min_t != null && data.max_t != null ? [data.min_t, data.max_t] : null))
     }).catch(() => setLanes(null))
-  }, [id, tab])
+  }, [id, tab, timelineConfidence])
   useEffect(() => {
     setEventsPage(1)
-  }, [timelineSource, timelineType, brushRange])
+  }, [timelineSource, timelineType, timelineConfidence, brushRange])
 
   useEffect(() => {
     if (!id || tab !== 'behavior') return
@@ -696,6 +728,7 @@ export default function EntityDetailPage() {
         .flatMap((lane) => lane.events.map((event) => event.type).filter((type): type is string => Boolean(type))),
     ),
   ).sort()
+  const timelineFiltersActive = Boolean(timelineSource || timelineType || timelineConfidence !== 'all')
 
   return (
     <div>
@@ -1101,7 +1134,10 @@ export default function EntityDetailPage() {
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <div className="text-sm font-semibold">Activity across platforms</div>
-                  <div className="text-xs text-text-muted">{eventsTotal.toLocaleString()} shown · {lanes.total.toLocaleString()} indexed</div>
+                  <div className="text-xs text-text-muted">
+                    {eventsTotal.toLocaleString()} shown · {lanes.total.toLocaleString()}{' '}
+                    {timelineConfidence === 'all' ? 'indexed' : 'with selected confidence'}
+                  </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <select
@@ -1129,13 +1165,25 @@ export default function EntityDetailPage() {
                       <option key={type} value={type}>{type}</option>
                     ))}
                   </select>
-                  {(timelineSource || timelineType) && (
+                  <select
+                    value={timelineConfidence}
+                    onChange={(e) => setTimelineConfidence(e.target.value as TimelineConfidenceFilter)}
+                    className="rounded-md border border-border bg-background px-2 py-1 text-xs text-text-primary"
+                    aria-label="Timeline confidence filter"
+                    title="Filters events with confidence evidence from event metadata or source attribution."
+                  >
+                    {TIMELINE_CONFIDENCE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                  {timelineFiltersActive && (
                     <Button
                       size="sm"
                       variant="ghost"
                       onClick={() => {
                         setTimelineSource('')
                         setTimelineType('')
+                        setTimelineConfidence('all')
                       }}
                     >
                       Clear
@@ -1155,7 +1203,11 @@ export default function EntityDetailPage() {
             <EmptyState
               icon={<Bell className="h-10 w-10" />}
               title="No timeline events"
-              description="Posts, activities, and messages appear here as the collector picks them up."
+              description={
+                timelineFiltersActive
+                  ? 'No events match the selected source, type, or confidence filters.'
+                  : 'Posts, activities, and messages appear here as the collector picks them up.'
+              }
             />
           ) : (
             <>
@@ -1165,6 +1217,12 @@ export default function EntityDetailPage() {
                     <div className="flex items-center gap-2">
                       <PlatformBadge source={ev.source} />
                       <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">{ev.event_type}</span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs font-medium ${timelineConfidenceClass(ev)}`}
+                        title={ev.confidence_source ? `Derived from ${ev.confidence_source}` : 'No event or source confidence score'}
+                      >
+                        {timelineConfidenceLabel(ev)}
+                      </span>
                     </div>
                     <span className="text-xs text-text-muted">{formatDate(ev.occurred_at)}</span>
                   </div>

@@ -97,6 +97,9 @@ services:
       ANALYZER_DB_BACKUP_RETENTION_DAILY: "${ANALYZER_DB_BACKUP_RETENTION_DAILY:-7}"
       ANALYZER_DB_BACKUP_RETENTION_WEEKLY: "${ANALYZER_DB_BACKUP_RETENTION_WEEKLY:-4}"
       ANALYZER_DB_BACKUP_RETENTION_MONTHLY: "${ANALYZER_DB_BACKUP_RETENTION_MONTHLY:-3}"
+      # Recovery drills and scheduler-side replay tools need the same durable
+      # JSONL decision log mount as the API service.
+      ANALYZER_DECISION_LOG_DIR: /app/decisions
       # P2-1: the scheduler is a single sequential worker; a small pool suffices.
       DB_MAX_POOL_SIZE: "${SCHEDULER_DB_POOL_SIZE:-6}"
       # full_resolution has CPU-bound synchronous phases (resolver fuzzy-match of
@@ -125,6 +128,7 @@ services:
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
       - "Z:/unifiedanalyzer/backups/db:/app/backups/db"
+      - "Z:/unifiedanalyzer/decisions:/app/decisions"
     networks:
       - unifiedcollector_default
     restart: unless-stopped

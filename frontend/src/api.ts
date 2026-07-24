@@ -133,6 +133,8 @@ export interface TimelineEvent {
   occurred_at: string
   title: string | null
   metadata: Record<string, unknown>
+  confidence: number | null
+  confidence_source: string | null
 }
 
 export interface DecisionHistoryEntry {
@@ -736,21 +738,26 @@ export const api = {
       nodes: { id: string; name: string | null; weight: number; types: string[]; face: string | null; why?: string | null }[]
     }>(`/entities/${entityId}/network`),
 
-  getTimelineLanes: (entityId: string, maxEvents = 2000) =>
-    get<{
+  getTimelineLanes: (entityId: string, maxEvents = 2000, minConfidence?: number | null) => {
+    const q = new URLSearchParams()
+    q.set('max_events', String(maxEvents))
+    if (minConfidence != null) q.set('min_confidence', String(minConfidence))
+    return get<{
       lanes: { source: string; events: { t: number; type: string | null }[] }[]
       alerts: { type: string; t: number }[]
       min_t: number | null
       max_t: number | null
       total: number
-    }>(`/entities/${entityId}/timeline-lanes?max_events=${maxEvents}`),
+    }>(`/entities/${entityId}/timeline-lanes?${q.toString()}`)
+  },
 
-  getTimeline: (entityId: string, page = 1, source = '', type = '', from?: string | null, to?: string | null) => {
+  getTimeline: (entityId: string, page = 1, source = '', type = '', from?: string | null, to?: string | null, minConfidence?: number | null) => {
     let q = `/entities/${entityId}/timeline?page=${page}&per_page=50`
-    if (source) q += `&source=${source}`
-    if (type) q += `&event_type=${type}`
+    if (source) q += `&source=${encodeURIComponent(source)}`
+    if (type) q += `&event_type=${encodeURIComponent(type)}`
     if (from) q += `&from=${encodeURIComponent(from)}`
     if (to) q += `&to=${encodeURIComponent(to)}`
+    if (minConfidence != null) q += `&min_confidence=${minConfidence}`
     return get<Paginated<TimelineEvent>>(q)
   },
 
