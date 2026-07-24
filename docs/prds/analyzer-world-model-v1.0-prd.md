@@ -198,7 +198,7 @@
 ### Phase 4: Person-First Dashboard
 **Goal**: Make the analyzer usable as the main investigation surface.
 - [x] Redesign person overview with accounts, tiers, confidence, latest activity, and evidence summary.
-- [ ] Add timeline tab with filters by source, event type, confidence, and date.
+- [x] Add timeline tab with filters by source, event type, confidence, and date.
 - [ ] Add map tab with GPS/photo/route/location inference layers and evidence drawers.
 - [x] Add relationships tab with why/how evidence and confirm/reject controls.
 - [x] Add media/faces tab with owner/person-in-photo correction actions.
@@ -221,28 +221,32 @@
 **Goal**: Prove analyzer can recover from DB loss.
 - [x] Add scheduled analyzer DB dumps to `Z:\unifiedanalyzer\backups\db`.
 - [x] Implement retention: 7 daily, 4 weekly, 3 monthly.
-- [ ] Run restore into scratch DB.
-- [ ] Replay decision logs into scratch DB.
+- [x] Run restore into scratch DB.
+- [x] Replay decision logs into scratch DB.
 - [ ] Recompute derived scores/clusters/timelines.
-- [ ] Produce recovery gap report.
+- [x] Produce recovery gap report.
 - **Deliverables**: Backup job, replay drill, recovery report.
 - **Time**: 3-5 days.
 
 ---
 
-## Implementation Status - 2026-07-23
+## Implementation Status - 2026-07-24
 
 - Decision JSONL outbox retry is implemented in the scheduler and surfaced in `/api/health`.
 - Person pages now include a read-only Decisions tab backed by `/api/entities/{entity_id}/decisions`, showing audit actions, involved entities, payload detail, and JSONL durability.
 - Connections now expose relationship evidence with one-click confirm/reject controls backed by `/api/entities/relationship-decision`; decisions write to audit DB rows and append-only JSONL.
 - Person pages now include a Media/Faces tab backed by `/api/entities/{entity_id}/media-faces`, with account-linked media, face links, and owner/person-in-photo confirm/reject actions wired to durable media decision events.
-- Timeline now supports source and event-type filters plus the existing date brush. Confidence filtering is still pending because `timeline_events` does not currently store a confidence field.
+- Timeline now supports source, event-type, confidence, and date filters. Confidence is derived from semantic metadata when present, with `entity_platform_links.confidence` as a source-attribution fallback; unknown rows remain visible as unscored unless a confidence floor is selected.
 - Map geo payloads now classify route polylines, GPS starts, venue tags, venue geocodes, and message locations with confidence and source references; the map drawer shows those details before confirm/reject actions. A normalized durable location-evidence table is still pending.
 - Platform links now show link confidence and expose a source-confidence adjustment menu backed by `/api/entities/{entity_id}/source-confidence`.
 - Person pages now open on an Overview tab that summarizes confidence, account spread, identity evidence, latest activity, mapped evidence counts, relationship leads, and decision count before the deeper tabs.
 - Replay apply safely restores audit rows, dismissed identity candidates, same-person relationship confirm/reject labels, target tiers, notes, and source-confidence adjustments. Merge/split, location decisions, and media/person-in-photo decisions still require derived-table rebuilds or future normalized destination tables.
 - Live decision replay dry-run on 2026-07-23 scanned 42 legacy JSONL decisions: `Invalid=0`, `Unresolved=42`. These were old `dismiss_match`/`merge_entities` events with empty payloads and no stable platform refs, so replay now reports them correctly instead of treating them as schema-invalid.
-- The next recovery milestone is a scratch restore drill: restore analyzer DB dump, replay decisions, recompute derived tables, and produce a gap report.
+- Scheduler now mounts `Z:\unifiedanalyzer\decisions` at `/app/decisions`, so scheduler-side recovery drills and replay tools read the same durable JSONL as the API.
+- Live recovery drill on 2026-07-24 restored `/app/backups/db/daily/unifiedanalyzer_daily_20260723T074929Z.dump` into scratch DB `ua_restore_drill_20260724_011451` in `2292.021s`, then dropped the scratch DB. Restored table counts included `entities=8849`, `entity_platform_links=9648`, `identity_labels=75`, `audit_log=42`, `analysis_runs=358`, and `timeline_events=9443756`.
+- The drill intentionally skipped derived restore items `TABLE DATA public timeline_embeddings` and `idx_timeline_emb_hnsw`; those are rebuildable artifacts, not source-of-truth decision rows.
+- The same drill replayed `/app/decisions` and scanned 42 legacy JSONL decisions: `Invalid=0`, `Ambiguous=0`, `Unresolved=42`, `Restorable=0`. The restored backup already contained the 42 audit rows, but JSONL effects were skipped because the legacy events do not include stable platform references. The gap report lists derived rebuild needs for `identity_scores=42`, `review_candidates=28`, `entity_graph=14`, and `timeline_events=14`.
+- The remaining recovery milestone is proving replay with new-schema decisions that include stable references, then running a derived-table recompute pass after restore.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20
