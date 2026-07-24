@@ -158,7 +158,7 @@
 
 ### User Acceptance
 - [ ] The user can answer: who is this person, why do we think so, what is confirmed, what is rejected, where were they, and who are they connected to.
-- [ ] A DB wipe does not lose human review decisions after replay from JSONL.
+- [x] A DB wipe does not lose new-schema human review decisions after replay from JSONL; legacy empty-payload decisions are reported as unresolved review items instead of being silently dropped.
 - [x] Priority propagation to collector is explainable and does not silently merge identities.
 
 ## Execution Phases
@@ -254,7 +254,11 @@
 - Recovery drill reports now include a structured `derived_rebuild_plan` that maps replay-required rebuilds to real pipeline phases and commands. Passing `--recompute-derived` runs `python -m src.main full` against the scratch DB URL after replay, so derived scores, clusters, timelines, graph views, and face-derived views can be proven without touching production. Large skipped `timeline_embeddings` remain an explicit `python -m src.main embed-backfill` follow-up because a full embedding drain can be multi-hour.
 - Analyzer media resolution now accepts collector paths stored as `/media/...`, `/vault/media/...`, and Windows `Z:\unifiedcollector\media\...`, rebasing them into the analyzer container's mounted `/app/collector_root/media` path before thumbnail, face-crop, media-analysis, and face-worker access. This fixes dashboard rendering for new vault-backed collector blobs.
 - Face gallery prefilters include vault-backed collector media paths, and face-worker collector ingest now dedupes by stable collector `media_items.id` in addition to file path so path migrations do not create duplicate `faces.embedding_id` errors.
-- The remaining recovery milestone is proving replay with new-schema decisions that include stable references, then running a live scratch drill with `--recompute-derived` and any needed `embed-backfill` follow-up.
+- A synthetic new-schema replay probe on 2026-07-24 used a stable Instagram reference (`platform_id=100105791395741`, `platform_username=tan`) and proved decision replay can resolve changed entity IDs from durable references: dry-run scanned 1 event with `Restorable=1`, `Unresolved=0`, `Ambiguous=0`, `Invalid=0`.
+- A second live scratch drill on 2026-07-24 restored `/app/backups/db/daily/unifiedanalyzer_daily_20260724T082932Z.dump` into scratch DB `ua_restore_drill_20260724_092518` in `2938.54s`, then dropped the scratch DB. Restored table counts included `entities=8895`, `entity_platform_links=9694`, `identity_labels=84`, `audit_log=42`, `analysis_runs=365`, and `timeline_events=9454269`.
+- The same drill replayed the synthetic new-schema decision with `audit_applied=1`, `effect_applied=1`, `effect_skipped_unresolved=0`, and `effect_unsupported=0`. The durable report was copied to `Z:\unifiedanalyzer\exports\recovery_drills\recovery_probe_20260724_172544.json`.
+- The `--recompute-derived` step ran for `7204s` and timed out late after completing major phases including interaction graph, account proximity, alert engine, behavioral profiles, WhatsApp and Telegram group graphs, Strava patterns, bio NLP, shared life context, graph overlap, bio mentions, location inference, and content fingerprinting. This is a derived recompute duration/resumability gap, not decision-log data loss.
+- The remaining recovery milestone is making scratch derived recompute bounded/resumable or raising its timeout safely, then running the explicit `python -m src.main embed-backfill` follow-up for skipped `timeline_embeddings`.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20
