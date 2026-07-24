@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from src.db.connection import get_analyzer_pool, get_collector_pool
+from src.pipeline.face_bridge_audit import audit_face_bridge_collisions
 
 router = APIRouter(tags=["health"])
 
@@ -20,6 +21,13 @@ async def health_check():
             "latest_jsonl_written_at": None,
             "latest_jsonl_error_at": None,
             "latest_jsonl_error": None,
+        },
+        "face_bridge_audit": {
+            "available": None,
+            "ok": None,
+            "face_entity_collisions": None,
+            "cluster_entity_collisions": None,
+            "samples": {"faces": [], "clusters": []},
         },
         "entity_count": 0,
         "alert_count_unread": 0,
@@ -122,6 +130,11 @@ async def health_check():
                 }
                 if pending or errors:
                     status["status"] = "degraded"
+
+            face_audit = await audit_face_bridge_collisions(conn, sample_limit=5)
+            status["face_bridge_audit"] = face_audit
+            if face_audit.get("ok") is not True:
+                status["status"] = "degraded"
 
     except Exception as e:
         status["analyzer_db"] = f"error: {e}"

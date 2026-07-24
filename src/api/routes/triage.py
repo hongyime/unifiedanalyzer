@@ -18,6 +18,7 @@ from fastapi import APIRouter
 from src.db.connection import get_analyzer_pool
 from src.api.face_lookup import representative_faces, face_crop_url
 from src.merge_candidates import merge_candidate_min_weight
+from src.pipeline.face_bridge_audit import audit_face_bridge_collisions
 
 router = APIRouter(tags=["triage"])
 
@@ -97,6 +98,8 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
             LIMIT $1
         """, new_limit)
 
+        face_bridge_audit = await audit_face_bridge_collisions(conn, sample_limit=3)
+
         ids: set[str] = set()
         for r in cand_rows:
             ids.add(str(r["entity_a_id"])); ids.add(str(r["entity_b_id"]))
@@ -150,6 +153,13 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
             "multi_platform_pct": round(100 * multi / total) if total else 0,
             "merge_backlog": backlog,
             "unread_alerts": unread,
+            "face_bridge_audit": {
+                "available": face_bridge_audit.get("available"),
+                "ok": face_bridge_audit.get("ok"),
+                "face_entity_collisions": face_bridge_audit.get("face_entity_collisions"),
+                "cluster_entity_collisions": face_bridge_audit.get("cluster_entity_collisions"),
+                "samples": face_bridge_audit.get("samples", {}),
+            },
         },
         "merge_candidates": merge_candidates,
         "alerts": alerts,

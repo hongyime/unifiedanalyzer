@@ -242,6 +242,7 @@
 - Intersect/co-presence now attaches the same evidence keys to physical points, materializes bounded point sets into `location_evidence`, hides rejected/suppressed points, and includes registry-only analyzer evidence such as drive EXIF GPS.
 - The person map tab now includes a location evidence timeline derived from the normalized map payload, so routes, pins, EXIF GPS, and message locations are visible as a where/when list as well as map layers.
 - Remaining physical-world gaps: caption-derived/inferred location producers backed by the normalized location evidence registry.
+- Face bridge collision audit now reports direct face-to-multiple-entity and cluster-to-multiple-entity collisions in `/api/health` and triage coverage. This is read-only visibility before adding any hard schema constraint or propagation gate.
 - Platform links now show link confidence and expose a source-confidence adjustment menu backed by `/api/entities/{entity_id}/source-confidence`.
 - Person pages now open on an Overview tab that summarizes confidence, account spread, identity evidence, latest activity, mapped evidence counts, relationship leads, and decision count before the deeper tabs.
 - Replay apply safely restores audit rows, dismissed identity candidates, same-person relationship confirm/reject labels, location confirm/reject decisions, target tiers, notes, and source-confidence adjustments. Merge/split and media/person-in-photo decisions still require derived-table rebuilds or future normalized destination tables.
