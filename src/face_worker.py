@@ -668,7 +668,7 @@ def relink_entity_faces(limit: int | None = None) -> dict:
     """
     from sqlalchemy import create_engine, text
 
-    stats = {"faces_checked": 0, "linked": 0, "junk_entity_faces": 0}
+    stats = {"faces_checked": 0, "linked": 0, "junk_entity_faces": 0, "junk_entity_faces_purged": 0}
     analyzer_engine = create_engine(
         analyzer_sqlalchemy_url(),
         connect_args={"options": f"-csearch_path={FACE_DB_SCHEMA},public"},
@@ -743,6 +743,20 @@ def relink_entity_faces(limit: int | None = None) -> dict:
                 "JOIN faces f ON f.id = ef.face_id "
                 "WHERE COALESCE(f.is_junk, false)"
             )).scalar() or 0)
+        if stats["junk_entity_faces"]:
+            with analyzer_engine.begin() as aconn:
+                stats["junk_entity_faces_purged"] = int(aconn.execute(text(
+                    "WITH d AS (DELETE FROM public.entity_faces ef "
+                    "USING faces f WHERE ef.face_id = f.id AND COALESCE(f.is_junk, false) "
+                    "RETURNING ef.face_id) "
+                    "SELECT COUNT(*) FROM d"
+                )).scalar() or 0)
+            with analyzer_engine.connect() as aconn:
+                stats["junk_entity_faces"] = int(aconn.execute(text(
+                    "SELECT COUNT(*) FROM public.entity_faces ef "
+                    "JOIN faces f ON f.id = ef.face_id "
+                    "WHERE COALESCE(f.is_junk, false)"
+                )).scalar() or 0)
         assert stats["junk_entity_faces"] == 0, (
             f"entity_faces has {stats['junk_entity_faces']} junk-linked face(s)"
         )

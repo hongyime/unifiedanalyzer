@@ -108,6 +108,14 @@ def test_face_worker_dedupes_collector_media_by_stable_media_id():
     assert source.count("done_media_ids.add(r.id)") >= 2
 
 
+def test_face_worker_relink_purges_junk_entity_faces():
+    source = (REPO_ROOT / "src" / "face_worker.py").read_text(encoding="utf-8")
+
+    assert "\"junk_entity_faces_purged\"" in source
+    assert "DELETE FROM public.entity_faces ef" in source
+    assert "COALESCE(f.is_junk, false)" in source
+
+
 def test_face_signals_ignore_contested_clusters():
     tier1 = (REPO_ROOT / "src" / "pipeline" / "media_analysis_tier1.py").read_text(encoding="utf-8")
     pair = (REPO_ROOT / "src" / "pipeline" / "face_pair_signals.py").read_text(encoding="utf-8")
