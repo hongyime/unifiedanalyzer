@@ -60,6 +60,7 @@ for _d in (PDF_IMAGE_DIR, VIDEO_FRAME_DIR, MODEL_DIR):
 
 
 _DERIVED_MARKER = "media_derived/"
+_COLLECTOR_MEDIA_SEGMENT_RE = re.compile(r"(?:^|/)media/")
 
 
 def resolve_media_path(file_path: str | None) -> Path | None:
@@ -93,11 +94,14 @@ def resolve_media_path(file_path: str | None) -> Path | None:
             full = (MEDIA_DERIVED_PATH / tail).resolve()
             full.relative_to(MEDIA_DERIVED_PATH)
         else:
-            # Collector media: drop any drive letter ("z:/") + leading slashes,
-            # leaving the "media/..." tail to re-root under COLLECTOR_MEDIA_ROOT.
-            rel = raw.lstrip("/")
-            if len(rel) >= 2 and rel[1] == ":":
-                rel = rel[2:].lstrip("/")
+            # Collector media: keep only the path segment starting at
+            # "media/...". This handles container paths (/media, /vault/media),
+            # Windows host paths (Z:/unifiedcollector/media), and already
+            # relative media paths without trusting arbitrary leading folders.
+            match = _COLLECTOR_MEDIA_SEGMENT_RE.search(raw)
+            if not match:
+                return None
+            rel = raw[match.end() - len("media/"):].lstrip("/")
             full = (Path(COLLECTOR_MEDIA_ROOT) / rel).resolve()
             full.relative_to(_MEDIA_CONFINEMENT_ROOT)
     except (ValueError, OSError):

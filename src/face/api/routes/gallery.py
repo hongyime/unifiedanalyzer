@@ -40,6 +40,9 @@ def _servable_media_filter():
     """
     return or_(
         Image.file_path.like("/media/%"),
+        Image.file_path.like("/vault/media/%"),
+        Image.file_path.ilike("%/media/%"),
+        Image.file_path.ilike("%\\media\\%"),
         Image.file_path.ilike("%media_derived/%"),
     )
 
@@ -92,7 +95,15 @@ def list_clusters(
     face crop. This is the real grouping until the engine's identities populate."""
     servable_sql = ""
     if not include_unreachable:
-        servable_sql = "AND (i.file_path LIKE '/media/%' OR i.file_path ILIKE '%media_derived/%')"
+        servable_sql = """
+              AND (
+                   i.file_path LIKE '/media/%'
+                OR i.file_path LIKE '/vault/media/%'
+                OR i.file_path ILIKE '%/media/%'
+                OR i.file_path ILIKE '%\\media\\%'
+                OR i.file_path ILIKE '%media_derived/%'
+              )
+        """
     rows = db.execute(text(f"""
         WITH eligible AS (
             SELECT f.id, f.cluster_id, f.quality_score
