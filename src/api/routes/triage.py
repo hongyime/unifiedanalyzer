@@ -102,7 +102,8 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
 
         ids: set[str] = set()
         for r in cand_rows:
-            ids.add(str(r["entity_a_id"])); ids.add(str(r["entity_b_id"]))
+            ids.add(str(r["entity_a_id"]))
+            ids.add(str(r["entity_b_id"]))
         for r in alert_rows:
             if r["entity_id"]:
                 ids.add(str(r["entity_id"]))
@@ -158,6 +159,7 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
                 "ok": face_bridge_audit.get("ok"),
                 "face_entity_collisions": face_bridge_audit.get("face_entity_collisions"),
                 "cluster_entity_collisions": face_bridge_audit.get("cluster_entity_collisions"),
+                "contested_cluster_count": face_bridge_audit.get("contested_cluster_count"),
                 "samples": face_bridge_audit.get("samples", {}),
             },
         },

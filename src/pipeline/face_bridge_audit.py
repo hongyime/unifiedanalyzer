@@ -5,6 +5,15 @@ from datetime import datetime
 from typing import Any
 
 
+_UNSAFE_CLUSTER_METHODS = (
+    "cluster_propagation",
+    "drive_cross_ref",
+    "drive_cross_ref_knn",
+    "face_cluster",
+    "knn_propagation",
+)
+
+
 def _as_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -45,8 +54,11 @@ def _cluster_sample(row: Any) -> dict:
 async def audit_face_bridge_collisions(conn, sample_limit: int = 5) -> dict:
     """Return direct face and cluster collisions in ``entity_faces``.
 
-    A collision means a future propagation pass could treat two entities as the
-    same real person unless guarded. This function is intentionally read-only.
+    A direct face collision is always unsafe: one face crop should not map to
+    multiple entities. A cluster collision is only health-blocking when it
+    contains propagated/derived rows; direct anchors in the same cluster mark the
+    cluster contested, and downstream face-derived builders already fence those
+    clusters off. This function is intentionally read-only.
     """
     limit = max(0, min(int(sample_limit or 0), 50))
     try:
@@ -60,7 +72,7 @@ async def audit_face_bridge_collisions(conn, sample_limit: int = 5) -> dict:
             SELECT count(*) FROM face_collisions
         """) or 0)
 
-        cluster_collision_count = int(await conn.fetchval("""
+        contested_cluster_count = int(await conn.fetchval("""
             WITH cluster_collisions AS (
                 SELECT f.cluster_id
                 FROM facetracker.faces f
@@ -72,6 +84,20 @@ async def audit_face_bridge_collisions(conn, sample_limit: int = 5) -> dict:
             )
             SELECT count(*) FROM cluster_collisions
         """) or 0)
+
+        unsafe_cluster_collision_count = int(await conn.fetchval("""
+            WITH unsafe_cluster_collisions AS (
+                SELECT f.cluster_id
+                FROM facetracker.faces f
+                JOIN public.entity_faces ef ON ef.face_id = f.id
+                WHERE f.cluster_id IS NOT NULL
+                  AND NOT COALESCE(f.is_junk, FALSE)
+                GROUP BY f.cluster_id
+                HAVING count(DISTINCT ef.entity_id) > 1
+                   AND bool_or(ef.method = ANY($1::text[]))
+            )
+            SELECT count(*) FROM unsafe_cluster_collisions
+        """, list(_UNSAFE_CLUSTER_METHODS)) or 0)
 
         face_rows = await conn.fetch("""
             SELECT
@@ -91,7 +117,30 @@ async def audit_face_bridge_collisions(conn, sample_limit: int = 5) -> dict:
             LIMIT $1
         """, limit)
 
-        cluster_rows = await conn.fetch("""
+        unsafe_cluster_rows = await conn.fetch("""
+            SELECT
+                f.cluster_id,
+                count(DISTINCT ef.entity_id)::int AS entity_count,
+                count(DISTINCT f.id)::int AS face_count,
+                array_agg(DISTINCT ef.entity_id::text ORDER BY ef.entity_id::text) AS entity_ids,
+                array_agg(DISTINCT e.canonical_name ORDER BY e.canonical_name)
+                    FILTER (WHERE e.canonical_name IS NOT NULL) AS entity_names,
+                array_agg(DISTINCT ef.method ORDER BY ef.method)
+                    FILTER (WHERE ef.method IS NOT NULL) AS methods,
+                max(ef.created_at) AS latest_created_at
+            FROM facetracker.faces f
+            JOIN public.entity_faces ef ON ef.face_id = f.id
+            LEFT JOIN public.entities e ON e.id = ef.entity_id
+            WHERE f.cluster_id IS NOT NULL
+              AND NOT COALESCE(f.is_junk, FALSE)
+            GROUP BY f.cluster_id
+            HAVING count(DISTINCT ef.entity_id) > 1
+               AND bool_or(ef.method = ANY($2::text[]))
+            ORDER BY entity_count DESC, face_count DESC, f.cluster_id
+            LIMIT $1
+        """, limit, list(_UNSAFE_CLUSTER_METHODS))
+
+        contested_cluster_rows = await conn.fetch("""
             SELECT
                 f.cluster_id,
                 count(DISTINCT ef.entity_id)::int AS entity_count,
@@ -119,16 +168,19 @@ async def audit_face_bridge_collisions(conn, sample_limit: int = 5) -> dict:
             "error": str(exc),
             "face_entity_collisions": None,
             "cluster_entity_collisions": None,
-            "samples": {"faces": [], "clusters": []},
+            "contested_cluster_count": None,
+            "samples": {"faces": [], "clusters": [], "contested_clusters": []},
         }
 
     return {
         "available": True,
-        "ok": face_collision_count == 0 and cluster_collision_count == 0,
+        "ok": face_collision_count == 0 and unsafe_cluster_collision_count == 0,
         "face_entity_collisions": face_collision_count,
-        "cluster_entity_collisions": cluster_collision_count,
+        "cluster_entity_collisions": unsafe_cluster_collision_count,
+        "contested_cluster_count": contested_cluster_count,
         "samples": {
             "faces": [_face_sample(r) for r in face_rows],
-            "clusters": [_cluster_sample(r) for r in cluster_rows],
+            "clusters": [_cluster_sample(r) for r in unsafe_cluster_rows],
+            "contested_clusters": [_cluster_sample(r) for r in contested_cluster_rows],
         },
     }
