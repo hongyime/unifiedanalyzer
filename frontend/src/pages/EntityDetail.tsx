@@ -1358,6 +1358,51 @@ export default function EntityDetailPage() {
                 </div>
               </div>
             )}
+            {geo.events && geo.events.length > 0 && (
+              <div className="mt-3 border-t border-border pt-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-sm font-semibold">Location evidence</div>
+                  <div className="text-xs text-text-muted">{geo.events.length} latest</div>
+                </div>
+                <div className="max-h-72 space-y-1 overflow-auto pr-1">
+                  {geo.events.slice(0, 80).map((event) => (
+                    <button
+                      key={`${event.evidence_key || event.source_record_id || event.label}-${event.kind}`}
+                      type="button"
+                      className="grid w-full grid-cols-[112px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-hover"
+                      onClick={() => setSelectedGeoEvent({
+                        kind: event.kind,
+                        label: event.label,
+                        source: event.source,
+                        occurred_at: event.occurred_at,
+                        lat: event.lat ?? undefined,
+                        lng: event.lng ?? undefined,
+                        route_type: event.kind === 'route' ? event.evidence_type : undefined,
+                        point_count: undefined,
+                        start: event.lat != null && event.lng != null ? [event.lat, event.lng] : null,
+                        end: event.end_lat != null && event.end_lng != null ? [event.end_lat, event.end_lng] : null,
+                        evidence_type: event.evidence_type,
+                        evidence_key: event.evidence_key,
+                        status: event.status,
+                        confidence: event.confidence,
+                        source_table: event.source_table,
+                        source_record_id: event.source_record_id,
+                      })}
+                    >
+                      <span className="truncate text-text-muted">
+                        {event.occurred_at ? formatDate(event.occurred_at) : 'No time'}
+                      </span>
+                      <span className="truncate text-text-secondary">
+                        {event.label || evidenceTypeLabel(event.evidence_type)}
+                      </span>
+                      <span className="rounded-full bg-hover px-2 py-0.5 text-text-muted">
+                        {event.source}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </Card>
         ) : (
           <EmptyState

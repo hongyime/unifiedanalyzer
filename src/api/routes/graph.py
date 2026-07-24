@@ -127,6 +127,36 @@ def _downsample(pts: list, target: int = 120) -> list:
     return [pts[int(i * step)] for i in range(target)] + [pts[-1]]
 
 
+def _geo_event(item: dict, kind: str) -> dict:
+    occurred_at = item.get("occurred_at") or item.get("date")
+    points = item.get("points") if isinstance(item.get("points"), list) else []
+    start = points[0] if points else None
+    end = points[-1] if points else None
+    return {
+        "kind": kind,
+        "evidence_key": item.get("evidence_key"),
+        "source": item.get("source"),
+        "evidence_type": item.get("evidence_type"),
+        "label": item.get("label") or item.get("name"),
+        "occurred_at": occurred_at,
+        "lat": item.get("lat") if kind == "point" else (start[0] if start else None),
+        "lng": item.get("lng") if kind == "point" else (start[1] if start else None),
+        "end_lat": end[0] if end else None,
+        "end_lng": end[1] if end else None,
+        "confidence": item.get("confidence"),
+        "status": item.get("status"),
+        "source_table": item.get("source_table"),
+        "source_record_id": item.get("source_record_id"),
+    }
+
+
+def _geo_events(routes: list[dict], points: list[dict], limit: int = 250) -> list[dict]:
+    events = [_geo_event(item, "route") for item in routes]
+    events.extend(_geo_event(item, "point") for item in points)
+    events.sort(key=lambda event: event.get("occurred_at") or "", reverse=True)
+    return events[:limit]
+
+
 @router.get("/entities/{entity_id}/geo")
 async def entity_geo(
     entity_id: str,
@@ -407,9 +437,11 @@ async def entity_geo(
     for item in [*routes, *points]:
         key = str(item.get("evidence_type") or "unknown")
         evidence_counts[key] = evidence_counts.get(key, 0) + 1
+    events = _geo_events(routes, points)
     return {"routes": routes, "points": points,
+            "events": events,
             "counts": {"routes": len(routes), "points": len(points),
-                       "evidence_types": evidence_counts, "suppressed": suppressed}}
+                       "events": len(events), "evidence_types": evidence_counts, "suppressed": suppressed}}
 
 
 @router.get("/entities/{entity_id}/associates")
