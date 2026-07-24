@@ -120,6 +120,10 @@ export function IntersectPanel({ entity }: { entity: EntityDetail }) {
       source: point.source,
       occurred_at: point.occurred_at,
       label: `${point.entity_name || point.entity_id.slice(0, 8)}${point.label ? ` · ${point.label}` : ''}`,
+      evidence_type: point.evidence_type,
+      evidence_key: point.evidence_key,
+      confidence: point.confidence,
+      status: point.status,
     })))
     return { routes: [], points, counts: { routes: 0, points: points.length } }
   }, [result])
@@ -261,6 +265,13 @@ export function IntersectPanel({ entity }: { entity: EntityDetail }) {
             </div>
             {result.collector_skipped && (
               <div className="mt-2 text-xs text-warning">Collector reads skipped.</div>
+            )}
+            {(result.counts.physical_points_suppressed || result.counts.physical_points_from_registry) && (
+              <div className="mt-2 text-xs text-text-muted">
+                {result.counts.physical_points_suppressed ? `${result.counts.physical_points_suppressed} rejected/suppressed points hidden` : ''}
+                {result.counts.physical_points_suppressed && result.counts.physical_points_from_registry ? ' · ' : ''}
+                {result.counts.physical_points_from_registry ? `${result.counts.physical_points_from_registry} registry-only points included` : ''}
+              </div>
             )}
           </Card>
 

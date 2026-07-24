@@ -288,6 +288,10 @@ export interface IntersectionEvidencePoint {
   lat: number
   lng: number
   label: string | null
+  evidence_type?: string | null
+  evidence_key?: string | null
+  confidence?: number | null
+  status?: string | null
 }
 
 export interface PhysicalIntersection {
@@ -329,6 +333,10 @@ export interface IntersectionResponse {
     physical: number
     digital: number
     physical_points_considered: number
+    physical_points_raw?: number
+    physical_points_suppressed?: number
+    physical_points_materialized?: number
+    physical_points_from_registry?: number
   }
   collector_skipped: boolean
   duration_ms: number

@@ -2,6 +2,7 @@ import bisect
 import json
 import logging
 import math
+import os
 import time
 from datetime import datetime
 from itertools import combinations
@@ -12,6 +13,12 @@ from pydantic import BaseModel, Field
 
 from src.api.face_lookup import face_crop_url, representative_faces
 from src.db.connection import get_analyzer_pool, get_collector_pool
+from src.pipeline.location_evidence import (
+    attach_location_evidence_key,
+    fetch_location_evidence_statuses,
+    is_location_suppressed,
+    upsert_location_evidence_batch,
+)
 
 router = APIRouter(tags=["intersections"])
 logger = logging.getLogger(__name__)
@@ -19,6 +26,7 @@ logger = logging.getLogger(__name__)
 _MAX_PHYSICAL_POINTS_PER_ENTITY = 2500
 _MAX_PHYSICAL_RESULTS = 100
 _MAX_DIGITAL_RESULTS = 200
+_LOCATION_INTERSECTION_MATERIALIZE_LIMIT = int(os.getenv("LOCATION_INTERSECTION_MATERIALIZE_LIMIT", "5000"))
 
 
 class IntersectRequest(BaseModel):
@@ -79,8 +87,14 @@ def _point(
     lat: float,
     lng: float,
     label: str | None,
+    *,
+    evidence_type: str = "gps",
+    source_table: str | None = None,
+    confidence: float | None = None,
+    evidence_key: str | None = None,
+    status: str | None = None,
 ) -> dict:
-    return {
+    point = {
         "entity_id": entity_id,
         "source": source,
         "record_id": record_id,
@@ -88,7 +102,15 @@ def _point(
         "lat": lat,
         "lng": lng,
         "label": label,
+        "evidence_type": evidence_type,
+        "source_table": source_table,
+        "source_record_id": record_id,
+        "confidence": confidence,
+        "status": status,
     }
+    if evidence_key:
+        point["evidence_key"] = evidence_key
+    return point
 
 
 def _serialise_point(point: dict, entity_names: dict[str, str | None]) -> dict:
@@ -101,6 +123,10 @@ def _serialise_point(point: dict, entity_names: dict[str, str | None]) -> dict:
         "lat": point["lat"],
         "lng": point["lng"],
         "label": point["label"],
+        "evidence_type": point.get("evidence_type"),
+        "evidence_key": point.get("evidence_key"),
+        "confidence": point.get("confidence"),
+        "status": point.get("status"),
     }
 
 
@@ -225,7 +251,13 @@ async def _fetch_physical_points(
                 for row in rows:
                     latlng = _parse_latlng(row["latlng"])
                     if latlng and row["occurred_at"]:
-                        points.append(_point(row["entity_id"], "strava", row["record_id"], row["occurred_at"], latlng[0], latlng[1], row["label"]))
+                        points.append(_point(
+                            row["entity_id"], "strava", row["record_id"], row["occurred_at"],
+                            latlng[0], latlng[1], row["label"],
+                            evidence_type="gps_start",
+                            source_table="strava_activities",
+                            confidence=0.7,
+                        ))
 
             ig_pairs = [
                 (str(link["platform_id"]), link["entity_id"])
@@ -263,7 +295,13 @@ async def _fetch_physical_points(
             """, *params)
                 for row in rows:
                     if row["occurred_at"]:
-                        points.append(_point(row["entity_id"], "instagram", row["record_id"], row["occurred_at"], float(row["lat"]), float(row["lng"]), row["label"]))
+                        points.append(_point(
+                            row["entity_id"], "instagram", row["record_id"], row["occurred_at"],
+                            float(row["lat"]), float(row["lng"]), row["label"],
+                            evidence_type="venue_tag",
+                            source_table="instagram_posts",
+                            confidence=0.75,
+                        ))
 
             tg_pairs = [
                 (str(link["platform_id"]), link["entity_id"])
@@ -302,7 +340,13 @@ async def _fetch_physical_points(
                 LIMIT ${len(params)}
             """, *params)
                 for row in rows:
-                    points.append(_point(row["entity_id"], "telegram", row["record_id"], row["occurred_at"], float(row["lat"]), float(row["lng"]), row["label"]))
+                    points.append(_point(
+                        row["entity_id"], "telegram", row["record_id"], row["occurred_at"],
+                        float(row["lat"]), float(row["lng"]), row["label"],
+                        evidence_type="message_location",
+                        source_table="telegram_message_locations",
+                        confidence=0.9,
+                    ))
 
             wa_pairs = [
                 (str(link["platform_id"]), link["entity_id"])
@@ -341,12 +385,131 @@ async def _fetch_physical_points(
                 LIMIT ${len(params)}
             """, *params)
                 for row in rows:
-                    points.append(_point(row["entity_id"], "whatsapp", row["record_id"], row["occurred_at"], float(row["lat"]), float(row["lng"]), row["label"]))
+                    points.append(_point(
+                        row["entity_id"], "whatsapp", row["record_id"], row["occurred_at"],
+                        float(row["lat"]), float(row["lng"]), row["label"],
+                        evidence_type="message_location",
+                        source_table="whatsapp_message_locations",
+                        confidence=0.9,
+                    ))
     except Exception as exc:  # noqa: BLE001 - collector is optional for this API
         logger.warning("intersections physical collector read skipped: %s", exc)
         return [], True
 
     return points, False
+
+
+def _location_item_from_point(point: dict) -> dict:
+    occurred_at = point.get("occurred_at")
+    return {
+        "source": point.get("source"),
+        "evidence_type": point.get("evidence_type") or "gps",
+        "source_table": point.get("source_table"),
+        "source_record_id": point.get("source_record_id") or point.get("record_id"),
+        "occurred_at": occurred_at.isoformat() if isinstance(occurred_at, datetime) else occurred_at,
+        "lat": point.get("lat"),
+        "lng": point.get("lng"),
+        "label": point.get("label"),
+        "confidence": point.get("confidence"),
+        "evidence_key": point.get("evidence_key"),
+    }
+
+
+async def _apply_location_registry(points: list[dict]) -> tuple[list[dict], int, int]:
+    """Attach deterministic evidence keys and drop rejected/suppressed points."""
+    if not points:
+        return [], 0, 0
+    keyed: list[dict] = []
+    for point in points:
+        item = attach_location_evidence_key(point["entity_id"], _location_item_from_point(point))
+        keyed.append({**point, "evidence_key": item["evidence_key"]})
+
+    materialized = 0
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        if len(keyed) <= _LOCATION_INTERSECTION_MATERIALIZE_LIMIT:
+            by_entity: dict[str, list[dict]] = {}
+            for point in keyed:
+                by_entity.setdefault(point["entity_id"], []).append(_location_item_from_point(point))
+            for entity_id, items in by_entity.items():
+                materialized += await upsert_location_evidence_batch(conn, entity_id, items)
+        statuses = await fetch_location_evidence_statuses(
+            conn,
+            [point["evidence_key"] for point in keyed],
+        )
+
+    visible: list[dict] = []
+    suppressed = 0
+    for point in keyed:
+        status = statuses.get(point["evidence_key"], {})
+        point.update(status)
+        if is_location_suppressed(point.get("status")):
+            suppressed += 1
+            continue
+        visible.append(point)
+    return visible, suppressed, materialized
+
+
+async def _fetch_registry_physical_points(
+    entity_ids: list[str],
+    existing_keys: set[str],
+    from_date: datetime | None,
+    to_date: datetime | None,
+) -> list[dict]:
+    """Fetch analyzer-owned location rows not already covered by collector reads."""
+    pool = get_analyzer_pool()
+    params: list[Any] = [entity_ids]
+    filters = [
+        "entity_id = ANY($1::uuid[])",
+        "lat IS NOT NULL",
+        "lng IS NOT NULL",
+        "occurred_at IS NOT NULL",
+        "status NOT IN ('rejected', 'suppressed')",
+    ]
+    if from_date:
+        filters.append(f"occurred_at >= ${len(params) + 1}")
+        params.append(from_date)
+    if to_date:
+        filters.append(f"occurred_at <= ${len(params) + 1}")
+        params.append(to_date)
+    params.append(sorted(existing_keys) or [""])
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            SELECT entity_id::text AS entity_id,
+                   evidence_key::text AS evidence_key,
+                   source,
+                   evidence_type,
+                   source_table,
+                   source_record_id,
+                   occurred_at,
+                   lat,
+                   lng,
+                   label,
+                   confidence,
+                   status
+            FROM location_evidence
+            WHERE {' AND '.join(filters)}
+              AND evidence_key::text <> ALL(${len(params)}::text[])
+            ORDER BY occurred_at DESC NULLS LAST
+            LIMIT {_MAX_PHYSICAL_POINTS_PER_ENTITY * max(1, len(entity_ids))}
+        """, *params)
+    return [
+        _point(
+            row["entity_id"],
+            row["source"],
+            row["source_record_id"] or row["evidence_key"],
+            row["occurred_at"],
+            float(row["lat"]),
+            float(row["lng"]),
+            row["label"],
+            evidence_type=row["evidence_type"],
+            source_table=row["source_table"],
+            confidence=float(row["confidence"] or 0),
+            evidence_key=row["evidence_key"],
+            status=row["status"],
+        )
+        for row in rows
+    ]
 
 
 def _physical_intersections(
@@ -702,7 +865,15 @@ async def _intersect(
     start = time.perf_counter()
     ids = _dedupe_ids(entity_ids)
     names, links, faces = await _entity_context(ids)
-    points, physical_collector_skipped = await _fetch_physical_points(ids, links, from_date, to_date)
+    raw_points, physical_collector_skipped = await _fetch_physical_points(ids, links, from_date, to_date)
+    points, suppressed_points, materialized_points = await _apply_location_registry(raw_points)
+    registry_points = await _fetch_registry_physical_points(
+        ids,
+        {point.get("evidence_key") for point in points if point.get("evidence_key")},
+        from_date,
+        to_date,
+    )
+    points.extend(registry_points)
     physical = _physical_intersections(ids, names, points, radius_m, window_minutes)
     digital = await _fetch_analyzer_digital(ids, names, from_date, to_date)
     collector_digital, digital_collector_skipped = await _fetch_collector_digital(ids, names, links)
@@ -727,6 +898,10 @@ async def _intersect(
             "physical": len(physical),
             "digital": min(len(digital), _MAX_DIGITAL_RESULTS),
             "physical_points_considered": len(points),
+            "physical_points_raw": len(raw_points),
+            "physical_points_suppressed": suppressed_points,
+            "physical_points_materialized": materialized_points,
+            "physical_points_from_registry": len(registry_points),
         },
         "collector_skipped": physical_collector_skipped or digital_collector_skipped,
         "duration_ms": duration_ms,

@@ -212,7 +212,7 @@
 - [x] Store confidence and source for each location claim.
 - [x] Link photos to where/when/who when evidence supports it.
 - [ ] Build person-location timeline and map pins.
-- [ ] Build group co-presence claims only when evidence supports same place/time.
+- [x] Build group co-presence claims only when evidence supports same place/time.
 - [x] Add reject/suppress workflow for bad inferences.
 - **Deliverables**: Location evidence registry, map layers, co-presence claims.
 - **Time**: 5-10 days.
@@ -239,7 +239,8 @@
 - Timeline now supports source, event-type, confidence, and date filters. Confidence is derived from semantic metadata when present, with `entity_platform_links.confidence` as a source-attribution fallback; unknown rows remain visible as unscored unless a confidence floor is selected.
 - Map geo payloads now classify route polylines, GPS starts, drive-photo EXIF GPS, venue tags, venue geocodes, Telegram locations, and WhatsApp locations with confidence and source references. The map drawer shows those details before confirm/reject actions.
 - Location evidence is now materialized into analyzer-owned `location_evidence` rows keyed by deterministic `evidence_key`; rejected/suppressed claims stay in the table but are hidden from normal map results.
-- Remaining physical-world gaps: caption-derived/inferred location producers, a first-class person-location timeline, and co-presence claims backed by the normalized location evidence registry.
+- Intersect/co-presence now attaches the same evidence keys to physical points, materializes bounded point sets into `location_evidence`, hides rejected/suppressed points, and includes registry-only analyzer evidence such as drive EXIF GPS.
+- Remaining physical-world gaps: caption-derived/inferred location producers and a first-class person-location timeline backed by the normalized location evidence registry.
 - Platform links now show link confidence and expose a source-confidence adjustment menu backed by `/api/entities/{entity_id}/source-confidence`.
 - Person pages now open on an Overview tab that summarizes confidence, account spread, identity evidence, latest activity, mapped evidence counts, relationship leads, and decision count before the deeper tabs.
 - Replay apply safely restores audit rows, dismissed identity candidates, same-person relationship confirm/reject labels, location confirm/reject decisions, target tiers, notes, and source-confidence adjustments. Merge/split and media/person-in-photo decisions still require derived-table rebuilds or future normalized destination tables.
