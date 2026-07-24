@@ -67,6 +67,33 @@ def main():
                         help="Exit non-zero if replay finds unresolved, ambiguous, or invalid events")
     replay.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     replay.add_argument("--limit", type=int, default=None, help="Limit decision events scanned")
+    recovery = sub.add_parser(
+        "recovery-drill",
+        help="Restore latest analyzer backup into a scratch DB and replay decision JSONL",
+    )
+    recovery.add_argument("--backup-dir", type=str, default=None,
+                          help="Backup root (default: ANALYZER_DB_BACKUP_DIR)")
+    recovery.add_argument("--backup-path", type=str, default=None,
+                          help="Specific backup dump to restore")
+    recovery.add_argument("--database-url", type=str, default=None,
+                          help="Override ANALYZER_DATABASE_URL")
+    recovery.add_argument("--scratch-db", type=str, default=None,
+                          help="Scratch DB name (must start with ua_restore_drill_)")
+    recovery.add_argument("--pg-restore-bin", type=str, default=None,
+                          help="pg_restore binary path/name")
+    recovery.add_argument("--decision-log-dir", type=str, default=None,
+                          help="Decision JSONL directory (default: ANALYZER_DECISION_LOG_DIR)")
+    recovery.add_argument("--decision-limit", type=int, default=None,
+                          help="Limit decision events replayed during the drill")
+    recovery.add_argument("--keep-scratch", action="store_true",
+                          help="Do not drop the scratch DB after the drill")
+    recovery.add_argument("--dry-run", action="store_true",
+                          help="Select backup and scratch DB only; do not restore")
+    recovery.add_argument("--report-path", type=str, default=None,
+                          help="Optional path to write the drill JSON report")
+    recovery.add_argument("--skip-restore-item", action="append", default=None,
+                          help="Skip a matching derived pg_restore item, e.g. idx_timeline_emb_hnsw")
+    recovery.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     outbox = sub.add_parser("decision-outbox", help="Retry pending audit_log -> decision JSONL writes")
     outbox.add_argument("--limit", type=int, default=100, help="Maximum pending rows to retry")
     outbox.add_argument("--json", action="store_true", help="Print machine-readable JSON")
@@ -275,6 +302,46 @@ def main():
             asyncio.run(_run())
         except BackupRequiredError as exc:
             logger.error("%s", exc)
+            sys.exit(2)
+
+    elif args.command == "recovery-drill":
+        from src.pipeline.recovery_drill import (
+            RecoveryDrillError,
+            config_from_env,
+            report_to_json,
+            run_recovery_drill,
+        )
+
+        async def _run():
+            config = config_from_env(
+                backup_dir=args.backup_dir,
+                backup_path=args.backup_path,
+                database_url=args.database_url,
+                scratch_database=args.scratch_db,
+                pg_restore_bin=args.pg_restore_bin,
+                decision_log_dir=args.decision_log_dir,
+                decision_limit=args.decision_limit,
+                keep_scratch=args.keep_scratch,
+                dry_run=args.dry_run,
+                skip_restore_item_patterns=args.skip_restore_item,
+            )
+            report = await run_recovery_drill(config)
+            if args.report_path:
+                from pathlib import Path
+                report_path = Path(args.report_path)
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text(report_to_json(report) + "\n", encoding="utf-8")
+            if args.json:
+                print(report_to_json(report))
+            else:
+                print(report.to_text())
+            if report.error:
+                sys.exit(2)
+
+        try:
+            asyncio.run(_run())
+        except RecoveryDrillError as exc:
+            logger.error("Analyzer recovery drill failed: %s", exc)
             sys.exit(2)
 
     elif args.command == "decision-outbox":
