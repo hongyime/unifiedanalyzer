@@ -88,6 +88,13 @@ function decisionDurability(decision: DecisionHistoryEntry): { status: 'success'
   return { status: 'warning', label: 'JSONL pending' }
 }
 
+function decisionBucket(decision: DecisionHistoryEntry): 'confirmed' | 'rejected' | null {
+  const action = decision.action.toLowerCase()
+  if (action.includes('reject') || action.includes('dismiss')) return 'rejected'
+  if (action.includes('confirm') || action.includes('merge') || action.startsWith('assign')) return 'confirmed'
+  return null
+}
+
 function formatBytes(bytes: number | null | undefined): string {
   if (bytes == null || !Number.isFinite(bytes)) return '—'
   if (bytes < 1024) return `${bytes} B`
@@ -256,6 +263,7 @@ export default function EntityDetailPage() {
   const [relationships, setRelationships] = useState<Relationship[]>([])
   const [overviewRelationships, setOverviewRelationships] = useState<Relationship[]>([])
   const [overviewEvents, setOverviewEvents] = useState<TimelineEvent[]>([])
+  const [overviewDecisions, setOverviewDecisions] = useState<DecisionHistoryEntry[]>([])
   const [interactions, setInteractions] = useState<InteractionPeer[]>([])
   const [actionMsg, setActionMsg] = useState('')
   const [sourceConfidenceBusy, setSourceConfidenceBusy] = useState<string | null>(null)
@@ -276,6 +284,7 @@ export default function EntityDetailPage() {
     setGeo(null)
     setOverviewEvents([])
     setOverviewRelationships([])
+    setOverviewDecisions([])
   }, [id])
   useEffect(() => {
     setSelectedGeoEvent(null)
@@ -388,6 +397,7 @@ export default function EntityDetailPage() {
     if (!id || tab !== 'overview') return
     api.getTimeline(id, 1).then((data) => setOverviewEvents(data.data.slice(0, 5))).catch(() => setOverviewEvents([]))
     api.getRelationships(id).then((data) => setOverviewRelationships(data.data.slice(0, 5))).catch(() => setOverviewRelationships([]))
+    api.getEntityDecisions(id, 12).then((data) => setOverviewDecisions(data.decisions)).catch(() => setOverviewDecisions([]))
   }, [id, tab])
 
   useEffect(() => {
@@ -696,6 +706,19 @@ export default function EntityDetailPage() {
       .slice(0, 6)
   }, [entity?.identity_signals])
 
+  const worldModel = useMemo(() => {
+    const confirmed = overviewDecisions.filter((decision) => decisionBucket(decision) === 'confirmed').slice(0, 3)
+    const rejected = overviewDecisions.filter((decision) => decisionBucket(decision) === 'rejected').slice(0, 3)
+    const missing: string[] = []
+    if (entity && !entity.canonical_name) missing.push('name')
+    if ((entity?.identity_signals.length ?? 0) === 0) missing.push('identity evidence')
+    if (entity && entity.confidence_score < 0.55) missing.push('strong confidence')
+    if (geo && geo.counts.routes + geo.counts.points === 0) missing.push('location evidence')
+    if (overviewRelationships.length === 0) missing.push('relationships')
+    if (decisionsTotal === 0) missing.push('human decisions')
+    return { confirmed, rejected, missing }
+  }, [decisionsTotal, entity, geo, overviewDecisions, overviewRelationships.length])
+
   if (loading) return <LoadingSpinner label="Loading person…" />
   if (!entity) return <EmptyState title="Person not found" description="This entity may have been merged or removed." />
 
@@ -874,6 +897,107 @@ export default function EntityDetailPage() {
                   <span className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-muted">
                     +{entity.platform_links.length - 10}
                   </span>
+                )}
+              </div>
+            </Card>
+
+            <Card title="World model">
+              <div className="grid gap-3 lg:grid-cols-2">
+                <div className="rounded-md border border-border px-3 py-2">
+                  <div className="text-xs font-medium uppercase text-text-muted">Who</div>
+                  <div className="mt-1 text-sm font-semibold text-text-primary">
+                    {entity.canonical_name || '(unnamed)'}
+                  </div>
+                  <div className="mt-1 text-xs text-text-muted">
+                    {LABELS.tier[entity.tier] ?? entity.tier} · {entity.platform_links.length} account{entity.platform_links.length === 1 ? '' : 's'} · {Math.round(entity.confidence_score * 100)}%
+                  </div>
+                </div>
+                <div className="rounded-md border border-border px-3 py-2">
+                  <div className="text-xs font-medium uppercase text-text-muted">Why linked</div>
+                  {signalSummary.length === 0 ? (
+                    <div className="mt-1 text-sm text-text-muted">No identity evidence recorded.</div>
+                  ) : (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {signalSummary.slice(0, 4).map((signal) => (
+                        <span key={signal.label} className="rounded-full bg-info/15 px-2 py-0.5 text-xs text-info" title={signal.label}>
+                          {signal.label} · {Math.round(signal.maxConfidence * 100)}%
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-md border border-border px-3 py-2">
+                  <div className="text-xs font-medium uppercase text-text-muted">Confirmed</div>
+                  {worldModel.confirmed.length === 0 ? (
+                    <div className="mt-1 text-sm text-text-muted">No confirmed decisions recorded.</div>
+                  ) : (
+                    <div className="mt-2 space-y-1">
+                      {worldModel.confirmed.map((decision) => (
+                        <div key={decision.id} className="truncate text-sm text-text-primary" title={decision.summary}>
+                          {decision.summary}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-md border border-border px-3 py-2">
+                  <div className="text-xs font-medium uppercase text-text-muted">Rejected</div>
+                  {worldModel.rejected.length === 0 ? (
+                    <div className="mt-1 text-sm text-text-muted">No rejected decisions recorded.</div>
+                  ) : (
+                    <div className="mt-2 space-y-1">
+                      {worldModel.rejected.map((decision) => (
+                        <div key={decision.id} className="truncate text-sm text-text-primary" title={decision.summary}>
+                          {decision.summary}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-md border border-border px-3 py-2">
+                  <div className="text-xs font-medium uppercase text-text-muted">Where</div>
+                  <div className="mt-1 text-sm text-text-primary">
+                    {geo ? `${geo.counts.routes} route${geo.counts.routes === 1 ? '' : 's'} · ${geo.counts.points} place${geo.counts.points === 1 ? '' : 's'}` : 'Checking location evidence'}
+                  </div>
+                  {geo?.counts.evidence_types && Object.keys(geo.counts.evidence_types).length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {Object.entries(geo.counts.evidence_types).slice(0, 4).map(([type, count]) => (
+                        <span key={type} className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
+                          {evidenceTypeLabel(type)} {count}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-md border border-border px-3 py-2">
+                  <div className="text-xs font-medium uppercase text-text-muted">Connected to</div>
+                  {overviewRelationships.length === 0 ? (
+                    <div className="mt-1 text-sm text-text-muted">No relationship evidence yet.</div>
+                  ) : (
+                    <div className="mt-2 space-y-1">
+                      {overviewRelationships.slice(0, 3).map((relationship) => (
+                        <Link
+                          key={relationship.id}
+                          to={`/entities/${relationship.other_entity_id}`}
+                          className="block truncate text-sm text-text-primary hover:text-info"
+                          title={relationship.why || relationship.relationship_type}
+                        >
+                          {relationship.other_name || relationship.other_entity_id.slice(0, 8)} · {relationship.relationship_type.replace(/_/g, ' ')} · {Math.round(relationship.weight)}%
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1">
+                {worldModel.missing.length === 0 ? (
+                  <StatusBadge status="success" label="evidence complete" />
+                ) : (
+                  worldModel.missing.map((item) => (
+                    <span key={item} className="rounded-full bg-warning/15 px-2 py-0.5 text-xs text-warning">
+                      missing {item}
+                    </span>
+                  ))
                 )}
               </div>
             </Card>

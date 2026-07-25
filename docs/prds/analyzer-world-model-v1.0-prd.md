@@ -157,7 +157,7 @@
 - [x] UI labels distinguish identity evidence, relationship evidence, location evidence, and context.
 
 ### User Acceptance
-- [ ] The user can answer: who is this person, why do we think so, what is confirmed, what is rejected, where were they, and who are they connected to.
+- [x] The user can answer: who is this person, why do we think so, what is confirmed, what is rejected, where were they, and who are they connected to.
 - [x] A DB wipe does not lose new-schema human review decisions after replay from JSONL; legacy empty-payload decisions are reported as unresolved review items instead of being silently dropped.
 - [x] Priority propagation to collector is explainable and does not silently merge identities.
 
@@ -246,6 +246,7 @@
 - Face bridge collision audit now reports direct face-to-multiple-entity and cluster-to-multiple-entity collisions in `/api/health` and triage coverage. Unsafe derived bridge rows are purged from contested clusters, media-owner face attribution is single-face gated, drive kNN cross-reference is drive-only, and face-derived identity/location signals ignore contested clusters.
 - Platform links now show link confidence and expose a source-confidence adjustment menu backed by `/api/entities/{entity_id}/source-confidence`.
 - Person pages now open on an Overview tab that summarizes confidence, account spread, identity evidence, latest activity, mapped evidence counts, relationship leads, and decision count before the deeper tabs.
+- The Overview tab now includes a compact World model block with six operator-facing buckets: Who, Why linked, Confirmed, Rejected, Where, and Connected to. It uses existing entity detail, identity signals, decision history, map counts, and relationship data, plus missing-evidence flags for weak spots that still need review.
 - Replay apply safely restores audit rows, dismissed identity candidates, same-person relationship confirm/reject labels, location confirm/reject decisions, target tiers, notes, and source-confidence adjustments. Merge/split and media/person-in-photo decisions still require derived-table rebuilds or future normalized destination tables.
 - Live decision replay dry-run on 2026-07-23 scanned 42 legacy JSONL decisions: `Invalid=0`, `Unresolved=42`. These were old `dismiss_match`/`merge_entities` events with empty payloads and no stable platform refs, so replay now reports them correctly instead of treating them as schema-invalid.
 - Scheduler now mounts `Z:\unifiedanalyzer\decisions` at `/app/decisions`, so scheduler-side recovery drills and replay tools read the same durable JSONL as the API.
