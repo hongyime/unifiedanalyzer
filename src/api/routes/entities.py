@@ -6,6 +6,7 @@ from fastapi import APIRouter, Query, HTTPException
 from src.db.connection import get_analyzer_pool
 from src.api.face_lookup import representative_faces, face_crop_url
 from src.merge_candidates import merge_candidate_min_weight
+from src.api.routes.uuid_validation import require_uuid
 
 router = APIRouter(tags=["entities"])
 
@@ -369,6 +370,7 @@ async def search_entities(q: str = Query(..., min_length=1), limit: int = Query(
 
 @router.get("/entities/{entity_id}/decisions")
 async def entity_decisions(entity_id: str, limit: int = Query(50, ge=1, le=200)):
+    entity_id = require_uuid(entity_id)
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         exists = await conn.fetchval(
@@ -441,6 +443,7 @@ async def entity_decisions(entity_id: str, limit: int = Query(50, ge=1, le=200))
 
 @router.get("/entities/{entity_id}")
 async def get_entity(entity_id: str):
+    entity_id = require_uuid(entity_id)
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         entity = await conn.fetchrow(

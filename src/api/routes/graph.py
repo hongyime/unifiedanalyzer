@@ -6,6 +6,7 @@ from fastapi import APIRouter, Query
 
 from src.db.connection import get_analyzer_pool, get_collector_pool
 from src.api.face_lookup import representative_faces, face_crop_url
+from src.api.routes.uuid_validation import require_uuid
 from src.merge_candidates import merge_candidate_min_weight
 from src.pipeline.location_evidence import (
     attach_location_evidence_key,
@@ -180,6 +181,7 @@ async def entity_geo(
 ):
     """Geo footprint for the map: Strava route polylines + start points, and
     Instagram tagged-place pins. Reads the collector DB."""
+    entity_id = require_uuid(entity_id)
     analyzer = get_analyzer_pool()
     async with analyzer.acquire() as conn:
         links = await conn.fetch(
@@ -528,6 +530,7 @@ async def entity_associates(entity_id: str, limit: int = Query(40, ge=1, le=100)
     associates are: the posters who tagged them (entity is the tagged person) +
     the people they tagged (entity is the poster). Resolved to analyzer entities
     where possible; otherwise social_users supplies a name/photo."""
+    entity_id = require_uuid(entity_id)
     analyzer = get_analyzer_pool()
     async with analyzer.acquire() as conn:
         links = await conn.fetch(
@@ -636,6 +639,7 @@ async def entity_social_circle(entity_id: str, limit: int = Query(80, ge=1, le=2
     people, so this keeps every association and resolves a best entity match only
     when the associated face is already bridged through public.entity_faces.
     """
+    entity_id = require_uuid(entity_id)
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -687,6 +691,7 @@ async def entity_network(entity_id: str, limit: int = Query(30, ge=1, le=80)):
     """Ego-graph: the entity + its strongest neighbours (edges from
     entity_relationships, any type), each with a face. The client lays this out
     radially; clicking a neighbour recenters the investigation."""
+    entity_id = require_uuid(entity_id)
     pool = get_analyzer_pool()
     min_merge_weight = merge_candidate_min_weight()
     async with pool.acquire() as conn:
@@ -738,6 +743,7 @@ async def entity_network(entity_id: str, limit: int = Query(30, ge=1, le=80)):
 
 @router.get("/entities/{entity_id}/relationships")
 async def get_relationships(entity_id: str):
+    entity_id = require_uuid(entity_id)
     pool = get_analyzer_pool()
     min_merge_weight = merge_candidate_min_weight()
     async with pool.acquire() as conn:
@@ -783,6 +789,7 @@ async def get_interactions(
     from_date: datetime | None = Query(None, alias="from"),
     to_date: datetime | None = Query(None, alias="to"),
 ):
+    entity_id = require_uuid(entity_id)
     pool = get_analyzer_pool()
     params: list = [entity_id]
     conditions = []

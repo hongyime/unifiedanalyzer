@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from src.db.connection import get_analyzer_pool
 from src.pipeline.identity_calibration import record_label
 from src.pipeline.location_evidence import apply_location_decision
+from src.api.routes.uuid_validation import require_uuid, require_uuid_list
 from src.util.audit_log import append_audit
 
 router = APIRouter(tags=["entity-actions"])
@@ -104,6 +105,7 @@ class SourceConfidenceRequest(BaseModel):
 
 
 async def _require_entities(conn, entity_ids: list[str]) -> None:
+    entity_ids = require_uuid_list(entity_ids)
     count = await conn.fetchval(
         "SELECT COUNT(*) FROM entities WHERE id = ANY($1::uuid[])",
         entity_ids,
@@ -115,6 +117,7 @@ async def _require_entities(conn, entity_ids: list[str]) -> None:
 @router.patch("/entities/{entity_id}/watch")
 async def set_watch(entity_id: str, req: WatchRequest):
     """Set the user-curated watchlist tier on an entity."""
+    entity_id = require_uuid(entity_id)
     s = req.status if req.status in ("priority", "watching", "archive") else None
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
@@ -186,6 +189,7 @@ async def decide_relationship(req: RelationshipDecisionRequest):
 @router.post("/entities/{entity_id}/location-decision")
 async def decide_location(entity_id: str, req: LocationDecisionRequest):
     """Record whether a location inference is correct or wrong."""
+    entity_id = require_uuid(entity_id)
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         await _require_entities(conn, [entity_id])
@@ -221,6 +225,7 @@ async def decide_location(entity_id: str, req: LocationDecisionRequest):
 @router.post("/entities/{entity_id}/media-person-decision")
 async def decide_media_person(entity_id: str, req: MediaPersonDecisionRequest):
     """Record whether an entity owns media or appears in media."""
+    entity_id = require_uuid(entity_id)
     role = req.role.strip().lower()
     if role not in {"owner", "person_in_photo"}:
         raise HTTPException(400, "role must be owner or person_in_photo")
@@ -253,6 +258,7 @@ async def decide_media_person(entity_id: str, req: MediaPersonDecisionRequest):
 @router.post("/entities/{entity_id}/source-confidence")
 async def adjust_source_confidence(entity_id: str, req: SourceConfidenceRequest):
     """Record a human confidence adjustment for an entity source/platform ref."""
+    entity_id = require_uuid(entity_id)
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         await _require_entities(conn, [entity_id])
@@ -298,27 +304,28 @@ class AlertTuningRequest(BaseModel):
 async def merge_entities(req: MergeRequest):
     if len(req.source_entity_ids) < 2:
         raise HTTPException(400, "Need at least 2 entities to merge")
+    source_entity_ids = require_uuid_list(req.source_entity_ids)
 
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         entities = await conn.fetch("""
             SELECT id, canonical_name, confidence_score
             FROM entities WHERE id = ANY($1::uuid[])
-        """, req.source_entity_ids)
+        """, source_entity_ids)
 
-        if len(entities) != len(req.source_entity_ids):
+        if len(entities) != len(source_entity_ids):
             raise HTTPException(404, "One or more entities not found")
 
         primary = max(entities, key=lambda e: e["confidence_score"])
         target_id = primary["id"]
         others = [e["id"] for e in entities if e["id"] != target_id]
-        snapshots_before = await _entity_snapshots(conn, req.source_entity_ids)
+        snapshots_before = await _entity_snapshots(conn, source_entity_ids)
 
         # Capture "same person" labels (1) for every merged pair BEFORE the
         # mutations below move/delete their identity_signals — this is the
         # ground truth that trains the calibrated scorer (no CSV). Snapshots
         # each pair's current feature vector.
-        for a, b in combinations(req.source_entity_ids, 2):
+        for a, b in combinations(source_entity_ids, 2):
             try:
                 await record_label(conn, a, b, 1, "dashboard_merge")
             except Exception:
@@ -358,15 +365,15 @@ async def merge_entities(req: MergeRequest):
         await conn.execute("""
             INSERT INTO entity_merge_log (action, source_entity_ids, target_entity_id, reason)
             VALUES ('merge', $1::uuid[], $2, $3)
-        """, req.source_entity_ids, target_id, req.reason)
+        """, source_entity_ids, target_id, req.reason)
 
         # Hash-chained DB audit + append-only JSONL decision event. Non-fatal.
         await append_audit(
             conn, action="merge_confirmed", actor="dashboard",
-            entity_ids=req.source_entity_ids,
+            entity_ids=source_entity_ids,
             payload={
                 "target_entity_id": str(target_id),
-                "source_entity_ids": [str(x) for x in req.source_entity_ids],
+                "source_entity_ids": [str(x) for x in source_entity_ids],
                 "merged_entity_ids": [str(x) for x in others],
                 "merged_count": len(others),
                 "reason": req.reason or "",
@@ -383,10 +390,12 @@ async def dismiss_match(req: DismissMatchRequest):
     """User said two same-person CANDIDATES are NOT the same person. Records a
     negative (0) label for the calibrated scorer and removes the current
     same_person_probability suggestion so it stops surfacing."""
+    entity_a = require_uuid(req.entity_a)
+    entity_b = require_uuid(req.entity_b)
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            snapshots = await _entity_snapshots(conn, [req.entity_a, req.entity_b])
+            snapshots = await _entity_snapshots(conn, [entity_a, entity_b])
             relationship = await conn.fetchrow("""
                 SELECT weight, cross_platform, sources
                 FROM entity_relationships
@@ -395,9 +404,9 @@ async def dismiss_match(req: DismissMatchRequest):
                     OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
                 ORDER BY weight DESC NULLS LAST, updated_at DESC NULLS LAST
                 LIMIT 1
-            """, req.entity_a, req.entity_b)
+            """, entity_a, entity_b)
             try:
-                await record_label(conn, req.entity_a, req.entity_b, 0, "dashboard_dismiss")
+                await record_label(conn, entity_a, entity_b, 0, "dashboard_dismiss")
             except Exception:
                 pass
             await conn.execute("""
@@ -405,15 +414,15 @@ async def dismiss_match(req: DismissMatchRequest):
                 WHERE relationship_type = 'same_person_probability'
                   AND ((entity_a_id = $1::uuid AND entity_b_id = $2::uuid)
                     OR (entity_a_id = $2::uuid AND entity_b_id = $1::uuid))
-            """, req.entity_a, req.entity_b)
+            """, entity_a, entity_b)
 
             await append_audit(
                 conn, action="dismiss_identity_candidate", actor="dashboard",
-                entity_ids=[req.entity_a, req.entity_b],
+                entity_ids=[entity_a, entity_b],
                 payload={
                     "confidence": "X",
-                    "entity_a": req.entity_a,
-                    "entity_b": req.entity_b,
+                    "entity_a": entity_a,
+                    "entity_b": entity_b,
                     "entity_snapshots": snapshots,
                     "candidate_evidence": {
                         "weight": relationship["weight"] if relationship else None,
@@ -427,8 +436,10 @@ async def dismiss_match(req: DismissMatchRequest):
 
 @router.post("/entities/{entity_id}/split")
 async def split_entity(entity_id: str, req: SplitRequest):
+    entity_id = require_uuid(entity_id)
     if not req.link_ids:
         raise HTTPException(400, "No links specified to split out")
+    link_ids = require_uuid_list(req.link_ids, label="Link")
 
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
@@ -442,7 +453,7 @@ async def split_entity(entity_id: str, req: SplitRequest):
             SELECT id, source, platform_id, platform_username, platform_name
             FROM entity_platform_links
             WHERE id = ANY($1::uuid[]) AND entity_id = $2::uuid
-        """, req.link_ids, entity_id)
+        """, link_ids, entity_id)
 
         if not links:
             raise HTTPException(404, "No matching links found on this entity")
@@ -478,7 +489,7 @@ async def split_entity(entity_id: str, req: SplitRequest):
             payload={
                 "source_entity_id": entity_id,
                 "new_entity_id": str(new_id),
-                "split_link_ids": req.link_ids,
+                "split_link_ids": link_ids,
                 "split_links": [dict(link) for link in links],
                 "reason": req.reason or "",
                 "source_entity_snapshot_after": await _entity_snapshots(conn, [entity_id]),
@@ -491,6 +502,7 @@ async def split_entity(entity_id: str, req: SplitRequest):
 
 @router.patch("/entities/{entity_id}/settings")
 async def update_entity_settings(entity_id: str, req: AlertTuningRequest):
+    entity_id = require_uuid(entity_id)
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
         entity = await conn.fetchrow(

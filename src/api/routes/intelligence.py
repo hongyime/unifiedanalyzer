@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException
 from src.db.connection import get_analyzer_pool
 from src.merge_candidates import merge_candidate_min_weight
 from src.api.face_lookup import representative_faces, face_crop_url
+from src.api.routes.uuid_validation import require_uuid
 
 router = APIRouter(tags=["intelligence"])
 
@@ -34,6 +35,7 @@ def _decode_meta(raw):
 
 @router.get("/entities/{entity_id}/intelligence")
 async def get_intelligence(entity_id: str):
+    entity_id = require_uuid(entity_id)
     pool = get_analyzer_pool()
     min_weight = merge_candidate_min_weight()
     async with pool.acquire() as conn:
