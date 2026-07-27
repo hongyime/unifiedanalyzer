@@ -60,10 +60,18 @@ FEATURE_ORDER = [
     "profile_photo_sha256",
 ]
 
-# Timing overlap is useful context, but not evidence that two accounts are the
-# same person. Keep the historical feature slot so old labels/models keep the
-# same shape, but never feed a non-zero value to training or inference.
-DEPRECATED_NON_IDENTITY_FEATURES: frozenset[str] = frozenset({"temporal_copost"})
+# Context signals are useful to explain relationships and review candidates, but
+# they are not same-person evidence. Keep their historical feature slots so old
+# labels/models keep the same shape, but never feed a non-zero value to training
+# or inference.
+DEPRECATED_NON_IDENTITY_FEATURES: frozenset[str] = frozenset({
+    "temporal_copost",
+    "bio_mention",
+    "group_cooccurrence",
+    "topical_similarity",
+    "social_face_link",
+    "shared_life_context",
+})
 ACTIVE_FEATURE_ORDER = [t for t in FEATURE_ORDER if t not in DEPRECATED_NON_IDENTITY_FEATURES]
 
 _MODEL_PATH = os.getenv(

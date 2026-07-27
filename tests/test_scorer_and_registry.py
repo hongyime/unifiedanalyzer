@@ -38,8 +38,9 @@ if importlib.util.find_spec("pytest") is None:
 # ---------------------------------------------------------------------------
 
 def test_type_weight_matches_feature_order():
-    """Every active _TYPE_WEIGHT key must appear in FEATURE_ORDER. Historical
-    calibration slots may remain only when explicitly marked deprecated."""
+    """Every scorer key must remain in FEATURE_ORDER for stable snapshots.
+    Non-identity context slots may still have historical weights, but calibration
+    must mark them deprecated so they are forced to zero."""
     from src.pipeline.identity_scorer import _TYPE_WEIGHT
     from src.pipeline.identity_calibration import DEPRECATED_NON_IDENTITY_FEATURES, FEATURE_ORDER
     weight_keys = set(_TYPE_WEIGHT.keys())
@@ -47,9 +48,9 @@ def test_type_weight_matches_feature_order():
     assert weight_keys <= feature_keys, (
         f"Registry drift: in _TYPE_WEIGHT but not FEATURE_ORDER = {weight_keys - feature_keys}"
     )
-    assert feature_keys - weight_keys == set(DEPRECATED_NON_IDENTITY_FEATURES), (
-        f"FEATURE_ORDER has inactive slots not marked deprecated = "
-        f"{feature_keys - weight_keys - set(DEPRECATED_NON_IDENTITY_FEATURES)}"
+    assert set(DEPRECATED_NON_IDENTITY_FEATURES) <= feature_keys, (
+        f"Deprecated/context slots missing from FEATURE_ORDER = "
+        f"{set(DEPRECATED_NON_IDENTITY_FEATURES) - feature_keys}"
     )
 
 
@@ -94,6 +95,24 @@ def test_temporal_copost_is_not_identity_evidence():
     assert "temporal_copost" in DEPRECATED_NON_IDENTITY_FEATURES
     features = pair_feature_vector([("temporal_copost", 0.99)])
     assert max(features) == 0.0
+
+
+def test_context_signals_are_zeroed_for_calibration_features():
+    from src.pipeline.identity_calibration import DEPRECATED_NON_IDENTITY_FEATURES, FEATURE_ORDER, pair_feature_vector
+
+    features = pair_feature_vector([
+        ("email_match", 0.6),
+        ("bio_mention", 1.0),
+        ("group_cooccurrence", 1.0),
+        ("topical_similarity", 1.0),
+        ("social_face_link", 1.0),
+        ("shared_life_context", 1.0),
+    ])
+    by_name = dict(zip(FEATURE_ORDER, features))
+
+    assert by_name["email_match"] == 0.6
+    for signal_type in DEPRECATED_NON_IDENTITY_FEATURES:
+        assert by_name[signal_type] == 0.0
 
 
 def test_context_only_signals_do_not_create_same_person_probability():
