@@ -5,8 +5,9 @@ checks a username against 400+ sites) and stage the found profile URLs in
 handle_discoveries for operator review before they get promoted to
 entity_platform_links.
 
-Sherlock is slow (~2-5 min per username), so this phase is env-gated and
-throttled: HANDLE_FANOUT_MAX_PER_RUN caps entities per cycle. Uses subprocess
+Sherlock is slow and can hang on broad site checks, so this phase is env-gated
+and tightly throttled: HANDLE_FANOUT_MAX_PER_RUN caps entities per cycle and
+HANDLE_FANOUT_TIMEOUT_S caps total wall time per username. Uses subprocess
 rather than importing the Sherlock package so version churn doesn't break us.
 
 Requires sherlock-project on PATH inside the scheduler container (installed
@@ -29,8 +30,8 @@ from src.db.connection import get_analyzer_pool
 logger = logging.getLogger(__name__)
 
 _ENABLED = "HANDLE_FANOUT_ENABLED"
-_MAX_PER_RUN = int(os.getenv("HANDLE_FANOUT_MAX_PER_RUN", "3"))
-_SHERLOCK_TIMEOUT = int(os.getenv("HANDLE_FANOUT_TIMEOUT_S", "300"))
+_MAX_PER_RUN = int(os.getenv("HANDLE_FANOUT_MAX_PER_RUN", "1"))
+_SHERLOCK_TIMEOUT = int(os.getenv("HANDLE_FANOUT_TIMEOUT_S", "75"))
 # Sites to prefer + which ones we already have via the collector, so we don't
 # stage duplicates. Sherlock's --site flag would narrow the run; we filter
 # post-hoc instead so operators can see everything.
