@@ -227,12 +227,12 @@ def test_collector_quiet_health_uses_schedule_cadence():
     assert "cadence 12h" in issue["message"]
 
 
-def test_merge_candidate_notifications_default_to_requested_floor():
-    """Weak <70 identity_signals stay in the DB, but do not page Telegram."""
+def test_merge_candidate_floors_default_to_review_55_notify_70():
+    """55-69 identity signals are review-only; Telegram pages start at 70."""
     from src.merge_candidates import merge_candidate_min_weight
     from src.scheduler.scheduler import _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE
 
-    assert merge_candidate_min_weight() == 70
+    assert merge_candidate_min_weight() == 55
     assert _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE == 70
 
 
