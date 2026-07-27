@@ -253,6 +253,48 @@ SOURCE_QUERIES = [
         "db": "analyzer",
         "entity_ids_direct": True,
         "query": """
+            WITH pairs AS (
+                SELECT fa.entity_id::text AS owner_entity_id,
+                       ef.entity_id::text AS associated_entity_id,
+                       fa.media_item_id AS media_item_id,
+                       MIN(fa.first_seen_at) AS occurred_at,
+                       MIN(fa.source_platform) AS source_platform,
+                       MAX(COALESCE(ef.confidence, fa.quality_score, 0)) AS confidence,
+                       jsonb_agg(DISTINCT fa.associated_face_id) AS associated_face_ids
+                FROM face_associations fa
+                JOIN public.entity_faces ef
+                  ON ef.face_id = fa.associated_face_id
+                WHERE ef.entity_id <> fa.entity_id
+                GROUP BY fa.entity_id, ef.entity_id, fa.media_item_id
+            )
+            SELECT CONCAT(owner_entity_id, ':', associated_entity_id, ':', media_item_id, ':a2b') AS record_id,
+                   occurred_at,
+                   owner_entity_id AS actor_ref,
+                   associated_entity_id AS target_ref,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'media_item_id', media_item_id,
+                       'source_platform', source_platform,
+                       'confidence', confidence,
+                       'associated_face_ids', associated_face_ids,
+                       'evidence', 'face_association_entity_face'
+                   )) AS metadata
+            FROM pairs
+            WHERE occurred_at IS NOT NULL {where_clause}
+            UNION ALL
+            SELECT CONCAT(owner_entity_id, ':', associated_entity_id, ':', media_item_id, ':b2a') AS record_id,
+                   occurred_at,
+                   associated_entity_id AS actor_ref,
+                   owner_entity_id AS target_ref,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'media_item_id', media_item_id,
+                       'source_platform', source_platform,
+                       'confidence', confidence,
+                       'associated_face_ids', associated_face_ids,
+                       'evidence', 'face_association_entity_face'
+                   )) AS metadata
+            FROM pairs
+            WHERE occurred_at IS NOT NULL {where_clause}
+            UNION ALL
             SELECT CONCAT(er.id::text, ':a2b') AS record_id,
                    COALESCE(er.last_seen_at, er.created_at) AS occurred_at,
                    er.entity_a_id::text AS actor_ref,

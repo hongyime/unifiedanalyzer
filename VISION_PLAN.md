@@ -380,7 +380,7 @@ digital fused on the same axis.
   playback advances those views in lockstep. Frontend builds clean.
 
 ## PHASE 4 — Tagged photos (both senses) + collection gaps
-- [ ] **T4.1 Face co-appearance → timeline + interaction.** Promote
+- [x] **T4.1 Face co-appearance → timeline + interaction.** Promote
   `mutual_social_face` (relationship) into a `face_coappear` interaction (T2.1)
   and a `PHOTO_COAPPEARANCE` timeline event on both entities, using media
   ownership (who posted) + face match. Confidence from face score.
@@ -397,6 +397,15 @@ digital fused on the same axis.
   `facetracker.images face_count>=2 = 294`, `entities.primary_face_id = 23`,
   but `collector.media_items.entity_id` joined to those multi-face image hashes
   yields `owned_multiface_media = 0`.
+  DONE 2026-07-28: direct face-association evidence now feeds T4.1 without
+  requiring a bilateral `mutual_social_face` first. `face_associations` joined to
+  `entity_faces` produced one concrete owner/person pair from Instagram media
+  `d1be1acf-179e-4f62-843e-109e982d470e` (Megan <-> ying tong), grouped across
+  face ids 78624 and 78625. Live subset backfills inserted `face_coappear=2`
+  reciprocal interactions and `PHOTO_COAPPEARANCE=2` timeline events. Verified
+  API:
+  `/api/entities/98fd0bc6-4061-4fed-ba31-3293f1ce561f/timeline?event_type=PHOTO_COAPPEARANCE&from=2026-07-01T00:00:00Z&to=2026-08-01T00:00:00Z&per_page=5`
+  returns the owner-side event.
 - [x] **T4.2 Tagged photos + @-mentions → `tagged`/`mentioned` (both senses).**
   (a) Metadata sense — RESOLVED: `media_items kind='tagged'` (**33,806**, 524
   ents, `metadata.taken_at`) = photos an entity is tagged in by others → emit a
