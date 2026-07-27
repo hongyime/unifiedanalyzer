@@ -99,11 +99,13 @@ broader **face→entity attribution** would auto-light both. Plus:
   relationships / interactions into one `ConnectionsPanel.tsx` (list↔graph toggle +
   type filter), lossless; build+tsc pass.
 
-**STILL DATA-STARVED (not code — grows over time):**
-- [ ] **T4.1 face co-appearance** — still 0. Only **1** owned multi-face photo across
-  27 tracked entities; max cross-entity face cosine 0.20 (< 0.55 gate). Auto-fires as
-  face→entity coverage grows (fed by Q1 video faces + broader resolution). Not fixable
-  by code today.
+**FORMER DATA-STARVED NOTE (closed 2026-07-28):**
+- [x] **T4.1 face co-appearance** — no longer zero. Direct
+  `face_associations` joined to `entity_faces` now emits concrete reciprocal
+  `face_coappear` interactions and `PHOTO_COAPPEARANCE` timeline events. Live DB
+  proof on 2026-07-28: `face_coappear=2`, `PHOTO_COAPPEARANCE=2`. Broader
+  coverage still grows as entity-face attribution improves, but the Phase 4
+  pipeline path is live.
 
 ## DONE (2026-07-17) — Per-entity date-range partition pruning (commit 024f621)
 **Result (measured under full-res contention):** timeline-lanes **6,742ms → 12–153ms**;
