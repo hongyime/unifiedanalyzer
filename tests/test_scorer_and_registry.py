@@ -99,7 +99,7 @@ def test_temporal_copost_is_not_identity_evidence():
 def test_context_only_signals_do_not_create_same_person_probability():
     """Relationship/context signals can explain a candidate but cannot create one
     without at least one identity-backed signal."""
-    from src.pipeline.identity_scorer import _has_identity_evidence
+    from src.pipeline.identity_scorer import _has_identity_evidence, _identity_score_contributions
 
     context_only = [
         ("bio_mention", 0.9),
@@ -110,7 +110,28 @@ def test_context_only_signals_do_not_create_same_person_probability():
     ]
 
     assert not _has_identity_evidence(context_only)
+    assert _identity_score_contributions(context_only) == []
     assert _has_identity_evidence([*context_only, ("email_match", 0.6)])
+
+
+def test_context_signals_do_not_boost_identity_score():
+    """Bio mentions and shared context can be shown in Review, but the same-person
+    probability must be exactly the identity-backed evidence score."""
+    from src.pipeline.identity_scorer import _TYPE_WEIGHT, _identity_score_contributions
+
+    contributions = [
+        ("email_match", 0.6),
+        ("bio_mention", 1.0),
+        ("topical_similarity", 1.0),
+        ("shared_life_context", 1.0),
+    ]
+
+    scoring = _identity_score_contributions(contributions)
+    assert scoring == [("email_match", 0.6)]
+    prob_none = 1.0
+    for sig_type, confidence in scoring:
+        prob_none *= 1 - _TYPE_WEIGHT[sig_type] * confidence
+    assert round(1 - prob_none, 4) == 0.36
 
 
 def test_dismissed_same_evidence_stays_suppressed():

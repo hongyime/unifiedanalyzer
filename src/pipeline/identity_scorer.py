@@ -86,8 +86,8 @@ _TYPE_WEIGHT = {
 }
 
 # These signals describe proximity, relationship, audience overlap, or weak
-# contextual similarity. They may help explain an already identity-backed
-# candidate, but they must not create a same-person probability on their own.
+# contextual similarity. They may be displayed as context in the review evidence
+# breakdown, but they must not create or increase same-person probability.
 _CONTEXT_ONLY_SIGNALS = frozenset({
     "bio_mention",
     "group_cooccurrence",
@@ -121,6 +121,15 @@ def _is_uuid(value: str | None) -> bool:
 
 def _has_identity_evidence(contributions: list[tuple[str, float]]) -> bool:
     return any(sig_type not in _CONTEXT_ONLY_SIGNALS for sig_type, _ in contributions)
+
+
+def _identity_score_contributions(contributions: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Keep relationship/context signals visible but out of identity scoring."""
+    return [
+        (sig_type, confidence)
+        for sig_type, confidence in contributions
+        if sig_type not in _CONTEXT_ONLY_SIGNALS
+    ]
 
 
 def _features_from_contributions(contributions: list[tuple[str, float]]) -> dict[str, float]:
@@ -261,15 +270,16 @@ async def compute_identity_scores() -> dict:
             if _dismissal_suppresses_candidate(contributions, dismissed_features):
                 continue
             resurfaced_after_dismissal = True
-        if not _has_identity_evidence(contributions):
+        scoring_contributions = _identity_score_contributions(contributions)
+        if not scoring_contributions:
             continue
         breakdown = [{"type": t, "confidence": round(c, 4)} for t, c in contributions]
 
         if model is not None:
-            score = predict_proba(model, pair_feature_vector(contributions))
+            score = predict_proba(model, pair_feature_vector(scoring_contributions))
         else:
             prob_none = 1.0
-            for sig_type, confidence in contributions:
+            for sig_type, confidence in scoring_contributions:
                 prob_none *= (1 - _TYPE_WEIGHT[sig_type] * confidence)
             score = 1 - prob_none
 
