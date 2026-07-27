@@ -338,6 +338,12 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
     return {"candidates": candidates, "total": len(candidates)}
 
 
+@router.get("/entities/merge-candidates")
+async def legacy_entity_merge_candidates(limit: int = Query(50, ge=1, le=200)):
+    """Compatibility alias for older dashboard tabs and probes."""
+    return await review_candidates(limit=limit)
+
+
 @router.get("/search/entities")
 async def search_entities(q: str = Query(..., min_length=1), limit: int = Query(12, ge=1, le=50)):
     """Jump-to-anything search across entity names + platform handles. Powers the
