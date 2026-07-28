@@ -16,6 +16,28 @@ logging.basicConfig(
 logger = logging.getLogger("unifiedanalyzer")
 
 
+def _stale_run_heartbeat_minutes() -> int:
+    try:
+        return max(1, int(os.getenv("STALE_RUN_HEARTBEAT_MINUTES", "30")))
+    except (TypeError, ValueError):
+        return 30
+
+
+async def clear_stale_running_locks_before_scheduler_import(pool) -> int:
+    """Free only stale run locks before importing the heavy scheduler pipeline."""
+    stale_minutes = _stale_run_heartbeat_minutes()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            UPDATE analysis_runs
+            SET status = 'failed', finished_at = NOW(),
+                error_message = 'Stale run lock (heartbeat silent) - cleared before scheduler pipeline import'
+            WHERE status = 'running'
+              AND COALESCE(heartbeat_at, started_at) < NOW() - make_interval(mins => $1)
+            RETURNING id::text
+        """, stale_minutes)
+    return len(rows)
+
+
 def main():
     parser = argparse.ArgumentParser(description="UnifiedAnalyzer — Personal OSINT Analyzer")
     sub = parser.add_subparsers(dest="command")
@@ -155,26 +177,16 @@ def main():
         # the face_worker split. start_scheduler() is a long-lived loop.
         from src.db.connection import init_pools, close_pools, get_analyzer_pool
 
-        async def _clear_running_locks_before_heavy_import() -> int:
-            pool = get_analyzer_pool()
-            async with pool.acquire() as conn:
-                rows = await conn.fetch("""
-                    UPDATE analysis_runs
-                    SET status = 'failed', finished_at = NOW(),
-                        error_message = 'Interrupted by scheduler restart - cleared before scheduler pipeline import'
-                    WHERE status = 'running'
-                    RETURNING id::text
-                """)
-            return len(rows)
-
         async def _run():
             await init_pools(apply_schema_ddl=False)
             try:
-                cleared = await _clear_running_locks_before_heavy_import()
+                cleared = await clear_stale_running_locks_before_scheduler_import(get_analyzer_pool())
                 if cleared:
                     logger.warning(
-                        "Cleared %d running run lock(s) before scheduler pipeline import",
+                        "Cleared %d stale running run lock(s) before scheduler pipeline import "
+                        "(heartbeat older than %d min)",
                         cleared,
+                        _stale_run_heartbeat_minutes(),
                     )
                 from src.scheduler.scheduler import start_scheduler
                 await start_scheduler()
