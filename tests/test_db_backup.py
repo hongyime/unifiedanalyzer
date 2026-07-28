@@ -128,6 +128,8 @@ def test_run_backup_kinds_invokes_pg_dump_without_password_in_args(
     assert "unifiedanalyzer" in captured["cmd"]
     assert "--exclude-table-data" in captured["cmd"]
     assert "public.timeline_embeddings" in captured["cmd"]
+    assert "--compress" in captured["cmd"]
+    assert "gzip:1" in captured["cmd"]
 
 
 def test_run_backup_kinds_records_durable_state(
@@ -200,6 +202,7 @@ def test_backup_config_from_env_uses_retention_defaults(monkeypatch: pytest.Monk
     assert config.retention_for("weekly") == 4
     assert config.retention_for("monthly") == 3
     assert config.exclude_table_data == ("public.timeline_embeddings",)
+    assert config.compression == "gzip:1"
 
 
 def test_backup_config_allows_full_dump_by_clearing_excluded_table_data(
@@ -216,6 +219,22 @@ def test_backup_config_allows_full_dump_by_clearing_excluded_table_data(
     config = BackupConfig.from_env()
 
     assert config.exclude_table_data == ()
+
+
+def test_backup_config_allows_uncompressed_dump(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    monkeypatch.setenv(
+        "ANALYZER_DATABASE_URL",
+        "postgres://collector:collector@localhost:5500/unifiedanalyzer",
+    )
+    monkeypatch.setenv("ANALYZER_DB_BACKUP_DIR", os.fspath(tmp_path))
+    monkeypatch.setenv("ANALYZER_DB_BACKUP_COMPRESSION", "")
+
+    config = BackupConfig.from_env()
+
+    assert config.compression is None
 
 
 def test_backup_config_allows_missing_database_for_listing(

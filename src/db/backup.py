@@ -43,6 +43,7 @@ class BackupConfig:
     pg_restore_bin: str = "pg_restore"
     retention: dict[BackupKind, int] | None = None
     exclude_table_data: tuple[str, ...] = DEFAULT_EXCLUDE_TABLE_DATA
+    compression: str | None = "gzip:1"
 
     @classmethod
     def from_env(
@@ -93,6 +94,7 @@ class BackupConfig:
                 "ANALYZER_DB_BACKUP_EXCLUDE_TABLE_DATA",
                 DEFAULT_EXCLUDE_TABLE_DATA,
             ),
+            compression=_env_optional("ANALYZER_DB_BACKUP_COMPRESSION", "gzip:1"),
         )
 
     def retention_for(self, kind: BackupKind) -> int:
@@ -156,6 +158,14 @@ def _env_csv(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
     if not raw.strip():
         return tuple()
     return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _env_optional(key: str, default: str | None) -> str | None:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    return raw or None
 
 
 def utc_now() -> datetime:
@@ -396,6 +406,8 @@ def _run_pg_dump(config: BackupConfig, target: Path) -> None:
         "--dbname",
         conn["database"],
     ]
+    if config.compression:
+        cmd.extend(["--compress", config.compression])
     for pattern in config.exclude_table_data:
         cmd.extend(["--exclude-table-data", pattern])
 
