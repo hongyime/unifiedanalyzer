@@ -549,7 +549,7 @@ PLATFORM_QUERIES = [
                        'evidence', 'face_association_entity_face'
                    )) AS metadata
             FROM pairs
-            WHERE occurred_at IS NOT NULL {where_clause}
+            WHERE occurred_at IS NOT NULL {pairs_where_clause}
             UNION ALL
             SELECT CONCAT(owner_entity_id, ':', associated_entity_id, ':', media_item_id, ':associated') AS record_id,
                    occurred_at,
@@ -564,7 +564,7 @@ PLATFORM_QUERIES = [
                        'evidence', 'face_association_entity_face'
                    )) AS metadata
             FROM pairs
-            WHERE occurred_at IS NOT NULL {where_clause}
+            WHERE occurred_at IS NOT NULL {pairs_where_clause}
             UNION ALL
             SELECT CONCAT(er.id::text, ':a') AS record_id,
                    COALESCE(er.last_seen_at, er.created_at) AS occurred_at,
@@ -580,7 +580,7 @@ PLATFORM_QUERIES = [
             FROM entity_relationships er
             LEFT JOIN entities other_e ON other_e.id = er.entity_b_id
             WHERE er.relationship_type = 'mutual_social_face'
-              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {where_clause}
+              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {relationship_where_clause}
             UNION ALL
             SELECT CONCAT(er.id::text, ':b') AS record_id,
                    COALESCE(er.last_seen_at, er.created_at) AS occurred_at,
@@ -596,10 +596,14 @@ PLATFORM_QUERIES = [
             FROM entity_relationships er
             LEFT JOIN entities other_e ON other_e.id = er.entity_a_id
             WHERE er.relationship_type = 'mutual_social_face'
-              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {where_clause}
+              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {relationship_where_clause}
             ORDER BY occurred_at DESC
         """,
         "time_col": "COALESCE(er.last_seen_at, er.created_at)",
+        "time_filters": {
+            "pairs_where_clause": "occurred_at",
+            "relationship_where_clause": "COALESCE(er.last_seen_at, er.created_at)",
+        },
     },
 ]
 
@@ -709,16 +713,7 @@ async def build_timeline(
             continue
         if only_event_types and pq["event_type"] not in only_event_types:
             continue
-        where_clause = ""
-        params: list = []
-        if since:
-            where_clause = f"AND {pq['time_col']} > $1"
-            if pq.get("db") == "analyzer" or since.tzinfo is None:
-                params.append(since)
-            else:
-                params.append(since.astimezone(timezone.utc).replace(tzinfo=None))
-
-        query = pq["query"].format(where_clause=where_clause)
+        query, params = _format_platform_query(pq, since)
         source_name = f"{pq['source']}/{pq['event_type']}"
 
         try:
@@ -853,6 +848,28 @@ def _jsonb_param(raw) -> str:
     if isinstance(raw, str):
         return raw
     return json.dumps(raw, default=str)
+
+
+def _format_platform_query(pq: dict, since: datetime | None) -> tuple[str, list]:
+    format_args = {"where_clause": ""}
+    time_filters = pq.get("time_filters") or {}
+    for placeholder in time_filters:
+        format_args[placeholder] = ""
+
+    params: list = []
+    if since:
+        if time_filters:
+            for placeholder, time_col in time_filters.items():
+                format_args[placeholder] = f"AND {time_col} > $1"
+        else:
+            format_args["where_clause"] = f"AND {pq['time_col']} > $1"
+
+        if pq.get("db") == "analyzer" or since.tzinfo is None:
+            params.append(since)
+        else:
+            params.append(since.astimezone(timezone.utc).replace(tzinfo=None))
+
+    return pq["query"].format(**format_args), params
 
 
 async def repair_replied_metadata(batch_size: int = 2000, max_batches: int | None = None) -> dict:

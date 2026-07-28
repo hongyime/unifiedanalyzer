@@ -279,7 +279,7 @@ SOURCE_QUERIES = [
                        'evidence', 'face_association_entity_face'
                    )) AS metadata
             FROM pairs
-            WHERE occurred_at IS NOT NULL {where_clause}
+            WHERE occurred_at IS NOT NULL {pairs_where_clause}
             UNION ALL
             SELECT CONCAT(owner_entity_id, ':', associated_entity_id, ':', media_item_id, ':b2a') AS record_id,
                    occurred_at,
@@ -293,7 +293,7 @@ SOURCE_QUERIES = [
                        'evidence', 'face_association_entity_face'
                    )) AS metadata
             FROM pairs
-            WHERE occurred_at IS NOT NULL {where_clause}
+            WHERE occurred_at IS NOT NULL {pairs_where_clause}
             UNION ALL
             SELECT CONCAT(er.id::text, ':a2b') AS record_id,
                    COALESCE(er.last_seen_at, er.created_at) AS occurred_at,
@@ -306,7 +306,7 @@ SOURCE_QUERIES = [
                    )) AS metadata
             FROM entity_relationships er
             WHERE er.relationship_type = 'mutual_social_face'
-              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {where_clause}
+              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {relationship_where_clause}
             UNION ALL
             SELECT CONCAT(er.id::text, ':b2a') AS record_id,
                    COALESCE(er.last_seen_at, er.created_at) AS occurred_at,
@@ -319,10 +319,14 @@ SOURCE_QUERIES = [
                    )) AS metadata
             FROM entity_relationships er
             WHERE er.relationship_type = 'mutual_social_face'
-              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {where_clause}
+              AND COALESCE(er.last_seen_at, er.created_at) IS NOT NULL {relationship_where_clause}
             ORDER BY occurred_at DESC
         """,
         "time_col": "COALESCE(er.last_seen_at, er.created_at)",
+        "time_filters": {
+            "pairs_where_clause": "occurred_at",
+            "relationship_where_clause": "COALESCE(er.last_seen_at, er.created_at)",
+        },
     },
 ]
 
@@ -374,6 +378,28 @@ def _jsonb_param(raw) -> str:
     if isinstance(raw, str):
         return raw
     return json.dumps(raw, default=str)
+
+
+def _format_source_query(spec: dict, since: datetime | None) -> tuple[str, list]:
+    format_args = {"where_clause": ""}
+    time_filters = spec.get("time_filters") or {}
+    for placeholder in time_filters:
+        format_args[placeholder] = ""
+
+    params: list = []
+    if since:
+        if time_filters:
+            for placeholder, time_col in time_filters.items():
+                format_args[placeholder] = f"AND {time_col} > $1"
+        else:
+            format_args["where_clause"] = f"AND {spec['time_col']} > $1"
+
+        if spec.get("db") == "analyzer" or since.tzinfo is None:
+            params.append(since)
+        else:
+            params.append(since.astimezone(timezone.utc).replace(tzinfo=None))
+
+    return spec["query"].format(**format_args), params
 
 
 async def _insert_batch(batch: list[tuple]) -> None:
@@ -530,15 +556,7 @@ async def build_interaction_graph(
         if only_types and spec["interaction_type"] not in only_types:
             continue
 
-        where_clause = ""
-        params: list = []
-        if since:
-            where_clause = f"AND {spec['time_col']} > $1"
-            if spec.get("db") == "analyzer" or since.tzinfo is None:
-                params.append(since)
-            else:
-                params.append(since.astimezone(timezone.utc).replace(tzinfo=None))
-        query = spec["query"].format(where_clause=where_clause)
+        query, params = _format_source_query(spec, since)
 
         processed = inserted = resolved = skipped_unresolved = skipped_self = 0
         batch: list[tuple] = []
