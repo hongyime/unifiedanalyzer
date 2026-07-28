@@ -25,6 +25,7 @@ DEFAULT_RETENTION: dict[BackupKind, int] = {
 }
 DEFAULT_BACKUP_ROOT_WINDOWS = Path(r"Z:\unifiedanalyzer\backups\db")
 DEFAULT_BACKUP_ROOT_POSIX = Path("/app/backups/db")
+DEFAULT_EXCLUDE_TABLE_DATA: tuple[str, ...] = ("public.timeline_embeddings",)
 FILENAME_RE = re.compile(
     r"^unifiedanalyzer_(daily|weekly|monthly)_(\d{8}T\d{6}Z)\.dump$"
 )
@@ -41,6 +42,7 @@ class BackupConfig:
     pg_dump_bin: str = "pg_dump"
     pg_restore_bin: str = "pg_restore"
     retention: dict[BackupKind, int] | None = None
+    exclude_table_data: tuple[str, ...] = DEFAULT_EXCLUDE_TABLE_DATA
 
     @classmethod
     def from_env(
@@ -87,6 +89,10 @@ class BackupConfig:
             pg_dump_bin=pg_dump_bin or os.getenv("PG_DUMP_BIN", "pg_dump"),
             pg_restore_bin=os.getenv("PG_RESTORE_BIN", "pg_restore"),
             retention=retention,
+            exclude_table_data=_env_csv(
+                "ANALYZER_DB_BACKUP_EXCLUDE_TABLE_DATA",
+                DEFAULT_EXCLUDE_TABLE_DATA,
+            ),
         )
 
     def retention_for(self, kind: BackupKind) -> int:
@@ -141,6 +147,15 @@ def _env_int(key: str, override: int | None, default: int) -> int:
     if value < 0:
         raise BackupError(f"{key} must be >= 0")
     return value
+
+
+def _env_csv(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    if not raw.strip():
+        return tuple()
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
 def utc_now() -> datetime:
@@ -381,6 +396,8 @@ def _run_pg_dump(config: BackupConfig, target: Path) -> None:
         "--dbname",
         conn["database"],
     ]
+    for pattern in config.exclude_table_data:
+        cmd.extend(["--exclude-table-data", pattern])
 
     env = os.environ.copy()
     if conn["password"]:
@@ -459,7 +476,12 @@ def _record_backup_run_start(
                         str(run_id),
                         list(kinds),
                         str(targets[0]) if targets else None,
-                        json.dumps({"target_paths": [str(path) for path in targets]}),
+                        json.dumps(
+                            {
+                                "target_paths": [str(path) for path in targets],
+                                "exclude_table_data": list(config.exclude_table_data),
+                            }
+                        ),
                     ),
                 )
             conn.commit()

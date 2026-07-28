@@ -126,6 +126,8 @@ def test_run_backup_kinds_invokes_pg_dump_without_password_in_args(
     assert "--format=custom" in captured["cmd"]
     assert "--dbname" in captured["cmd"]
     assert "unifiedanalyzer" in captured["cmd"]
+    assert "--exclude-table-data" in captured["cmd"]
+    assert "public.timeline_embeddings" in captured["cmd"]
 
 
 def test_run_backup_kinds_records_durable_state(
@@ -197,6 +199,23 @@ def test_backup_config_from_env_uses_retention_defaults(monkeypatch: pytest.Monk
     assert config.retention_for("daily") == 7
     assert config.retention_for("weekly") == 4
     assert config.retention_for("monthly") == 3
+    assert config.exclude_table_data == ("public.timeline_embeddings",)
+
+
+def test_backup_config_allows_full_dump_by_clearing_excluded_table_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    monkeypatch.setenv(
+        "ANALYZER_DATABASE_URL",
+        "postgres://collector:collector@localhost:5500/unifiedanalyzer",
+    )
+    monkeypatch.setenv("ANALYZER_DB_BACKUP_DIR", os.fspath(tmp_path))
+    monkeypatch.setenv("ANALYZER_DB_BACKUP_EXCLUDE_TABLE_DATA", "")
+
+    config = BackupConfig.from_env()
+
+    assert config.exclude_table_data == ()
 
 
 def test_backup_config_allows_missing_database_for_listing(
