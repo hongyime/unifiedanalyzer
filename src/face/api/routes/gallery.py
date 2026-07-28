@@ -26,6 +26,20 @@ _CROP_MARGIN = 0.25   # fraction of bbox added on each side for a nicer headshot
 _CROP_MAX = 200       # max output crop dimension (px)
 
 
+def _estimated_face_total(db: Session) -> int:
+    """Cheap page total for gallery pagination while analysis runs are busy."""
+    try:
+        value = db.execute(text("""
+            SELECT GREATEST(COALESCE(reltuples, 0), 0)::bigint
+            FROM pg_class
+            WHERE oid = 'facetracker.faces'::regclass
+        """)).scalar()
+        return int(value or 0)
+    except Exception:
+        logger.debug("face total estimate failed", exc_info=True)
+        return 0
+
+
 def get_db():
     yield from get_db_session(settings.database_url)
 
@@ -67,13 +81,18 @@ def list_faces(
     if cluster_id is not None:
         q = q.filter(Face.cluster_id == cluster_id)
         count_q = count_q.filter(Face.cluster_id == cluster_id)
-    total = count_q.scalar()
     rows = (
         q.order_by(Face.quality_score.desc().nullslast())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
     )
+    if cluster_id is None:
+        total = _estimated_face_total(db)
+        total_estimated = True
+    else:
+        total = count_q.scalar()
+        total_estimated = False
     faces = [{
         "face_id": face_id,
         "cluster_id": cluster_id,
@@ -81,7 +100,13 @@ def list_faces(
         "crop_url": f"/api/face/gallery/faces/{face_id}/crop",
         "source": (file_path or "").rsplit("/", 1)[-1],
     } for face_id, cluster_id, quality_score, file_path in rows]
-    return {"faces": faces, "total": total, "page": page, "page_size": page_size}
+    return {
+        "faces": faces,
+        "total": total,
+        "total_estimated": total_estimated,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.get("/clusters")
