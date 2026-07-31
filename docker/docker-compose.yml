@@ -29,6 +29,7 @@ services:
       # (host .env uses localhost:5500, which is only valid on the host).
       ANALYZER_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
+      COLLECTOR_DASHBOARD_URL: http://unifiedcollector_dashboard:8700
       # Derived media lives on Z: on the host; mounted into the container below.
       MEDIA_DERIVED_PATH: /app/media_derived
       # COLLECTOR_MEDIA_ROOT is the dir that CONTAINS the "media/" folder.
@@ -86,6 +87,7 @@ services:
     environment:
       ANALYZER_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
+      COLLECTOR_DASHBOARD_URL: http://unifiedcollector_dashboard:8700
       MEDIA_DERIVED_PATH: /app/media_derived
       COLLECTOR_MEDIA_ROOT: /app/collector_root
       FACE_MODEL_ROOT: /app/media_derived/faces
