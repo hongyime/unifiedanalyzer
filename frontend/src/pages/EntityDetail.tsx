@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router'
 import { ArrowLeft, Trash2, Bell, MapPin, ChevronLeft, ChevronRight, History, ImageIcon, CheckCircle2, XCircle } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 import {

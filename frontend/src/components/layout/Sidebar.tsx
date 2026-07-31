@@ -1,4 +1,4 @@
-import { NavLink } from 'react-router-dom'
+import { NavLink } from 'react-router'
 import { clsx } from '../../lib/cx'
 import {
   ListChecks, GitCompare, Users, Network, Bell, Images, ScanFace,

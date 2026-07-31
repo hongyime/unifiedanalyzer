@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { GitCompare, Bell, UserPlus } from 'lucide-react'
 import { api, TriageData } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'

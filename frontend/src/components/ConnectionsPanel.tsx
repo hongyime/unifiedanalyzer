@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { CheckCircle2, List, Network, Users2, XCircle } from 'lucide-react'
 import { FaceAvatar } from './FaceAvatar'
 import { NetworkGraph } from './NetworkGraph'

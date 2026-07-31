@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { FolderOpen, Plus, X } from 'lucide-react'
 import { api } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'

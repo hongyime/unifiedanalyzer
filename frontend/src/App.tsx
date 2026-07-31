@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route } from 'react-router'
 import { openHealthSocket, LiveHealth } from './api'
 import { CommandPalette } from './components/CommandPalette'
 import { AppShell } from './components/AppShell'

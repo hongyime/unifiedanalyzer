@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { UserSearch, ChevronLeft, ChevronRight } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 import { api, Entity } from '../api'
