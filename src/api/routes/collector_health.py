@@ -29,12 +29,30 @@ def _fetch_json_sync(url: str, timeout: float) -> dict[str, Any]:
 
 async def _fetch_collector_source_matrix() -> dict[str, Any] | None:
     url = _collector_dashboard_url() + "/collectors/source-matrix"
-    timeout = float(os.getenv("COLLECTOR_DASHBOARD_TIMEOUT_SECONDS", "12"))
+    timeout = float(os.getenv(
+        "COLLECTOR_DASHBOARD_SOURCE_MATRIX_TIMEOUT_SECONDS",
+        os.getenv("COLLECTOR_DASHBOARD_TIMEOUT_SECONDS", "4"),
+    ))
     try:
         return await asyncio.to_thread(_fetch_json_sync, url, timeout)
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
         logger.info("collector dashboard source-matrix unavailable: %s", exc.__class__.__name__)
         return None
+
+
+async def _fetch_collector_live() -> dict[str, Any] | None:
+    url = _collector_dashboard_url() + "/collectors/live"
+    timeout = float(os.getenv("COLLECTOR_DASHBOARD_LIVE_TIMEOUT_SECONDS", "4"))
+    try:
+        return await asyncio.to_thread(_fetch_json_sync, url, timeout)
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        logger.info("collector dashboard live unavailable: %s", exc.__class__.__name__)
+        return None
+
+
+async def _acquire_collector_conn(pool):
+    timeout = float(os.getenv("ANALYZER_COLLECTOR_HEALTH_DB_ACQUIRE_TIMEOUT_SECONDS", "3"))
+    return await asyncio.wait_for(pool.acquire(), timeout=timeout)
 
 
 def _latest_iso(*values: Any) -> str | None:
@@ -115,31 +133,85 @@ def _collectors_from_source_matrix(matrix: dict[str, Any], targets: list[Any]) -
     return collectors
 
 
+def _collector_from_live_row(row: dict[str, Any], targets: list[dict[str, Any]]) -> dict[str, Any]:
+    last_seen = _latest_iso(
+        row.get("source_health_last_success_at"),
+        row.get("source_health_updated_at"),
+        row.get("browser_heartbeat_at"),
+    )
+    return {
+        "source": row.get("source"),
+        "display_name": row.get("source"),
+        "status": row.get("status"),
+        "collection_mode": row.get("collection_mode"),
+        "last_started": last_seen,
+        "last_completed": last_seen,
+        "items_24h": 0,
+        "records_24h": 0,
+        "messages_24h": 0,
+        "media_24h": 0,
+        "failed_24h": 0,
+        "rate_limits_24h": 0,
+        "access_errors_24h": 0,
+        "runs_24h": 0,
+        "current_hour": {},
+        "latest_status": row.get("status"),
+        "blocker": {
+            "kind": row.get("bridge_status") or row.get("status"),
+            "detail": row.get("bridge_detail") or row.get("detail"),
+        },
+        "media_freshness": {},
+        "targets": targets,
+    }
+
+
+def _collectors_from_live(live: dict[str, Any], targets: list[Any]) -> list[dict[str, Any]]:
+    by_source = _targets_by_source(targets)
+    collectors = []
+    for row in live.get("sources") or []:
+        if not isinstance(row, dict) or not row.get("source"):
+            continue
+        collectors.append(_collector_from_live_row(row, by_source.get(row["source"], [])))
+    collectors.sort(key=lambda c: str(c.get("source") or ""))
+    return collectors
+
+
+async def _fetch_collector_db_snapshot() -> tuple[list[Any], list[Any]]:
+    pool = get_collector_pool()
+    conn = None
+    try:
+        conn = await _acquire_collector_conn(pool)
+        runs = await conn.fetch("""
+            SELECT source, status,
+                   MAX(started_at) AS last_started,
+                   MAX(completed_at) AS last_completed,
+                   SUM(items_collected) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS items_24h,
+                   SUM(items_failed) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS failed_24h,
+                   COUNT(*) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS runs_24h
+            FROM collection_runs
+            GROUP BY source, status
+            ORDER BY source
+        """, timeout=8)
+
+        targets = await conn.fetch("""
+            SELECT source, status, COUNT(*) AS count,
+                   MAX(last_collection_at) AS last_collection
+            FROM collection_targets
+            GROUP BY source, status
+            ORDER BY source
+        """, timeout=8)
+        return list(runs), list(targets)
+    finally:
+        if conn is not None:
+            await pool.release(conn)
+
+
 @router.get("/collector/health")
 async def collector_health():
     matrix = await _fetch_collector_source_matrix()
+    live = None if matrix else await _fetch_collector_live()
     try:
-        pool = get_collector_pool()
-        async with pool.acquire() as conn:
-            runs = await conn.fetch("""
-                SELECT source, status,
-                       MAX(started_at) AS last_started,
-                       MAX(completed_at) AS last_completed,
-                       SUM(items_collected) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS items_24h,
-                       SUM(items_failed) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS failed_24h,
-                       COUNT(*) FILTER (WHERE completed_at > NOW() - INTERVAL '24 hours') AS runs_24h
-                FROM collection_runs
-                GROUP BY source, status
-                ORDER BY source
-            """)
-
-            targets = await conn.fetch("""
-                SELECT source, status, COUNT(*) AS count,
-                       MAX(last_collection_at) AS last_collection
-                FROM collection_targets
-                GROUP BY source, status
-                ORDER BY source
-            """)
+        runs, targets = await _fetch_collector_db_snapshot()
     except Exception as e:  # noqa: BLE001 - collector health is optional for analyzer uptime
         logger.warning("collector health skipped: %s", e)
         if matrix:
@@ -148,6 +220,14 @@ async def collector_health():
                 "collector_db": "unreachable",
                 "collector_dashboard": "ok",
                 "source": "collector_dashboard",
+                "error": str(e)[:300],
+            }
+        if live:
+            return {
+                "collectors": _collectors_from_live(live, []),
+                "collector_db": "unreachable",
+                "collector_dashboard": "ok",
+                "source": "collector_live",
                 "error": str(e)[:300],
             }
         return {
@@ -164,6 +244,14 @@ async def collector_health():
             "collector_dashboard": "ok",
             "source": "collector_dashboard",
             "generated_at": matrix.get("generated_at"),
+        }
+
+    if live:
+        return {
+            "collectors": _collectors_from_live(live, list(targets)),
+            "collector_db": "connected",
+            "collector_dashboard": "ok",
+            "source": "collector_live",
         }
 
     collectors: dict = {}
