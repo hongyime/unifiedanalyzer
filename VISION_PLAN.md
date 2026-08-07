@@ -277,7 +277,7 @@ query` returning `record_id, occurred_at, title, entity_ref[, entity_ref2]`,
   Notes 2026-07-15: added a `telegram/FORWARDED_MESSAGE` timeline block for
   already-collected forwarded Telegram messages, then reran a targeted live
   backfill. Analyzer now has `FORWARDED_MESSAGE=116,612` rows, and the richest
-  active sample `bryanseah234` (`6c76d679-34d3-4da4-91f1-44e1c1a97b4e`) now
+  active sample `hongyime` (`6c76d679-34d3-4da4-91f1-44e1c1a97b4e`) now
   reaches `8` types:
   `CODE_COMMIT, COMMENT_POSTED, FOLLOWED, FORWARDED_MESSAGE, MESSAGE_SENT, REACTION_GIVEN, REPLIED, STORY_POSTED`.
 
@@ -493,7 +493,7 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
   in the graph (strong, human-authored). *Accept:* bio/link edges shown. Notes
   2026-07-15: `relationship_intelligence.py` now promotes these signals into
   `entity_relationships.relationship_type='self_declared_link'`; live refresh
-  produced `12` rows. Example live edge: `bryanseah234` ↔
+  produced `12` rows. Example live edge: `hongyime` ↔
   `SMU Foundations of Cybersecurity`, weight `35`, reason
   `"Human-authored cross-reference in a bio, link, or personal website."`
 - [x] **T5.7 Style/emoji/language fingerprint → soft same-person.** Per-entity

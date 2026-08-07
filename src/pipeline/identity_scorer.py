@@ -55,7 +55,7 @@ _TYPE_WEIGHT = {
     # P2-7: same physical camera (EXIF body/lens serial) across two entities.
     "media_device_match": 0.55,
     # Cross-entity similar-handle candidate: two separate people share a digit-
-    # stripped username (bryanseah vs bryanseah234). Moderate — surfaced in Review.
+    # stripped username (bryanseah vs hongyime). Moderate — surfaced in Review.
     "username_similar": 0.45,
     # Axis-3 Change-3: direct ArcFace kNN between two entities' PORTRAIT faces,
     # gated by >= FACE_PAIR_KNN_MIN_MATCHES matches at >= FACE_PAIR_KNN_THRESHOLD

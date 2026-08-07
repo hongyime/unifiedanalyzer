@@ -23,9 +23,9 @@ TARGET_PLATFORMS = {
     "beeper",
 }
 
-DEFAULT_OWNER_HANDLES = {"bryanseah234"}
+DEFAULT_OWNER_HANDLES = {"hongyime"}
 DEFAULT_OWNER_ACCOUNTS = {
-    ("github", "bryanseah234"),
+    ("github", "hongyime"),
     ("github", "66017805"),
     ("instagram", "4495993191"),
     ("instagram", "1484289220"),

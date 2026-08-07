@@ -80,7 +80,7 @@ def normalize_username(username: str | None) -> str | None:
 def normalize_username_strict(username: str | None) -> str | None:
     """Like normalize_username but KEEPS trailing digits — only case + punctuation
     (._-) are normalized. So "john_smith" == "johnsmith" (punctuation variant, same
-    person) but "bryanseah234" != "bryanseah" (digit-suffix variant, treated as
+    person) but "hongyime" != "bryanseah" (digit-suffix variant, treated as
     potentially DIFFERENT people). Phase 1 clusters on this strict key so only
     genuinely-same handles auto-merge; digit-variants are surfaced as cross-entity
     candidates instead (see username_similar)."""
@@ -585,8 +585,8 @@ async def resolve_entities() -> dict:
 
     # Phase 1: cluster by STRICT username (case/punctuation-normalized, digits
     # KEPT) so only genuinely-same handles auto-merge. Within each loose (digit-
-    # stripped) group we sub-group by the strict handle: "bryanseah234" clusters
-    # with "bryanseah234", but "bryanseah" stays a SEPARATE person — later surfaced
+    # stripped) group we sub-group by the strict handle: "hongyime" clusters
+    # with "hongyime", but "bryanseah" stays a SEPARATE person — later surfaced
     # as a cross-entity username_similar candidate rather than silently merged.
     for norm_user, group in profiles_by_username.items():
         has_target_name = norm_user in target_names
@@ -882,7 +882,7 @@ async def resolve_entities() -> dict:
                 is_confirmed = True
 
             # Canonical name, best-first: a proper Strava name, then a distinctive
-            # full name, then a username handle (a real "bryanseah234" beats a
+            # full name, then a username handle (a real "hongyime" beats a
             # 1-char nickname like "b"), then any name, then a source:handle
             # fallback so an account with nothing still isn't "(unnamed)".
             canonical = None
@@ -1071,7 +1071,7 @@ async def resolve_entities() -> dict:
 
         # Cross-entity "similar username" candidates: entities that share a
         # digit-stripped handle but were NOT merged (different strict handles —
-        # e.g. bryanseah vs bryanseah234). Emit a weak CROSS-entity signal
+        # e.g. bryanseah vs hongyime). Emit a weak CROSS-entity signal
         # (target_record_id = the other entity's UUID) so the scorer surfaces them
         # in Review to confirm/reject, instead of the resolver silently merging
         # possibly-different people. Skipped for handles shared by too many

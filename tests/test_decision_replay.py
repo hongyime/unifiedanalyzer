@@ -523,7 +523,7 @@ def test_apply_decision_replay_applies_location_decision(tmp_path):
                 "evidence_key": "c" * 64,
                 "confidence": 0.75,
             },
-            "entity_snapshot": [_snapshot("strava", "72101656", "bryanseah234")],
+            "entity_snapshot": [_snapshot("strava", "72101656", "hongyime")],
         },
     ))
     conn = FakeConn(
