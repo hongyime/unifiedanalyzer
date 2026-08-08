@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.db.connection import get_analyzer_pool
 from src.merge_candidates import merge_candidate_min_weight
+from src.pipeline.face_bridge_audit import audit_face_bridge_collisions
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ async def run_alerts() -> dict:
         "new_identity_link": 0,
         "coordinated_posting": 0,
         "location_mismatch": 0,
+        "emotional_spike": 0,
+        "face_link_drift": 0,
+        "location_evidence_spike": 0,
     }
 
     if _env_bool("SILENCE_GAP_DYNAMIC", True):
@@ -64,6 +68,15 @@ async def run_alerts() -> dict:
 
     if _env_bool("LOCATION_MISMATCH_ALERT_ENABLED", True):
         stats["location_mismatch"] = await _detect_location_mismatches()
+
+    if _env_bool("EMOTIONAL_SPIKE_ALERT_ENABLED", True):
+        stats["emotional_spike"] = await _detect_emotional_spikes()
+
+    if _env_bool("FACE_LINK_DRIFT_ALERT_ENABLED", True):
+        stats["face_link_drift"] = await _detect_face_link_drift()
+
+    if _env_bool("LOCATION_EVIDENCE_SPIKE_ALERT_ENABLED", True):
+        stats["location_evidence_spike"] = await _detect_location_evidence_spikes()
 
     logger.info("Alert engine complete: %s", stats)
     return stats
@@ -182,6 +195,163 @@ async def _detect_silence_gaps() -> int:
                         }))
                     count += 1
 
+    return count
+
+
+async def _detect_emotional_spikes() -> int:
+    pool = get_analyzer_pool()
+    min_baseline = _env_int("EMOTIONAL_SPIKE_MIN_BASELINE_EVENTS", 20)
+    min_current = _env_int("EMOTIONAL_SPIKE_MIN_CURRENT_EVENTS", 5)
+    z_threshold = _env_float("EMOTIONAL_SPIKE_Z_THRESHOLD", 2.5)
+    confidence_floor = _env_float("EMOTIONAL_SPIKE_CONFIDENCE_FLOOR", 0.55)
+    count = 0
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            WITH baseline AS (
+                SELECT entity_id,
+                       count(*)::int AS baseline_count,
+                       avg(vader_compound) AS baseline_mean,
+                       stddev_pop(vader_compound) AS baseline_stddev
+                FROM timeline_text_features
+                WHERE entity_id IS NOT NULL
+                  AND vader_compound IS NOT NULL
+                  AND occurred_at >= NOW() - INTERVAL '60 days'
+                  AND occurred_at < NOW() - INTERVAL '24 hours'
+                  AND COALESCE(sentiment_confidence, 0) >= $3
+                GROUP BY entity_id
+            ),
+            current AS (
+                SELECT entity_id,
+                       count(*)::int AS event_count,
+                       avg(vader_compound) AS current_mean,
+                       avg(sentiment_confidence) AS avg_confidence,
+                       array_agg(event_id::text ORDER BY occurred_at DESC)[:10] AS event_ids
+                FROM timeline_text_features
+                WHERE entity_id IS NOT NULL
+                  AND vader_compound IS NOT NULL
+                  AND occurred_at >= NOW() - INTERVAL '24 hours'
+                  AND COALESCE(sentiment_confidence, 0) >= $3
+                GROUP BY entity_id
+            )
+            SELECT c.entity_id::text, e.canonical_name,
+                   b.baseline_count, c.event_count, b.baseline_mean,
+                   COALESCE(NULLIF(b.baseline_stddev, 0), 0.05) AS baseline_stddev,
+                   c.current_mean, c.avg_confidence, c.event_ids
+            FROM current c
+            JOIN baseline b ON b.entity_id = c.entity_id
+            JOIN entities e ON e.id = c.entity_id
+            WHERE b.baseline_count >= $1
+              AND c.event_count >= $2
+              AND abs((c.current_mean - b.baseline_mean) / COALESCE(NULLIF(b.baseline_stddev, 0), 0.05)) >= $4
+        """, min_baseline, min_current, confidence_floor, z_threshold)
+        for row in rows:
+            z_score = (float(row["current_mean"]) - float(row["baseline_mean"])) / float(row["baseline_stddev"])
+            key = f"{row['entity_id']}:{datetime.now(timezone.utc).date().isoformat()}:{'positive' if z_score > 0 else 'negative'}"
+            existing = await conn.fetchval("""
+                SELECT id FROM alerts
+                WHERE alert_type = 'EMOTIONAL_SPIKE'
+                  AND detail->>'dedupe_key' = $1
+            """, key)
+            if existing:
+                continue
+            await conn.execute("""
+                INSERT INTO alerts (entity_id, alert_type, severity, title, detail)
+                VALUES ($1::uuid, 'EMOTIONAL_SPIKE', $2, $3, $4)
+            """, row["entity_id"],
+                "warning" if abs(z_score) >= z_threshold + 1 else "info",
+                f"Emotional tone spike for {row['canonical_name'] or row['entity_id']}",
+                json.dumps({
+                    "dedupe_key": key,
+                    "context_only": True,
+                    "baseline_window_days": 60,
+                    "event_window_hours": 24,
+                    "baseline_count": row["baseline_count"],
+                    "event_count": row["event_count"],
+                    "baseline_mean": float(row["baseline_mean"]),
+                    "baseline_stddev": float(row["baseline_stddev"]),
+                    "current_mean": float(row["current_mean"]),
+                    "z_score": round(z_score, 3),
+                    "confidence": float(row["avg_confidence"]),
+                    "event_ids": list(row["event_ids"] or []),
+                }, default=str))
+            count += 1
+    return count
+
+
+async def _detect_face_link_drift() -> int:
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        report = await audit_face_bridge_collisions(conn, sample_limit=5)
+        if not report.get("available") or report.get("ok") is not False:
+            return 0
+        key = json.dumps({
+            "face": report.get("face_entity_collisions"),
+            "cluster": report.get("cluster_entity_collisions"),
+        }, sort_keys=True)
+        existing = await conn.fetchval("""
+            SELECT id FROM alerts
+            WHERE alert_type = 'FACE_LINK_DRIFT'
+              AND detected_at > NOW() - INTERVAL '24 hours'
+              AND detail->>'drift_key' = $1
+        """, key)
+        if existing:
+            return 0
+        await conn.execute("""
+            INSERT INTO alerts (alert_type, severity, title, detail)
+            VALUES ('FACE_LINK_DRIFT', 'warning', $1, $2)
+        """, "Face link audit found collision drift", json.dumps({
+            "drift_key": key,
+            "face_entity_collisions": report.get("face_entity_collisions"),
+            "cluster_entity_collisions": report.get("cluster_entity_collisions"),
+            "contested_cluster_count": report.get("contested_cluster_count"),
+            "samples": report.get("samples", {}),
+        }, default=str))
+    return 1
+
+
+async def _detect_location_evidence_spikes() -> int:
+    pool = get_analyzer_pool()
+    min_events = _env_int("LOCATION_EVIDENCE_SPIKE_MIN_EVENTS", 8)
+    min_confidence = _env_float("LOCATION_EVIDENCE_SPIKE_MIN_CONFIDENCE", 0.55)
+    count = 0
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT le.entity_id::text, e.canonical_name, le.source,
+                   count(*)::int AS event_count,
+                   avg(le.confidence) AS avg_confidence,
+                   array_agg(le.evidence_key ORDER BY le.occurred_at DESC)[:10] AS evidence_keys
+            FROM location_evidence le
+            JOIN entities e ON e.id = le.entity_id
+            WHERE COALESCE(le.status, 'active') = 'active'
+              AND COALESCE(le.confidence, 0) >= $2
+              AND le.occurred_at >= NOW() - INTERVAL '24 hours'
+              AND COALESCE(le.evidence_type, '') NOT IN ('caption_derived', 'venue_geocode')
+            GROUP BY le.entity_id, e.canonical_name, le.source
+            HAVING count(*) >= $1
+        """, min_events, min_confidence)
+        for row in rows:
+            key = f"{row['entity_id']}:{row['source']}:{datetime.now(timezone.utc).date().isoformat()}"
+            existing = await conn.fetchval("""
+                SELECT id FROM alerts
+                WHERE alert_type = 'LOCATION_EVIDENCE_SPIKE'
+                  AND detail->>'dedupe_key' = $1
+            """, key)
+            if existing:
+                continue
+            await conn.execute("""
+                INSERT INTO alerts (entity_id, alert_type, severity, source, title, detail)
+                VALUES ($1::uuid, 'LOCATION_EVIDENCE_SPIKE', 'info', $2, $3, $4)
+            """, row["entity_id"], row["source"],
+                f"Location evidence spike for {row['canonical_name'] or row['entity_id']}",
+                json.dumps({
+                    "dedupe_key": key,
+                    "event_window_hours": 24,
+                    "event_count": row["event_count"],
+                    "avg_confidence": float(row["avg_confidence"] or 0),
+                    "evidence_keys": list(row["evidence_keys"] or []),
+                    "public_place_suppressed_types": ["caption_derived", "venue_geocode"],
+                }, default=str))
+            count += 1
     return count
 
 

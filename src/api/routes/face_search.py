@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.api.face_lookup import face_crop_url
 from src.db.connection import get_analyzer_pool, get_collector_pool
+from src.pipeline.face_bridge_audit import audit_face_bridge_collisions
 
 router = APIRouter(tags=["face-search"])
 logger = logging.getLogger(__name__)
@@ -359,3 +360,25 @@ async def search_faces(
         },
         "collector_skipped": collector_skipped,
     }
+
+
+@router.get("/faces/audit")
+async def face_audit_report(sample_limit: int = Query(5, ge=0, le=50)):
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        report = await audit_face_bridge_collisions(conn, sample_limit=sample_limit)
+        try:
+            counts = await conn.fetchrow("""
+                SELECT
+                    (SELECT count(*) FROM facetracker.faces) AS total_faces,
+                    (SELECT count(*) FROM facetracker.faces WHERE embedding_vec IS NOT NULL AND NOT COALESCE(is_junk, FALSE)) AS searchable_faces,
+                    (SELECT count(*) FROM facetracker.faces WHERE COALESCE(is_junk, FALSE)) AS junk_faces,
+                    (SELECT count(*) FROM public.entity_faces) AS bridged_faces,
+                    (SELECT count(DISTINCT entity_id) FROM public.entity_faces) AS entities_with_faces
+            """)
+        except Exception as exc:  # noqa: BLE001
+            counts = None
+            report.setdefault("warnings", []).append(str(exc))
+
+    report["counts"] = dict(counts) if counts else {}
+    return report

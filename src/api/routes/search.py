@@ -1,4 +1,4 @@
-"""Axis-1 MVP: semantic timeline search endpoint.
+"""Timeline search endpoint with keyword, semantic, and hybrid modes.
 
 GET /api/search/timeline?q=...&entity_id=&since=&until=&source=&limit=
 
@@ -33,25 +33,14 @@ router = APIRouter(prefix="/api/search", tags=["search"])
 @router.get("/timeline")
 async def search_timeline(
     q: str = Query(..., description="Free-text semantic search query"),
+    mode: str = Query("hybrid", pattern="^(hybrid|keyword|semantic)$"),
     entity_id: str | None = Query(None, description="Restrict to one entity's timeline"),
     since: datetime | None = Query(None, description="occurred_at >= ISO datetime"),
     until: datetime | None = Query(None, description="occurred_at <= ISO datetime"),
     source: str | None = Query(None, description="Platform filter (github, strava, ...)"),
     limit: int = Query(50, ge=1, le=200, description="Max results (1..200)"),
 ):
-    """Semantic search over timeline_events via HNSW cosine kNN.
-
-    Returns:
-        {
-          "results": [
-            {"event_id", "entity_id", "platform", "occurred_at",
-             "snippet", "score"},
-            ...
-          ],
-          "took_ms": int,
-          "model": "intfloat/multilingual-e5-small"
-        }
-    """
+    """Search timeline text features with Postgres FTS, pgvector, or RRF hybrid."""
     q = (q or "").strip()
     if not q:
         # Per spec: empty q -> 400. FastAPI's Query(...) enforces presence
@@ -60,60 +49,146 @@ async def search_timeline(
 
     t0 = time.monotonic()
 
-    try:
-        from src.pipeline.text_embedder import get_embedder
-        embedder = get_embedder()
-    except Exception as e:  # noqa: BLE001
-        logger.exception("search_timeline: embedder unavailable")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Text embedder not ready: {str(e)[:200]}",
-        )
+    emb_literal = None
+    embedder = None
+    if mode in {"semantic", "hybrid"}:
+        try:
+            from src.pipeline.text_embedder import get_embedder
+            embedder = get_embedder()
+            vec = embedder.embed([q], is_query=True)[0]
+            emb_literal = "[" + ",".join(f"{float(x):.7f}" for x in vec) + "]"
+        except Exception as e:  # noqa: BLE001
+            if mode == "semantic":
+                logger.exception("search_timeline: embedder unavailable")
+                raise HTTPException(status_code=503, detail=f"Text embedder not ready: {str(e)[:200]}")
+            logger.warning("search_timeline: hybrid falling back to keyword: %s", e)
+            mode = "keyword"
 
-    try:
-        vec = embedder.embed([q], is_query=True)[0]
-    except Exception as e:  # noqa: BLE001
-        logger.exception("search_timeline: embed failed")
-        raise HTTPException(status_code=500, detail=f"Embedding failed: {str(e)[:200]}")
+    filter_values: list = []
 
-    emb_literal = "[" + ",".join(f"{float(x):.7f}" for x in vec) + "]"
+    def _filters(start_idx: int) -> tuple[str, int]:
+        conditions: list[str] = []
+        idx = start_idx
+        if entity_id:
+            conditions.append(f"ttf.entity_id = ${idx}::uuid")
+            idx += 1
+        if since:
+            conditions.append(f"ttf.occurred_at >= ${idx}")
+            idx += 1
+        if until:
+            conditions.append(f"ttf.occurred_at <= ${idx}")
+            idx += 1
+        if source:
+            conditions.append(f"ttf.source = ${idx}")
+            idx += 1
+        return (" AND " + " AND ".join(conditions)) if conditions else "", idx
 
-    conditions: list[str] = []
-    params: list = [emb_literal]
-    idx = 2
     if entity_id:
-        conditions.append(f"te.entity_id = ${idx}::uuid")
-        params.append(entity_id)
-        idx += 1
+        filter_values.append(entity_id)
     if since:
-        conditions.append(f"te.occurred_at >= ${idx}")
-        params.append(since)
-        idx += 1
+        filter_values.append(since)
     if until:
-        conditions.append(f"te.occurred_at <= ${idx}")
-        params.append(until)
-        idx += 1
+        filter_values.append(until)
     if source:
-        conditions.append(f"te.source = ${idx}")
-        params.append(source)
-        idx += 1
+        filter_values.append(source)
 
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    params.append(limit)
-
-    sql = f"""
-        SELECT te.id::text     AS event_id,
-               te.entity_id::text AS entity_id,
-               te.source          AS platform,
-               te.occurred_at,
-               te.title           AS snippet,
-               1 - (emb.embedding <=> $1::vector) AS cosine_score
-        FROM timeline_embeddings emb
-        JOIN timeline_events te ON te.id = emb.event_id
-        {where}
-        ORDER BY emb.embedding <=> $1::vector
-        LIMIT ${idx}
-    """
+    if mode == "keyword":
+        filter_sql, limit_idx = _filters(2)
+        params = [q, *filter_values, limit]
+        sql = f"""
+            WITH query AS (SELECT websearch_to_tsquery('simple', $1) AS tsq)
+            SELECT ranked.event_id::text AS event_id,
+                   ranked.entity_id::text AS entity_id,
+                   ranked.source AS platform,
+                   ranked.occurred_at,
+                   LEFT(ranked.canonical_text, 500) AS snippet,
+                   ranked.keyword_score AS score,
+                   ranked.keyword_score,
+                   NULL::float8 AS semantic_score,
+                   ranked.keyword_rank,
+                   NULL::int AS semantic_rank,
+                   ranked.keyword_rank AS rrf_rank
+            FROM (
+                SELECT ttf.*,
+                       ts_rank_cd(ttf.search_vector, query.tsq) AS keyword_score,
+                       row_number() OVER (ORDER BY ts_rank_cd(ttf.search_vector, query.tsq) DESC, ttf.occurred_at DESC)::int AS keyword_rank
+                FROM timeline_text_features ttf, query
+                WHERE ttf.search_vector @@ query.tsq {filter_sql}
+            ) ranked
+            ORDER BY ranked.keyword_rank
+            LIMIT ${limit_idx}
+        """
+    elif mode == "semantic":
+        filter_sql, limit_idx = _filters(2)
+        params = [emb_literal, *filter_values, limit]
+        sql = f"""
+            SELECT ttf.event_id::text AS event_id,
+                   ttf.entity_id::text AS entity_id,
+                   ttf.source AS platform,
+                   ttf.occurred_at,
+                   LEFT(ttf.canonical_text, 500) AS snippet,
+                   1 - (emb.embedding <=> $1::vector) AS score,
+                   NULL::float8 AS keyword_score,
+                   1 - (emb.embedding <=> $1::vector) AS semantic_score,
+                   NULL::int AS keyword_rank,
+                   row_number() OVER (ORDER BY emb.embedding <=> $1::vector)::int AS semantic_rank,
+                   row_number() OVER (ORDER BY emb.embedding <=> $1::vector)::int AS rrf_rank
+            FROM timeline_embeddings emb
+            JOIN timeline_text_features ttf ON ttf.event_id = emb.event_id
+            WHERE TRUE {filter_sql}
+            ORDER BY emb.embedding <=> $1::vector
+            LIMIT ${limit_idx}
+        """
+    else:
+        filter_sql, limit_idx = _filters(3)
+        params = [q, emb_literal, *filter_values, limit]
+        sql = f"""
+            WITH query AS (SELECT websearch_to_tsquery('simple', $1) AS tsq),
+            keyword AS (
+                SELECT ttf.event_id,
+                       ts_rank_cd(ttf.search_vector, query.tsq) AS keyword_score,
+                       row_number() OVER (ORDER BY ts_rank_cd(ttf.search_vector, query.tsq) DESC, ttf.occurred_at DESC)::int AS keyword_rank
+                FROM timeline_text_features ttf, query
+                WHERE ttf.search_vector @@ query.tsq {filter_sql}
+                ORDER BY keyword_rank
+                LIMIT ${limit_idx}
+            ),
+            semantic AS (
+                SELECT ttf.event_id,
+                       1 - (emb.embedding <=> $2::vector) AS semantic_score,
+                       row_number() OVER (ORDER BY emb.embedding <=> $2::vector)::int AS semantic_rank
+                FROM timeline_embeddings emb
+                JOIN timeline_text_features ttf ON ttf.event_id = emb.event_id
+                WHERE TRUE {filter_sql}
+                ORDER BY semantic_rank
+                LIMIT ${limit_idx}
+            ),
+            fused AS (
+                SELECT COALESCE(k.event_id, s.event_id) AS event_id,
+                       k.keyword_score,
+                       s.semantic_score,
+                       k.keyword_rank,
+                       s.semantic_rank,
+                       COALESCE(1.0 / (60 + k.keyword_rank), 0) + COALESCE(1.0 / (60 + s.semantic_rank), 0) AS rrf_score
+                FROM keyword k
+                FULL OUTER JOIN semantic s ON s.event_id = k.event_id
+            )
+            SELECT ttf.event_id::text AS event_id,
+                   ttf.entity_id::text AS entity_id,
+                   ttf.source AS platform,
+                   ttf.occurred_at,
+                   LEFT(ttf.canonical_text, 500) AS snippet,
+                   fused.rrf_score AS score,
+                   fused.keyword_score,
+                   fused.semantic_score,
+                   fused.keyword_rank,
+                   fused.semantic_rank,
+                   row_number() OVER (ORDER BY fused.rrf_score DESC, ttf.occurred_at DESC)::int AS rrf_rank
+            FROM fused
+            JOIN timeline_text_features ttf ON ttf.event_id = fused.event_id
+            ORDER BY fused.rrf_score DESC, ttf.occurred_at DESC
+            LIMIT ${limit_idx}
+        """
 
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
@@ -126,7 +201,12 @@ async def search_timeline(
             "platform": r["platform"],
             "occurred_at": r["occurred_at"].isoformat() if r["occurred_at"] else None,
             "snippet": r["snippet"],
-            "score": round(float(r["cosine_score"]), 4),
+            "score": round(float(r["score"] or 0), 4),
+            "keyword_score": round(float(r["keyword_score"]), 4) if r["keyword_score"] is not None else None,
+            "semantic_score": round(float(r["semantic_score"]), 4) if r["semantic_score"] is not None else None,
+            "keyword_rank": r["keyword_rank"],
+            "semantic_rank": r["semantic_rank"],
+            "rrf_rank": r["rrf_rank"],
         }
         for r in rows
     ]
@@ -135,5 +215,6 @@ async def search_timeline(
     return {
         "results": results,
         "took_ms": took_ms,
-        "model": embedder.MODEL_NAME,
+        "mode": mode,
+        "model": getattr(embedder, "MODEL_NAME", None),
     }

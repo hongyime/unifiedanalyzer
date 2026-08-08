@@ -522,6 +522,167 @@ async def entity_geo(
                        "events": len(events), "evidence_types": evidence_counts, "suppressed": suppressed}}
 
 
+@router.get("/entities/{entity_id}/geo/quality")
+async def entity_geo_quality(entity_id: str):
+    entity_id = require_uuid(entity_id)
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT source,
+                   COALESCE(evidence_type, 'unknown') AS evidence_type,
+                   COALESCE(status, 'active') AS status,
+                   count(*)::int AS n,
+                   round(avg(confidence)::numeric, 3) AS avg_confidence,
+                   min(occurred_at) AS first_seen,
+                   max(occurred_at) AS last_seen
+            FROM location_evidence
+            WHERE entity_id = $1::uuid
+            GROUP BY source, COALESCE(evidence_type, 'unknown'), COALESCE(status, 'active')
+            ORDER BY n DESC, source, evidence_type
+        """, entity_id)
+        weak = await conn.fetch("""
+            SELECT evidence_key, source, evidence_type, status, label,
+                   confidence, occurred_at, source_table, source_record_id
+            FROM location_evidence
+            WHERE entity_id = $1::uuid
+              AND (COALESCE(confidence, 0) < 0.45 OR COALESCE(status, 'active') <> 'active')
+            ORDER BY occurred_at DESC NULLS LAST
+            LIMIT 20
+        """, entity_id)
+    return {
+        "entity_id": entity_id,
+        "groups": [
+            {
+                "source": r["source"],
+                "evidence_type": r["evidence_type"],
+                "status": r["status"],
+                "count": r["n"],
+                "avg_confidence": float(r["avg_confidence"]) if r["avg_confidence"] is not None else None,
+                "first_seen": r["first_seen"].isoformat() if r["first_seen"] else None,
+                "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
+            }
+            for r in rows
+        ],
+        "weak_samples": [
+            {
+                "evidence_key": r["evidence_key"],
+                "source": r["source"],
+                "evidence_type": r["evidence_type"],
+                "status": r["status"],
+                "label": r["label"],
+                "confidence": r["confidence"],
+                "occurred_at": r["occurred_at"].isoformat() if r["occurred_at"] else None,
+                "source_table": r["source_table"],
+                "source_record_id": r["source_record_id"],
+            }
+            for r in weak
+        ],
+    }
+
+
+@router.get("/entities/{entity_id}/chat/summary")
+async def entity_chat_summary(entity_id: str):
+    entity_id = require_uuid(entity_id)
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT count(*)::int AS threads,
+                   COALESCE(sum(message_count), 0)::int AS messages,
+                   COALESCE(sum(reply_count), 0)::int AS replies,
+                   COALESCE(sum(reaction_count), 0)::int AS reactions,
+                   max(last_message_at) AS last_message_at
+            FROM conversation_threads
+            WHERE entity_id = $1::uuid OR peer_entity_id = $1::uuid
+        """, entity_id)
+    return {
+        "entity_id": entity_id,
+        "threads": row["threads"] if row else 0,
+        "messages": row["messages"] if row else 0,
+        "replies": row["replies"] if row else 0,
+        "reactions": row["reactions"] if row else 0,
+        "last_message_at": row["last_message_at"].isoformat() if row and row["last_message_at"] else None,
+        "context_only": True,
+    }
+
+
+@router.get("/entities/{entity_id}/chat/threads")
+async def entity_chat_threads(entity_id: str, limit: int = Query(25, ge=1, le=100)):
+    entity_id = require_uuid(entity_id)
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT thread_id, source, entity_id::text, peer_entity_id::text,
+                   title, started_at, last_message_at, message_count, reply_count,
+                   reaction_count, forwarded_count, avg_response_seconds,
+                   sentiment_summary, preview
+            FROM conversation_threads
+            WHERE entity_id = $1::uuid OR peer_entity_id = $1::uuid
+            ORDER BY last_message_at DESC NULLS LAST
+            LIMIT $2
+        """, entity_id, limit)
+    return {"entity_id": entity_id, "threads": [_conversation_thread_payload(r) for r in rows]}
+
+
+@router.get("/chat/threads/{thread_id:path}")
+async def chat_thread_detail(thread_id: str):
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT thread_id, source, entity_id::text, peer_entity_id::text,
+                   title, started_at, last_message_at, message_count, reply_count,
+                   reaction_count, forwarded_count, avg_response_seconds,
+                   sentiment_summary, preview
+            FROM conversation_threads
+            WHERE thread_id = $1
+        """, thread_id)
+        metrics = await conn.fetch("""
+            SELECT cpm.entity_id::text, e.canonical_name, cpm.source,
+                   cpm.message_count, cpm.reply_count, cpm.reaction_count,
+                   cpm.avg_response_seconds, cpm.sentiment_summary
+            FROM conversation_participant_metrics cpm
+            LEFT JOIN entities e ON e.id = cpm.entity_id
+            WHERE cpm.thread_id = $1
+            ORDER BY cpm.message_count DESC
+        """, thread_id)
+    if not row:
+        return {"thread": None, "participants": []}
+    return {
+        "thread": _conversation_thread_payload(row),
+        "participants": [
+            {
+                "entity_id": r["entity_id"],
+                "entity_name": r["canonical_name"],
+                "source": r["source"],
+                "message_count": r["message_count"],
+                "reply_count": r["reply_count"],
+                "reaction_count": r["reaction_count"],
+                "avg_response_seconds": r["avg_response_seconds"],
+                "sentiment_summary": r["sentiment_summary"] if isinstance(r["sentiment_summary"], dict) else {},
+            }
+            for r in metrics
+        ],
+    }
+
+
+def _conversation_thread_payload(row) -> dict:
+    return {
+        "thread_id": row["thread_id"],
+        "source": row["source"],
+        "entity_id": row["entity_id"],
+        "peer_entity_id": row["peer_entity_id"],
+        "title": row["title"],
+        "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+        "last_message_at": row["last_message_at"].isoformat() if row["last_message_at"] else None,
+        "message_count": row["message_count"],
+        "reply_count": row["reply_count"],
+        "reaction_count": row["reaction_count"],
+        "forwarded_count": row["forwarded_count"],
+        "avg_response_seconds": row["avg_response_seconds"],
+        "sentiment_summary": row["sentiment_summary"] if isinstance(row["sentiment_summary"], dict) else {},
+        "preview": row["preview"] if isinstance(row["preview"], list) else [],
+    }
+
+
 @router.get("/entities/{entity_id}/associates")
 async def entity_associates(entity_id: str, limit: int = Query(40, ge=1, le=100)):
     """"Seen with" co-presence from Instagram tagged photos

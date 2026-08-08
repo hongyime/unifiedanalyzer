@@ -189,6 +189,32 @@ async def get_run_coverage(run_id: str):
     }
 
 
+@router.get("/runs/{run_id}/phases")
+async def get_run_phases(run_id: str):
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT phase, status, duration_ms, error, created_at
+            FROM run_phase_status
+            WHERE run_id = $1::uuid
+            ORDER BY created_at, phase
+        """, run_id)
+    return {
+        "run_id": run_id,
+        "phases": [
+            {
+                "phase": r["phase"],
+                "status": r["status"],
+                "duration_ms": r["duration_ms"],
+                "error": r["error"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ],
+        "total": len(rows),
+    }
+
+
 @router.post("/runs/trigger")
 async def trigger_run():
     try:
