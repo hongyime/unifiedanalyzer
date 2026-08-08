@@ -68,8 +68,12 @@ The plan should be implemented against the current system shape:
 | P2 | NLP | Add keyphrase and deterministic entity extraction | RAKE/YAKE/TextRank and spaCy rules can extract indicators without GPU | `contact_extraction.py`, `entity_enrichment.py`, new `keyphrase_entity.py` | Pattern fixtures, false-positive sample review |
 | P2 | NLP | Add MinHash/SimHash dedup | Reposts and forwarded content inflate topics, bursts, and relationships | new `text_dedup.py`, `timeline_text_features`, `content_fingerprint.py` | Known duplicate clusters, exact Jaccard verification |
 | P2 | Topics | Add short-text topics | Chat/tweet text is sparse; classic LDA alone is weak | new `short_text_topics.py`, `topic_clusters`, `timeline_event_topics` | Topic coherence sample, stability across seeds |
+| P2 | Topics | Add streaming story clustering | Real-time story detection needs incremental centroids or leader-follower clustering before heavier HDBSCAN/UMAP batches | `short_text_topics.py`, `topic_clusters`, `alerts`, search/topic APIs | Cluster stability, duplicate-adjusted story counts, bounded memory |
+| P2 | Chat | Add conversation/thread analytics | Chat data needs reply-chain, turn-taking, latency, and participant-balance metrics; per-message NLP is too noisy alone | `interaction_graph.py`, `timeline_builder.py`, new `conversation_analytics.py` | Fixture threads, latency histograms, participant graph checks |
 | P2 | Alerts | Add duplicate-aware trend/burst alerts | Spiking terms/hashtags/locations/emotions should account for repost storms and collector outages | `alert_engine.py`, new `burst_detection.py`, `alerts` | Synthetic bursts, collection-gap suppression, dedup-aware counts |
+| P2 | Graph | Add community and influence metrics | Mention/reply/retweet/comment graphs need communities, bridges, centrality, and watchlist-aware influence views | `graph_analytics.py`, `entity_interactions`, `entity_relationships`, graph API/UI | Leiden/Louvain stability, PageRank/betweenness samples, hub guard |
 | P2 | Monitoring | Add phase resource classes and timeout policy | Heavy OCR/face/embedding phases should not hide identity/timeline freshness problems | `incremental_runner.py`, scheduler status APIs | Heartbeat under load, phase timeout tests |
+| P3 | Storage/Search | Add explicit engine decision matrix | Postgres is current production truth, but SQLite FTS5, DuckDB, Meilisearch, Typesense, OpenSearch, ClickHouse, and TimescaleDB each fit different sidecar/prototype roles | docs, optional export scripts, search eval harness | No second source of truth without sync plan |
 | P3 | UX | Add fused evidence inspector | Analysts need one drawer for timeline events, map points, face hits, graph edges, alerts, and topics | `EntityDetail.tsx`, new `EvidenceInspector.tsx` | Frontend build, click-through tests |
 
 ## 1. Classical Sentiment and Emotion Analysis
@@ -335,6 +339,13 @@ Recommended layers:
 5. BERTopic-style c-TF-IDF offline, using existing embeddings or static CPU embeddings.
 6. Top2Vec only as exploratory offline analysis.
 
+Classic library options:
+
+- scikit-learn is the safest first choice because it is already present and covers TF-IDF, LSA via `TruncatedSVD`, NMF, LDA, MiniBatchKMeans, and classifiers.
+- gensim is useful for LDA/LSI if its model APIs are preferred for experiments.
+- tomotopy can be evaluated for faster topic-model experiments, but it adds a dependency to justify.
+- MALLET remains a strong classic LDA baseline, but Java/runtime packaging makes it an offline benchmark rather than a scheduler dependency.
+
 ### Taxonomy Seeds
 
 Start with buckets that map to existing product needs:
@@ -398,6 +409,76 @@ Sources:
 - BERTopic embeddings docs: https://maartengr.github.io/BERTopic/getting_started/embeddings/embeddings.html
 - Top2Vec: https://github.com/ddangelov/top2vec
 
+## 4A. Clustering and Real-Time Story Detection
+
+The topic section covers model families, but the repo also needs explicit clustering choices for story detection and alerting.
+
+### Recommended Clustering Layers
+
+| Layer | Method | Fit | Repo Use |
+|---|---|---|---|
+| Online story detection | leader-follower / single-pass thresholded cosine | cheap, streaming, explainable | live "new story" detection for watched entities and sources |
+| Incremental topic buckets | MiniBatchKMeans | streaming-friendly, bounded memory | rolling topic/story centroids from `timeline_text_features` |
+| Dense exploratory clusters | HDBSCAN | finds cluster count and noise | offline review of dense embeddings or sampled events |
+| Hierarchical review | agglomerative clustering | interpretable dendrogram-ish grouping | small case/corpus analysis |
+| BERTopic-style clusters | UMAP + HDBSCAN + c-TF-IDF | strong exploratory labels | offline/sampled topic reports only |
+
+### Repo-Specific Design
+
+Add a bounded story table:
+
+```text
+story_clusters
+- story_id
+- method
+- label
+- centroid_vector_ref
+- top_terms_json
+- source_mix_json
+- entity_count
+- event_count
+- duplicate_adjusted_event_count
+- first_seen_at
+- last_seen_at
+- status
+- created_at
+- updated_at
+```
+
+Add event membership:
+
+```text
+timeline_event_story_membership
+- event_id
+- story_id
+- score
+- method
+- text_sha1
+- duplicate_cluster_id
+- created_at
+```
+
+Rules:
+
+- Collapse near-duplicates before calling something a trend, unless coordinated reposting is the signal.
+- For live use, prefer incremental centroid assignment over full re-clustering.
+- Run HDBSCAN/UMAP only on samples, centroids, or bounded case exports.
+- Include source/entity diversity in every trend/story score.
+
+Verification:
+
+- synthetic streaming events should form stable clusters without a full-corpus rebuild,
+- duplicate-heavy repost clusters should not look like broad organic stories,
+- memory should stay bounded with a fixed centroid limit,
+- story labels should be reproducible from top terms and examples.
+
+Sources:
+
+- MiniBatchKMeans: https://scikit-learn.org/stable/modules/generated/sklearn.cluster.MiniBatchKMeans.html
+- HDBSCAN docs: https://hdbscan.readthedocs.io/en/latest/how_hdbscan_works.html
+- scikit-learn HDBSCAN: https://scikit-learn.org/stable/modules/generated/sklearn.cluster.HDBSCAN.html
+- UMAP docs: https://umap-learn.readthedocs.io/en/latest/api.html
+
 ## 5. Keyphrase and Deterministic Entity Extraction
 
 ### Recommended Toolkit
@@ -405,6 +486,7 @@ Sources:
 - RAKE for stopword-delimited phrases.
 - YAKE for single-document statistical keyphrases.
 - TextRank for graph-ranked phrase salience.
+- KeyBERT can be useful when embedding-backed keyphrases are needed, but it should reuse existing/staged embeddings and stay out of the first CPU-only hot path.
 - spaCy Matcher/PhraseMatcher/EntityRuler for rule-based entities.
 - Regex NER for emails, phones, URLs, domains, handles, tickers, wallet addresses, license plates, flight numbers, and platform IDs.
 
@@ -499,8 +581,135 @@ Sources:
 - Broder MinHash: https://ieeexplore.ieee.org/document/666900
 - datasketch LSH: https://ekzhu.com/datasketch/lsh.html
 - SimHash: https://dl.acm.org/doi/10.1145/509907.509965
+- C4 data cleaning: https://arxiv.org/abs/1910.10683
 - Deduplicating training data: https://arxiv.org/abs/2107.06499
 - RefinedWeb dataset: https://arxiv.org/abs/2306.01116
+
+## 6A. Chat-Specific Analysis
+
+The repo has Telegram, WhatsApp, Beeper, reply, reaction, DM, and group evidence. Chat needs its own analytics because individual messages are often too short for TF-IDF, LDA, or sentiment labels to be reliable.
+
+### Conversation Structure
+
+Model threads and turns explicitly:
+
+- parent-child message IDs,
+- reply chains,
+- forwards,
+- reactions,
+- mentions,
+- quoted targets,
+- participant joins/leaves where available,
+- group vs direct conversation type.
+
+Candidate module:
+
+```text
+src/pipeline/conversation_analytics.py
+```
+
+Candidate outputs:
+
+```text
+conversation_threads
+- thread_id
+- source
+- chat_id
+- root_message_id
+- started_at
+- ended_at
+- participant_count
+- message_count
+- reaction_count
+- topic_summary_json
+- sentiment_summary_json
+
+conversation_participant_metrics
+- thread_id
+- entity_id
+- messages_sent
+- replies_received
+- replies_given
+- avg_response_latency_seconds
+- median_response_latency_seconds
+- initiated_thread_count
+- mention_count
+- reaction_given_count
+- reaction_received_count
+- participant_balance_score
+```
+
+### Message vs Thread Aggregation
+
+Compute both granularities:
+
+- Per message: language, keyphrases, explicit entities, duplicate hash, reply target, sentiment confidence.
+- Per thread: aggregate emotion, dominant topics, participant balance, response latency, duplicate-adjusted term bursts.
+- Per participant: who replies to whom, who gets ignored, who initiates, who bridges subgroups.
+
+Rule: one angry message does not make an angry thread. Alert on aggregate windows unless a message contains deterministic high-risk keywords or a watched entity is involved.
+
+### Chat Graphs
+
+Use `entity_interactions` as the directed base, then build:
+
+- mention graph,
+- reply graph,
+- reaction graph,
+- co-participation graph,
+- thread initiation graph,
+- subgroup communities.
+
+Leiden communities can detect sub-groups in large chats. PageRank/betweenness can show brokers or bridges, but every metric must show the edge family and time window.
+
+Verification:
+
+- fixture with known reply tree,
+- response-latency calculation across timezones,
+- participant-balance metrics on small known chats,
+- no double-counting forwarded messages,
+- rejected/suppressed duplicate messages excluded from thread sentiment by default.
+
+## 6B. Bot, Spam, and Automation Heuristics
+
+Add bot/spam heuristics as reviewable context, not as hard labels.
+
+Candidate features:
+
+- account age where collector data exposes it,
+- posting rate by source and time window,
+- duplicate-content ratio,
+- follower/following skew,
+- URL-heavy post ratio,
+- hashtag entropy,
+- repeated caption/template ratio,
+- near-duplicate cluster membership,
+- cross-platform copy delay,
+- reply/reaction reciprocity,
+- group fan-out,
+- source health at collection time.
+
+Candidate storage:
+
+```text
+behavioral_profiles.metadata.bot_heuristics
+entity_relationships.sources.coordinated_behavior
+alerts.detail.bot_or_spam_features
+```
+
+Rules:
+
+- Never suppress evidence solely because an entity looks bot-like.
+- Use bot/spam flags to reduce alert noise, prioritize review, or explain coordinated behavior.
+- Require human review before high-impact labels.
+- Separate automation indicators from maliciousness.
+
+Verification:
+
+- known benign repost accounts should not become high-severity alerts,
+- duplicate-heavy spam fixtures should cluster,
+- follower/following skew should be source-specific,
+- bot heuristics should include enough feature detail for review.
 
 ## 7. Monitoring and Pipeline Debuggability
 
@@ -1060,6 +1269,7 @@ Use two layers:
    - EWMA,
    - CUSUM,
    - rolling anomaly detection,
+   - Seasonal-Hybrid ESD-style anomaly detection where seasonality exists,
    - duplicate-adjusted counts.
 2. Batch detectors for richer reports:
    - Kleinberg burst detection,
@@ -1091,7 +1301,95 @@ Sources:
 
 - Kleinberg burst detection: https://www.cs.cornell.edu/home/kleinber/kdd02.html
 - Twitter AnomalyDetection: https://github.com/twitter/AnomalyDetection
+- Seasonal-Hybrid ESD docs: https://rdrr.io/github/twitter/AnomalyDetection/man/AnomalyDetectionTs.html
 - Rayson/Garside log-likelihood: https://aclanthology.org/W00-0901.pdf
+
+## 11A. Network and Graph Analysis
+
+The current graph stack already has `entity_interactions`, `entity_relationships`, `graph_analytics.py`, `ConnectionsPanel`, and `NetworkGraph`. The missing piece is a clear split between identity evidence, relationship context, community structure, and influence metrics.
+
+### Graph Types
+
+Build separate graph snapshots for:
+
+- reply graph,
+- mention graph,
+- reaction graph,
+- comment graph,
+- follow graph,
+- photo co-appearance graph,
+- location co-presence graph,
+- duplicate/repost graph,
+- combined interaction graph.
+
+Each snapshot should store:
+
+```text
+graph_snapshot_id
+edge_family
+time_window_start
+time_window_end
+entity_count
+edge_count
+source_mix_json
+filters_json
+created_at
+```
+
+### Metrics
+
+Compute:
+
+- degree and weighted degree,
+- in-degree/out-degree for directed interactions,
+- reciprocity,
+- PageRank,
+- eigenvector centrality where stable,
+- betweenness centrality for bridge detection,
+- community ID,
+- participation coefficient,
+- within-community degree.
+
+### Community Detection
+
+Use:
+
+- Louvain as a simple baseline.
+- Leiden for stronger community quality and well-connected communities.
+- `igraph`/`leidenalg` for larger graphs instead of converting huge NetworkX objects late.
+
+Guardrails:
+
+- Do not call a person "influential" without showing edge family, source mix, and time window.
+- Avoid letting huge public groups dominate communities.
+- Apply public-place and group-size fan-out guards before location/group edges enter graph metrics.
+- Store metrics as context, not identity evidence.
+
+Candidate tables:
+
+```text
+graph_snapshots
+entity_graph_metrics
+entity_communities
+community_edges
+bridge_findings
+```
+
+Frontend:
+
+- add community legend,
+- selectable edge families,
+- time-windowed metrics,
+- evidence drawer for centrality/community findings,
+- separate "standing relationships" from "in-window interactions".
+
+Sources:
+
+- Louvain paper: https://arxiv.org/abs/0803.0476
+- Leiden paper: https://www.nature.com/articles/s41598-019-41695-z
+- leidenalg docs: https://leidenalg.readthedocs.io/en/stable/intro.html
+- NetworkX betweenness centrality: https://networkx.org/documentation/stable/reference/algorithms/generated/networkx.algorithms.centrality.betweenness_centrality.html
+- CDlib docs: https://cdlib.readthedocs.io/
 
 ## 12. CPU-Only Stack Recommendation
 
@@ -1106,6 +1404,22 @@ Recommended Python stack:
 - networkx for simple graph analysis; igraph/leidenalg for larger community detection.
 - pandas/Polars and DuckDB for offline audit reports.
 - Postgres/pgvector for production search and entity data.
+
+### No-GPU Embedding Options
+
+Use these only where they reduce cost or improve coverage:
+
+- Existing `intfloat/multilingual-e5-small` ONNX path remains the primary dense embedding path because it already fits `timeline_embeddings vector(384)`.
+- GloVe/word2vec/fastText static vectors can provide cheap word-level features and OOV handling, especially for fastText subwords.
+- Model2Vec can distill sentence-transformer behavior into compact static embeddings and is promising for high-throughput CPU sidecars.
+- `all-MiniLM-L6-v2` maps text to 384-dimensional vectors and is a reasonable CPU/hobby-volume baseline, but adding it would duplicate the existing 384d e5-small stack unless it wins an evaluation.
+- `HashingVectorizer` remains the best memory-bounded streaming bag-of-words baseline.
+
+Evaluation rule:
+
+- Do not add another embedding model without a golden-query and clustering-quality comparison against current `timeline_embeddings`.
+- Reuse stored vectors when possible.
+- Record model name, version, text hash, and dimension in every derived table.
 
 Dependency caution:
 
@@ -1123,6 +1437,66 @@ Sources:
 - DuckDB: https://duckdb.org/why_duckdb.html
 - Polars: https://docs.pola.rs/
 - SQLite FTS5: https://www.sqlite.org/fts5.html
+- GloVe: https://nlp.stanford.edu/projects/glove/
+- model2vec: https://github.com/MinishLab/model2vec
+- all-MiniLM-L6-v2: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+
+## 12A. Storage and Search Engine Decision Matrix
+
+The plan should not imply one search/storage engine is universally best. `unifiedanalyzer` already uses Postgres and pgvector, so production truth should remain there unless a specific workload justifies a sidecar.
+
+| Engine | Best Use | Fit for UnifiedAnalyzer | Risk |
+|---|---|---|---|
+| SQLite FTS5 | zero-ops embedded full-text search with BM25 ranking | offline case bundles, prototypes, local artifact exports | second truth store if used as production index |
+| DuckDB | embedded OLAP over Parquet/CSV | batch trend charts, recovery/audit snapshots, feature experiments | not a live transactional source |
+| Postgres `tsvector` + GIN + pg_trgm | one server for relational, full-text, fuzzy matching | best first production sparse search path | not true Okapi BM25 by default |
+| Meilisearch | typo-tolerant UI search box with simple operations | optional frontend search sidecar for exported/cached documents | sync, auth, and second-index drift |
+| Typesense | typo-tolerant search with facets/filtering/sorting | optional faceted entity/media/case search sidecar | sync and schema drift |
+| OpenSearch/Elasticsearch | Lucene-scale search, analyzers, heavy faceting | only if learning/operating Meltwater-style stack is a goal | JVM/ops burden, heap/shard sizing |
+| ClickHouse | high-volume time-series and analytical aggregations | future billion-row trend/metric warehouse | another server and ingestion pipeline |
+| TimescaleDB | Postgres time-series extension/hypertables | possible if timeline/metrics outgrow current partitions | extension/migration assumptions |
+
+Recommendation:
+
+1. Start with Postgres FTS + pgvector + RRF.
+2. Use DuckDB/Polars for offline reports.
+3. Use SQLite FTS5 for portable case exports or prototypes.
+4. Consider Meilisearch/Typesense only for a dedicated typo-tolerant UI search layer.
+5. Avoid OpenSearch/Elasticsearch unless the operational learning goal outweighs the JVM/cluster burden.
+6. Consider ClickHouse/Timescale only after Postgres metrics prove aggregation limits.
+
+Sources:
+
+- SQLite FTS5: https://www.sqlite.org/fts5.html
+- DuckDB: https://duckdb.org/why_duckdb.html
+- Meilisearch typo tolerance: https://meilisearch.com/docs/resources/internals/typo_tolerance
+- Typesense search API: https://typesense.org/docs/30.2/api/search.html
+- OpenSearch install docs: https://docs.opensearch.org/latest/install-and-configure/install-opensearch/index/
+- OpenSearch operational best practices: https://docs.aws.amazon.com/opensearch-service/latest/developerguide/bp.html
+- ClickHouse time-series guide: https://clickhouse.com/docs/guides/use-cases/real-time-analytics/time-series
+- TimescaleDB: https://github.com/timescale/timescaledb
+
+## 12B. Coralytics Lessons to Copy
+
+The provided Coralytics notes map well to `unifiedanalyzer`, but the repo should adapt them rather than copy them literally.
+
+What to copy:
+
+- Normalize heterogeneous sources into one internal document/event shape. `timeline_events`, `entity_interactions`, `media_analysis`, and future `timeline_text_features` are the right primitives.
+- Use shape-based format detection for heterogeneous exports and collector payloads.
+- Use VADER as the CPU-only social sentiment default.
+- Use a fixed taxonomy plus TF-IDF/cosine or sparse classifier as the first interpretable classifier.
+- Keep Boolean/rule taxonomies as first-class. This matches the spirit of Meltwater/CSDL/VEDO-style tagging: deterministic rules remain valuable beside ML.
+- Keep rule-based red-flag detection for crisis/risk keywords because it is deterministic and auditable.
+- Keep batch architecture as the starting point, then add bounded incremental passes where needed.
+- Use visualizations for communication, but make the operational dashboard dense and evidence-oriented.
+
+What to improve for UnifiedAnalyzer:
+
+- Coralytics-style 12-category taxonomy should become configurable `topic_seed_sets`, not hard-coded constants.
+- TF-IDF/cosine should not be used alone for short chat messages; pool into pseudo-documents or use short-text models.
+- Visual novelty should not outrank evidence inspection. The primary UI need is a Life Graph workspace with timeline/map/face/graph/search evidence drawers.
+- Red flags should write `alerts.detail` with evidence refs, source health, dedupe keys, and suppression reasons.
 
 ## 13. Implementation Sequence
 
@@ -1158,6 +1532,8 @@ Sources:
 3. Make coordinated-posting duplicate-aware.
 4. Add source-health gates.
 5. Add alert false-positive review tracking.
+6. Add bot/spam heuristics as context and alert-noise controls.
+7. Add streaming story clustering for watched entities and case scopes.
 
 ### Phase E: Face and Location Upgrade
 
@@ -1167,6 +1543,8 @@ Sources:
 4. Add `entity_geo_events`.
 5. Add PostGIS or H3/geohash candidate generation.
 6. Add staypoint and repeated-location inference.
+7. Add chat-thread analytics for reply graphs, latency, and participant balance.
+8. Add graph community and influence snapshots for edge-family/time-window views.
 
 ### Phase F: Product Surface
 
@@ -1174,6 +1552,7 @@ Sources:
 2. Add entity Life Graph workspace.
 3. Make cases evidence bundles.
 4. Add graph/community/topic/location/face overlays.
+5. Add storage/search sidecar only after Postgres/DuckDB/SQLite prototype evidence justifies it.
 
 ## 14. Verification Checklist
 
@@ -1187,6 +1566,9 @@ Before marking any future implementation complete:
 - For alerts, prove dedupe and suppression behavior.
 - For face-linking, compare exact vs approximate search on a sample.
 - For location inference, prove rejected evidence is excluded.
+- For chat analytics, prove reply chains, response latency, participant balance, and thread-level sentiment on fixtures.
+- For graph analytics, prove community/centrality metrics are time-windowed and edge-family-specific.
+- For storage/search sidecars, prove sync, rebuild, and drift behavior before using them operationally.
 - For frontend changes, run TypeScript/build and inspect key UI states.
 - For live services, verify current runtime state, not just source code.
 
