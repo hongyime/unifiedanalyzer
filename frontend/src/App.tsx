@@ -15,6 +15,7 @@ const RunsPage = lazy(() => import('./pages/Runs'))
 const CommunitiesPage = lazy(() => import('./pages/Communities'))
 const MediaPage = lazy(() => import('./pages/Media'))
 const FacesPage = lazy(() => import('./pages/Faces'))
+const SearchPage = lazy(() => import('./pages/Search'))
 const HelpPage = lazy(() => import('./pages/Help'))
 
 /** Subscribe to /ws/health, auto-reconnecting on drop. */
@@ -56,6 +57,7 @@ function App() {
           <Route path="/communities" element={<CommunitiesPage />} />
           <Route path="/media" element={<MediaPage />} />
           <Route path="/faces" element={<FacesPage />} />
+          <Route path="/search" element={<SearchPage />} />
           <Route path="/cases" element={<CasesPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/help" element={<HelpPage />} />

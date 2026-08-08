@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
-import { GitCompare, Bell, UserPlus } from 'lucide-react'
+import { GitCompare, Bell, UserPlus, MapPin, MessageCircle, ScanFace } from 'lucide-react'
 import { api, TriageData } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { PageHeader } from '../components/ui/PageHeader'
@@ -61,6 +61,25 @@ export default function TriagePage() {
           <span className="shrink-0 text-sm">Open Review →</span>
         </Link>
       )}
+
+      <div className="mb-6 grid gap-3 md:grid-cols-3">
+        <Link to="/search" className="rounded-lg border border-border bg-surface p-3 hover:bg-hover">
+          <div className="mb-1 flex items-center gap-2 text-sm font-semibold"><MessageCircle className="h-4 w-4" /> Chat intelligence</div>
+          <div className="text-xs text-text-muted">Thread analytics, replies, reactions, and context-only tone summaries.</div>
+        </Link>
+        <Link to="/faces" className="rounded-lg border border-border bg-surface p-3 hover:bg-hover">
+          <div className="mb-1 flex items-center gap-2 text-sm font-semibold"><ScanFace className="h-4 w-4" /> Face audit</div>
+          <div className="text-xs text-text-muted">
+            {cov.face_bridge_audit?.available
+              ? `${cov.face_bridge_audit.face_entity_collisions ?? 0} face collisions · ${cov.face_bridge_audit.cluster_entity_collisions ?? 0} drift clusters`
+              : 'Audit unavailable'}
+          </div>
+        </Link>
+        <Link to="/entities" className="rounded-lg border border-border bg-surface p-3 hover:bg-hover">
+          <div className="mb-1 flex items-center gap-2 text-sm font-semibold"><MapPin className="h-4 w-4" /> Location quality</div>
+          <div className="text-xs text-text-muted">Evidence chips expose source, review state, confidence, and weak samples per person.</div>
+        </Link>
+      </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
         <div>

@@ -201,6 +201,7 @@ type TabKey =
   | 'identity'
   | 'changes'
   | 'timeline'
+  | 'chat'
   | 'map'
   | 'media'
   | 'intersect'
@@ -212,7 +213,7 @@ type TabKey =
 
 // Tabs that share the timeline brush (lanes + time-window filtering). The
 // consolidated Connections tab keeps interactions windowable, so it is included.
-const TIMELINE_TABS = new Set<TabKey>(['timeline', 'map', 'connections'])
+const TIMELINE_TABS = new Set<TabKey>(['timeline', 'chat', 'map', 'connections'])
 
 type TimelineConfidenceFilter = 'all' | 'known' | '0.5' | '0.7' | '0.9'
 
@@ -273,6 +274,8 @@ export default function EntityDetailPage() {
   const [lanes, setLanes] = useState<Awaited<ReturnType<typeof api.getTimelineLanes>> | null>(null)
   const [selectedGeoEvent, setSelectedGeoEvent] = useState<GeoSelectedEvent | null>(null)
   const [locationDecisionBusy, setLocationDecisionBusy] = useState<'confirm' | 'reject' | null>(null)
+  const [chatThreads, setChatThreads] = useState<Awaited<ReturnType<typeof api.getEntityChatThreads>>['threads']>([])
+  const [geoQuality, setGeoQuality] = useState<Awaited<ReturnType<typeof api.getEntityGeoQuality>> | null>(null)
   useEffect(() => { api.getCases().then(d => setCases(d.cases)).catch(() => {}) }, [])
   useEffect(() => {
     setBrushRange(null)
@@ -282,6 +285,8 @@ export default function EntityDetailPage() {
     setTimelineConfidence('all')
     setEventsPage(1)
     setGeo(null)
+    setChatThreads([])
+    setGeoQuality(null)
     setOverviewEvents([])
     setOverviewRelationships([])
     setOverviewDecisions([])
@@ -345,6 +350,11 @@ export default function EntityDetailPage() {
     ).then(r => setInteractions(r.data)).catch(() => setInteractions([]))
   }, [id, tab, brushRange])
 
+  useEffect(() => {
+    if (!id || tab !== 'chat') return
+    api.getEntityChatThreads(id).then((data) => setChatThreads(data.threads)).catch(() => setChatThreads([]))
+  }, [id, tab])
+
   const [network, setNetwork] = useState<Awaited<ReturnType<typeof api.getEntityNetwork>> | null>(null)
   const [associates, setAssociates] = useState<Awaited<ReturnType<typeof api.getEntityAssociates>> | null>(null)
   useEffect(() => {
@@ -364,6 +374,11 @@ export default function EntityDetailPage() {
       isoFromEpoch(brushRange?.[1] ?? null),
     ).then(setGeo).catch(() => setGeo(null))
   }, [id, tab, brushRange])
+
+  useEffect(() => {
+    if (!id || tab !== 'map') return
+    api.getEntityGeoQuality(id).then(setGeoQuality).catch(() => setGeoQuality(null))
+  }, [id, tab])
 
   const [socialCircle, setSocialCircle] = useState<SocialCircleEntry[] | null>(null)
 
@@ -733,6 +748,7 @@ export default function EntityDetailPage() {
     { key: 'identity', label: 'Identity' },
     { key: 'changes', label: 'Changes', badge: changelog && changelog.total_changes > 0 ? String(changelog.total_changes) : undefined },
     { key: 'timeline', label: 'Timeline' },
+    { key: 'chat', label: 'Chat', badge: chatThreads.length > 0 ? String(chatThreads.length) : undefined },
     { key: 'map', label: 'Map' },
     { key: 'media', label: 'Media/Faces', badge: mediaFaces ? String(mediaFaces.linked_media.length + mediaFaces.known_faces.length + mediaFaces.associated_faces.length) : undefined },
     { key: 'intersect', label: 'Intersect' },
@@ -1390,6 +1406,51 @@ export default function EntityDetailPage() {
         </div>
       )}
 
+      {/* ── Chat ─────────────────────────────────────────────────────── */}
+      {tab === 'chat' && (
+        <Card>
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <div className="text-sm font-semibold">Chat threads</div>
+              <div className="text-xs text-text-muted">Telegram-first analytics; sentiment is context only.</div>
+            </div>
+            <div className="text-xs text-text-muted">{chatThreads.length} threads</div>
+          </div>
+          {chatThreads.length === 0 ? (
+            <EmptyState title="No chat threads" description="Conversation analytics will appear after the pipeline sees Telegram replies or reactions." />
+          ) : (
+            <div className="space-y-2">
+              {chatThreads.map((thread) => (
+                <div key={thread.thread_id} className="rounded-lg border border-border bg-hover p-3">
+                  <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                    <div className="truncate text-sm font-medium">{thread.title || thread.thread_id}</div>
+                    <div className="text-xs text-text-muted">
+                      {thread.last_message_at ? formatDate(thread.last_message_at) : 'No time'}
+                    </div>
+                  </div>
+                  <div className="mb-2 flex flex-wrap gap-1 text-xs text-text-muted">
+                    <span className="rounded-full bg-surface px-2 py-0.5">{thread.source}</span>
+                    <span className="rounded-full bg-surface px-2 py-0.5">{thread.message_count} messages</span>
+                    <span className="rounded-full bg-surface px-2 py-0.5">{thread.reply_count} replies</span>
+                    <span className="rounded-full bg-surface px-2 py-0.5">{thread.reaction_count} reactions</span>
+                    {thread.forwarded_count > 0 && <span className="rounded-full bg-surface px-2 py-0.5">{thread.forwarded_count} forwarded</span>}
+                  </div>
+                  {thread.preview.length > 0 && (
+                    <div className="space-y-1">
+                      {thread.preview.slice(0, 3).map((item, idx) => (
+                        <div key={`${thread.thread_id}-${idx}`} className="truncate text-xs text-text-secondary">
+                          {item.interaction_type || 'message'} · {item.text || 'no preview'}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
       {/* ── Map ──────────────────────────────────────────────────────── */}
       {tab === 'map' && (
         geo && (geo.counts.routes > 0 || geo.counts.points > 0) ? (
@@ -1401,6 +1462,15 @@ export default function EntityDetailPage() {
                 {geo.counts.suppressed ? ` · ${geo.counts.suppressed} hidden` : ''}
               </div>
             </div>
+            {geoQuality && geoQuality.groups.length > 0 && (
+              <div className="mb-3 flex flex-wrap gap-1">
+                {geoQuality.groups.slice(0, 8).map((group) => (
+                  <span key={`${group.source}-${group.evidence_type}-${group.status}`} className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
+                    {group.source} · {evidenceTypeLabel(group.evidence_type)} · {group.status} {group.count}
+                  </span>
+                ))}
+              </div>
+            )}
             {lanes && lanes.total > 0 && (
               <div className="mb-3">
                 <TimelineLanes

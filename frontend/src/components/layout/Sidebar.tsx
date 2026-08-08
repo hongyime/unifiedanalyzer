@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router'
 import { clsx } from '../../lib/cx'
 import {
-  ListChecks, GitCompare, Users, Network, Bell, Images, ScanFace,
+  ListChecks, GitCompare, Users, Network, Bell, Images, ScanFace, Search,
   FolderOpen, Play, HelpCircle,
 } from 'lucide-react'
 import { Logo } from './Logo'
@@ -21,6 +21,7 @@ const groups = [
     label: 'Evidence',
     items: [
       { to: '/alerts', label: 'Alerts', icon: Bell },
+      { to: '/search', label: 'Search', icon: Search },
       { to: '/media', label: 'Media', icon: Images },
       { to: '/faces', label: 'Faces', icon: ScanFace },
     ],

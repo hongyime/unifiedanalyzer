@@ -5,7 +5,7 @@ import {
 } from '@tanstack/react-table'
 import { ChevronUp, ChevronDown, Play } from 'lucide-react'
 import { useRuns, useTriggerRun } from '../hooks'
-import { RunInfo } from '../api'
+import { api, RunInfo, RunPhase } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { LoadingSpinner } from '../components/ui/LoadingSpinner'
@@ -59,6 +59,8 @@ const columns = [
 export default function RunsPage() {
   const [page, setPage] = useState(1)
   const [sorting, setSorting] = useState<SortingState>([])
+  const [phaseRun, setPhaseRun] = useState<string | null>(null)
+  const [phases, setPhases] = useState<RunPhase[]>([])
   const { data, isLoading } = useRuns(page)
   const trigger = useTriggerRun()
 
@@ -73,6 +75,13 @@ export default function RunsPage() {
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
   })
+
+  const openPhases = (runId: string) => {
+    const next = phaseRun === runId ? null : runId
+    setPhaseRun(next)
+    setPhases([])
+    if (next) api.getRunPhases(next).then((data) => setPhases(data.phases)).catch(() => setPhases([]))
+  }
 
   return (
     <div>
@@ -130,10 +139,34 @@ export default function RunsPage() {
                   {row.getVisibleCells().map((cell) => (
                     <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
                   ))}
+                  <td>
+                    <button className="text-xs text-text-muted hover:text-text-primary" onClick={() => openPhases(row.original.id)}>
+                      phases
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {phaseRun && (
+            <div className="mt-3 rounded-lg border border-border bg-surface p-3">
+              <div className="mb-2 text-sm font-semibold">Phase waterfall</div>
+              {phases.length === 0 ? (
+                <div className="text-sm text-text-muted">No phase rows recorded.</div>
+              ) : (
+                <div className="grid gap-1 md:grid-cols-2">
+                  {phases.map((phase) => (
+                    <div key={`${phase.phase}-${phase.created_at}`} className="flex items-center justify-between gap-3 rounded bg-hover px-2 py-1 text-xs">
+                      <span className="truncate">{phase.phase}</span>
+                      <span className="shrink-0 text-text-muted">
+                        {phase.status} · {phase.duration_ms != null ? `${phase.duration_ms}ms` : '—'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <div className="mt-4 flex items-center justify-between">
             <span className="text-sm text-text-muted tabular-nums">{total} runs</span>
             <div className="flex gap-1">

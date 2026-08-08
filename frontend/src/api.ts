@@ -84,6 +84,14 @@ export interface TriageData {
     multi_platform_pct: number
     merge_backlog: number
     unread_alerts: number
+    face_bridge_audit?: {
+      available: boolean
+      ok: boolean | null
+      face_entity_collisions: number | null
+      cluster_entity_collisions: number | null
+      contested_cluster_count: number | null
+      samples?: Record<string, unknown>
+    }
   }
   merge_candidates: ReviewCandidate[]
   alerts: TriageAlert[]
@@ -178,6 +186,14 @@ export interface RunInfo {
   alerts_created: number
   signals_created: number
   error_message: string | null
+}
+
+export interface RunPhase {
+  phase: string
+  status: string
+  duration_ms: number | null
+  error: string | null
+  created_at: string | null
 }
 
 export interface HealthInfo {
@@ -620,6 +636,38 @@ export interface FaceSearchResponse {
   collector_skipped: boolean
 }
 
+export interface TimelineSearchResult {
+  event_id: string
+  entity_id: string | null
+  platform: string
+  occurred_at: string | null
+  snippet: string | null
+  score: number
+  keyword_score: number | null
+  semantic_score: number | null
+  keyword_rank: number | null
+  semantic_rank: number | null
+  rrf_rank: number | null
+}
+
+export interface TimelineSearchResponse {
+  results: TimelineSearchResult[]
+  took_ms: number
+  mode: 'hybrid' | 'keyword' | 'semantic'
+  model: string | null
+}
+
+export interface FaceAuditReport {
+  available: boolean
+  ok: boolean | null
+  error?: string
+  face_entity_collisions: number | null
+  cluster_entity_collisions: number | null
+  contested_cluster_count: number | null
+  counts: Record<string, number>
+  samples: Record<string, unknown[]>
+}
+
 // ── Live health (websocket /ws/health) ──
 export interface LiveHealth {
   status: string
@@ -796,6 +844,7 @@ export const api = {
   markAllRead: () => post<{ ok: boolean }>('/alerts/read-all'),
 
   getRuns: (page = 1) => get<Paginated<RunInfo>>(`/runs?page=${page}`),
+  getRunPhases: (runId: string) => get<{ run_id: string; phases: RunPhase[]; total: number }>(`/runs/${runId}/phases`),
   triggerRun: () => post<{ ok: boolean; stats: Record<string, number> }>('/runs/trigger'),
 
   getHealth: () => get<HealthInfo>('/health'),
@@ -886,6 +935,33 @@ export const api = {
     to?: string | null
   }) => post<IntersectionResponse>('/entities/intersect', body),
 
+  searchTimeline: (query: string, mode: 'hybrid' | 'keyword' | 'semantic' = 'hybrid', limit = 25) => {
+    const q = new URLSearchParams()
+    q.set('q', query)
+    q.set('mode', mode)
+    q.set('limit', String(limit))
+    return get<TimelineSearchResponse>(`/search/timeline?${q.toString()}`)
+  },
+
+  getEntityChatThreads: (entityId: string) =>
+    get<{ entity_id: string; threads: {
+      thread_id: string
+      source: string
+      title: string | null
+      started_at: string | null
+      last_message_at: string | null
+      message_count: number
+      reply_count: number
+      reaction_count: number
+      forwarded_count: number
+      preview: { text?: string; interaction_type?: string; occurred_at?: string }[]
+    }[] }>(`/entities/${entityId}/chat/threads`),
+
+  getEntityGeoQuality: (entityId: string) =>
+    get<{ entity_id: string; groups: { source: string; evidence_type: string; status: string; count: number; avg_confidence: number | null }[]; weak_samples: unknown[] }>(
+      `/entities/${entityId}/geo/quality`,
+    ),
+
   getGraphOverview: () => get<{
     total_relationships: number
     entities_in_graph: number
@@ -931,6 +1007,7 @@ export const api = {
   getFaceStats: () => get<FaceStats>('/face/stats'),
   getFaceIdentities: (page = 1) =>
     get<FaceIdentityList>(`/face/identities?page=${page}&page_size=50`),
+  getFaceAudit: () => get<FaceAuditReport>('/faces/audit'),
 
   getSimilarFaces: (faceId: number, k = 40) =>
     get<{ matches: { face_id: number; cluster_id: number | null; similarity: number; crop_url: string; entity_id: string | null; entity_name: string | null }[] }>(

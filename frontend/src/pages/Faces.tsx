@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ScanFace, Users, Images, Film, Search, Upload, ImageOff } from 'lucide-react'
 import { useFaceStats, useFaceIdentities } from '../hooks'
-import { api, FaceSearchResponse } from '../api'
+import { api, FaceAuditReport, FaceSearchResponse } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
@@ -76,6 +76,10 @@ export default function FacesPage() {
   const [searchResult, setSearchResult] = useState<FaceSearchResponse | null>(null)
   const [searchError, setSearchError] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [audit, setAudit] = useState<FaceAuditReport | null>(null)
+  useEffect(() => {
+    api.getFaceAudit().then(setAudit).catch(() => setAudit(null))
+  }, [])
   const openSimilar = (faceId: number) => {
     setSearchFor(`face #${faceId}`)
     setSearchResult(null)
@@ -123,6 +127,23 @@ export default function FacesPage() {
         <StatTile label="Images" value={s?.total_images ?? 0} icon={Images} />
         <StatTile label="Videos" value={s?.total_videos ?? 0} icon={Film} />
       </div>
+
+      {audit && (
+        <div className="mb-4 rounded-lg border border-border bg-card p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-sm font-semibold">Face audit</div>
+            <span className={`text-xs ${audit.ok ? 'text-success' : 'text-warning'}`}>
+              {audit.available ? (audit.ok ? 'healthy' : 'review needed') : 'unavailable'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+            <div>bridged {(audit.counts.bridged_faces ?? 0).toLocaleString()}</div>
+            <div>searchable {(audit.counts.searchable_faces ?? 0).toLocaleString()}</div>
+            <div>face collisions {audit.face_entity_collisions ?? '—'}</div>
+            <div>cluster drift {audit.cluster_entity_collisions ?? '—'}</div>
+          </div>
+        </div>
+      )}
 
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-3">
         <div className="flex items-center gap-2 text-sm font-medium">
