@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import json
 import logging
 import os
 import time
@@ -87,6 +88,110 @@ logger = logging.getLogger(__name__)
 _STALE_HEARTBEAT_MINUTES = int(os.getenv("STALE_RUN_HEARTBEAT_MINUTES", "30"))
 _HEARTBEAT_INTERVAL_SECONDS = 60
 _RUN_CLAIM_LOCK_KEY = 0x55414E4152554E  # "UANARUN": serialize run creation.
+_COVERAGE_SOURCE_BUCKETS = ("by_source", "by_type", "by_platform")
+_PROCESSED_KEYS = (
+    "processed",
+    "total",
+    "scanned",
+    "entities_scanned",
+    "events_scanned",
+    "media_scanned",
+    "pairs_scored",
+    "emails_checked",
+    "handles_queried",
+    "bios_processed",
+    "entities_analyzed",
+    "candidates",
+    "faces",
+)
+_ATTRIBUTED_KEYS = (
+    "attributed",
+    "resolved",
+    "inserted",
+    "updated",
+    "rows",
+    "signals_emitted",
+    "associations_added",
+    "location_evidence_upserted",
+    "entities_updated",
+    "discoveries_added",
+    "new_findings",
+    "new_alerts",
+    "relationship_rows",
+    "links_created",
+    "geocoded",
+)
+_UNRESOLVED_KEYS = (
+    "unresolved",
+    "skipped_unresolved",
+    "unparseable",
+    "unmatched",
+    "missing",
+    "parse_failed",
+)
+_SKIPPED_KEYS = (
+    "skipped_count",
+    "skipped_invalid_time",
+    "skipped_self",
+    "skipped_unchanged",
+    "below_threshold_skipped",
+    "below_min_matches_skipped",
+)
+_ERROR_KEYS = ("error_count", "errors", "failed", "failures")
+
+_PHASE_RESOURCE_CLASSES = {
+    "resolve_entities": "db",
+    "beeper_bridge": "collector_db",
+    "ig_geo_entities": "collector_db",
+    "strava_athlete_entities": "collector_db",
+    "cross_source_signals": "collector_db",
+    "timeline": "collector_db",
+    "interactions": "collector_db",
+    "account_proximity": "db",
+    "entity_event_ranges": "db",
+    "alerts": "db",
+    "behavioral_profiles": "db",
+    "whatsapp_group_graph": "collector_db",
+    "telegram_group_graph": "collector_db",
+    "strava_patterns": "collector_db",
+    "bio_nlp": "collector_db",
+    "entity_enrichment": "cpu",
+    "shared_life_context": "db",
+    "graph_analytics": "cpu",
+    "graph_overlap": "db",
+    "bio_mention": "db",
+    "location_inference": "collector_db",
+    "content_fingerprint": "cpu",
+    "temporal_correlation": "db",
+    "contact_extraction": "cpu",
+    "route_similarity": "collector_db",
+    "relationship_intelligence": "db",
+    "media_phash": "media_io",
+    "media_exif": "media_io",
+    "media_pdf_text": "media_io",
+    "media_pdf_images": "media_io",
+    "media_ocr": "media_io",
+    "media_faces": "media_io",
+    "media_video_frames": "media_io",
+    "face_clustering": "vector",
+    "drive_face_xref": "vector",
+    "face_pair_knn": "vector",
+    "face_associations": "vector",
+    "social_face_link": "vector",
+    "face_match_signals": "vector",
+    "auto_label_seed": "db",
+    "content_embedding": "vector",
+    "topical_similarity": "vector",
+    "identity_scoring": "db",
+    "calibration_retrain": "cpu",
+    "collector_priority_hints": "db",
+    "phone_enrichment": "cpu",
+    "email_breach_check": "notification",
+    "handle_fanout": "notification",
+    "email_recognition": "notification",
+    "calibration_watchdog": "db",
+    "geocode": "geocode",
+}
 
 
 async def _clear_stale_run_locks(conn, error_message: str) -> list[str]:
@@ -384,6 +489,199 @@ def _sum_numeric_stats(stats: dict) -> int:
     ))
 
 
+def _safe_count(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    return None
+
+
+def _count_from_keys(stats: dict, keys: tuple[str, ...]) -> int:
+    for key in keys:
+        if key not in stats:
+            continue
+        count = _safe_count(stats.get(key))
+        if count is not None:
+            return count
+    return 0
+
+
+def _phase_resource_class(phase: str) -> str:
+    return _PHASE_RESOURCE_CLASSES.get(phase, "db")
+
+
+def _source_label(source) -> str:
+    label = str(source or "all").strip() or "all"
+    return label[:128]
+
+
+def _normalize_phase_stats(result) -> dict:
+    if isinstance(result, dict):
+        return result
+    count = _safe_count(result)
+    if count is not None:
+        return {"attributed": count}
+    if isinstance(result, (list, tuple, set)):
+        return {"processed": len(result)}
+    return {}
+
+
+def _bounded_json_payload(value):
+    if value is None or value == "" or value == [] or value == {}:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)[:20]
+    if isinstance(value, dict):
+        return dict(list(value.items())[:20])
+    return value
+
+
+def _coverage_payload(stats: dict, status: str, error: str | None):
+    for key in (
+        "top_unresolved_json",
+        "top_unresolved",
+        "unresolved_samples",
+        "unresolved_refs",
+        "skipped_tables",
+        "error",
+        "skipped",
+    ):
+        payload = _bounded_json_payload(stats.get(key))
+        if payload != []:
+            return payload
+    if status == "failed" and error:
+        return {"error": error}
+    return []
+
+
+def _coverage_row(
+    run_id: str,
+    run_type: str,
+    phase: str,
+    source: str,
+    status: str,
+    duration_ms: int,
+    stats: dict,
+    error: str | None,
+) -> tuple:
+    processed_count = _count_from_keys(stats, _PROCESSED_KEYS)
+    attributed_count = _count_from_keys(stats, _ATTRIBUTED_KEYS)
+    unresolved_count = _count_from_keys(stats, _UNRESOLVED_KEYS)
+    skipped_count = _count_from_keys(stats, _SKIPPED_KEYS)
+    error_count = _count_from_keys(stats, _ERROR_KEYS)
+
+    skipped = stats.get("skipped")
+    skipped_numeric = _safe_count(skipped)
+    if skipped_numeric is not None:
+        skipped_count += skipped_numeric
+    elif status == "skipped" or isinstance(skipped, str):
+        skipped_count = max(skipped_count, 1)
+
+    if phase == "alerts" and attributed_count == 0:
+        attributed_count = _sum_numeric_stats(stats)
+
+    if (status == "failed" or stats.get("error")) and error_count == 0:
+        error_count = 1
+
+    return (
+        run_id,
+        run_type,
+        phase,
+        _source_label(source),
+        status,
+        processed_count,
+        attributed_count,
+        unresolved_count,
+        skipped_count,
+        error_count,
+        json.dumps(_coverage_payload(stats, status, error), default=str),
+        duration_ms,
+        _phase_resource_class(phase),
+    )
+
+
+def _coverage_snapshots_for_phase_result(
+    run_id: str,
+    run_type: str,
+    phase: str,
+    status: str,
+    duration_ms: int,
+    result,
+    error: str | None = None,
+) -> list[tuple]:
+    stats = _normalize_phase_stats(result)
+    rows: list[tuple] = []
+
+    for bucket_name in _COVERAGE_SOURCE_BUCKETS:
+        bucket = stats.get(bucket_name)
+        if not isinstance(bucket, dict):
+            continue
+        for source, source_stats in bucket.items():
+            if isinstance(source_stats, dict):
+                rows.append(_coverage_row(
+                    run_id, run_type, phase, source, status,
+                    duration_ms, source_stats, error,
+                ))
+        if rows:
+            break
+
+    seen_sources = {r[3] for r in rows}
+    skipped_tables = stats.get("skipped_tables")
+    if isinstance(skipped_tables, (list, tuple, set)):
+        for source in skipped_tables:
+            label = _source_label(source)
+            if label in seen_sources:
+                continue
+            rows.append(_coverage_row(
+                run_id,
+                run_type,
+                phase,
+                label,
+                "skipped" if status == "ok" else status,
+                duration_ms,
+                {"skipped": 1, "top_unresolved": [source]},
+                error,
+            ))
+
+    if not rows:
+        rows.append(_coverage_row(
+            run_id, run_type, phase, "all", status, duration_ms, stats, error
+        ))
+    return rows
+
+
+async def _write_phase_coverage_snapshots(
+    conn,
+    run_id: str,
+    run_type: str,
+    phase: str,
+    status: str,
+    duration_ms: int,
+    result,
+    error: str | None,
+) -> None:
+    rows = _coverage_snapshots_for_phase_result(
+        run_id, run_type, phase, status, duration_ms, result, error
+    )
+    await conn.executemany(
+        """
+        INSERT INTO pipeline_coverage_snapshots (
+            run_id, run_type, phase, source, phase_status,
+            processed_count, attributed_count, unresolved_count,
+            skipped_count, error_count, top_unresolved_json,
+            duration_ms, resource_class
+        )
+        VALUES (
+            $1::uuid, $2, $3, $4, $5,
+            $6, $7, $8, $9, $10, $11::jsonb,
+            $12, $13
+        )
+        """,
+        rows,
+    )
+
+
 async def _run_phase(run_id: str, run_type: str, name: str, fn, *, default=None):
     """Run one non-fatal phase; record ok/skipped/failed + duration.
 
@@ -415,6 +713,12 @@ async def _run_phase(run_id: str, run_type: str, name: str, fn, *, default=None)
                 "INSERT INTO run_phase_status (run_id, run_type, phase, status, duration_ms, error) "
                 "VALUES ($1::uuid, $2, $3, $4, $5, $6)",
                 run_id, run_type, name, status, duration_ms, err)
+            try:
+                await _write_phase_coverage_snapshots(
+                    conn, run_id, run_type, name, status, duration_ms, result, err
+                )
+            except Exception:
+                logger.debug("phase coverage snapshot write failed (non-fatal)", exc_info=True)
     except Exception:
         logger.debug("phase status write failed (non-fatal)", exc_info=True)
     return result

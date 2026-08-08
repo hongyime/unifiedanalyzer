@@ -2,7 +2,9 @@
 
 Date updated: 2026-08-08
 
-Status: planning artifact only. Do not treat any section below as implemented until a later commit adds code, tests, and live verification.
+Status: implementation started. Treat only checklist items explicitly marked `[x]`
+below as implemented; all other sections remain planning guidance until a later
+commit adds code, tests, and live verification.
 
 ## Scope
 
@@ -52,7 +54,7 @@ The plan should be implemented against the current system shape:
 
 | Priority | Area | Improvement | Why | Likely files/tables | Verification |
 |---|---|---|---|---|---|
-| P0 | Monitoring | Add pipeline coverage snapshots | Current phase status says pass/fail/duration, but not what each phase processed, skipped, or failed to attribute | `run_phase_status`, new `pipeline_coverage_snapshots`, `incremental_runner.py` | Live report with processed/attributed/unresolved counts by source |
+| P0 | Monitoring | Add pipeline coverage snapshots | Current phase status says pass/fail/duration, but not what each phase processed, skipped, or failed to attribute | `run_phase_status`, new `pipeline_coverage_snapshots`, `incremental_runner.py` | Implemented 2026-08-08: `_run_phase()` writes per-phase/per-source snapshots and `/api/runs/{run_id}/coverage` reports processed/attributed/unresolved/skipped/error counts |
 | P0 | Monitoring | Expose run phases as first-class API/UI data | `run_phase_status` exists, but operators need a run waterfall, latest completed phase, active phase, and stale heartbeat view | `analysis_runs`, `run_phase_status`, `alerts.py` or run routes, `Runs.tsx`, websocket health | `/api/runs/{id}/phases`, heartbeat-age display, stale-threshold fixtures |
 | P0 | Search/NLP | Add canonical searchable text | `timeline_embeddings` currently embeds title-level text; social search needs title + detail + selected metadata | `timeline_events`, new `timeline_text_features`, `timeline_embedder.py`, `search.py` | Golden queries for handles, hashtags, captions, places, exact IDs |
 | P0 | Search/NLP | Add sparse FTS and hybrid RRF | Dense-only search misses exact handles, URLs, usernames, hashtags, and IDs | `schema.sql`, `search.py`, frontend search page | Recall@20/MRR eval set, `EXPLAIN`, p95 latency |
@@ -1502,7 +1504,12 @@ What to improve for UnifiedAnalyzer:
 
 ### Phase A: Observability and Contracts
 
-1. Add `pipeline_coverage_snapshots`.
+1. [x] Add `pipeline_coverage_snapshots`. Notes 2026-08-08: added the
+   idempotent side table in `src/db/schema.sql`, generic coverage normalization
+   in `src/pipeline/incremental_runner.py`, and `/api/runs/{run_id}/coverage`.
+   Timeline `by_source` and interaction `by_type` results now produce immediate
+   source/type-level coverage rows; other phases produce aggregate `all` rows
+   until their native emitters grow richer counters.
 2. Add alert detail contract and suppression reasons.
 3. Add face-link audit report.
 4. Add location evidence quality report.
@@ -1576,7 +1583,8 @@ Before marking any future implementation complete:
 
 The best first implementation slice is:
 
-1. `pipeline_coverage_snapshots`.
+1. [x] `pipeline_coverage_snapshots` - first commit adds the side table,
+   centralized writer, run coverage API, and targeted tests.
 2. `timeline_text_features`.
 3. `text_normalizer.py`.
 4. VADER/AFINN/NRC scoring.

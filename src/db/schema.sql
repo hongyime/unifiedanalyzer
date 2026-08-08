@@ -259,6 +259,32 @@ CREATE TABLE IF NOT EXISTS run_phase_status (
 );
 CREATE INDEX IF NOT EXISTS idx_run_phase_status_phase ON run_phase_status(phase, created_at DESC);
 
+-- OSINT NLP/monitoring first slice (2026-08-08): per-phase coverage snapshots.
+-- run_phase_status remains the pass/fail/duration ledger; this side table records
+-- what each phase processed, attributed, skipped, or failed to resolve. Rows are
+-- derived artifacts and are safe to regenerate on future runs.
+CREATE TABLE IF NOT EXISTS pipeline_coverage_snapshots (
+    snapshot_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id              UUID,
+    run_type            VARCHAR(30),
+    phase               VARCHAR(64) NOT NULL,
+    source              VARCHAR(128) NOT NULL DEFAULT 'all',
+    phase_status        VARCHAR(20) NOT NULL DEFAULT 'ok',
+    processed_count     BIGINT NOT NULL DEFAULT 0,
+    attributed_count    BIGINT NOT NULL DEFAULT 0,
+    unresolved_count    BIGINT NOT NULL DEFAULT 0,
+    skipped_count       BIGINT NOT NULL DEFAULT 0,
+    error_count         BIGINT NOT NULL DEFAULT 0,
+    top_unresolved_json JSONB NOT NULL DEFAULT '[]',
+    duration_ms         INTEGER,
+    resource_class      VARCHAR(30) NOT NULL DEFAULT 'db',
+    created_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_coverage_run_phase
+    ON pipeline_coverage_snapshots(run_id, phase, source);
+CREATE INDEX IF NOT EXISTS idx_pipeline_coverage_phase_created
+    ON pipeline_coverage_snapshots(phase, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS behavioral_profiles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     entity_id UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE UNIQUE,

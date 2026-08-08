@@ -18,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
+import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Make `src.*` importable when running standalone (python tests/foo.py) as
@@ -324,12 +326,14 @@ def test_collector_unavailable_phase_records_skipped(monkeypatch):
     from src.db.connection import CollectorUnavailableError
     import src.pipeline.incremental_runner as runner
 
-    captured = {}
+    captured = {"execute": [], "executemany": []}
 
     class Conn:
         async def execute(self, sql, *args):
-            captured["sql"] = sql
-            captured["args"] = args
+            captured["execute"].append((sql, args))
+
+        async def executemany(self, sql, rows):
+            captured["executemany"].append((sql, list(rows)))
 
     class Acquire:
         async def __aenter__(self):
@@ -357,8 +361,231 @@ def test_collector_unavailable_phase_records_skipped(monkeypatch):
     )
 
     assert result["skipped"] == "collector_unavailable"
-    assert captured["args"][3] == "skipped"
-    assert "CollectorUnavailableError" in captured["args"][5]
+    phase_args = captured["execute"][0][1]
+    assert phase_args[3] == "skipped"
+    assert "CollectorUnavailableError" in phase_args[5]
+    coverage_sql, coverage_rows = captured["executemany"][0]
+    assert "INSERT INTO pipeline_coverage_snapshots" in coverage_sql
+    assert coverage_rows[0][4] == "skipped"
+    assert coverage_rows[0][8] == 1
+    assert coverage_rows[0][9] == 1
+
+
+def test_pipeline_coverage_extracts_source_level_counts():
+    import src.pipeline.incremental_runner as runner
+
+    rows = runner._coverage_snapshots_for_phase_result(
+        "00000000-0000-0000-0000-000000000000",
+        "incremental",
+        "timeline",
+        "ok",
+        123,
+        {
+            "by_source": {
+                "telegram/REPLIED": {
+                    "processed": 10,
+                    "attributed": 7,
+                    "unresolved": 2,
+                    "skipped_invalid_time": 1,
+                }
+            },
+            "skipped_tables": ["github/CODE_COMMIT (skip_sources)"],
+        },
+    )
+
+    assert len(rows) == 2
+    telegram, skipped = rows
+    assert telegram[2:10] == (
+        "timeline",
+        "telegram/REPLIED",
+        "ok",
+        10,
+        7,
+        2,
+        1,
+        0,
+    )
+    assert telegram[12] == "collector_db"
+    assert skipped[3] == "github/CODE_COMMIT (skip_sources)"
+    assert skipped[4] == "skipped"
+    assert skipped[8] == 1
+    assert json.loads(skipped[10]) == ["github/CODE_COMMIT (skip_sources)"]
+
+
+def test_pipeline_coverage_resource_classes_cover_secondary_phases():
+    import src.pipeline.incremental_runner as runner
+
+    missing = sorted(
+        name for name, _fn in runner._secondary_phases()
+        if name not in runner._PHASE_RESOURCE_CLASSES
+    )
+
+    assert missing == []
+
+
+def test_pipeline_coverage_run_phase_writes_snapshot(monkeypatch):
+    import src.pipeline.incremental_runner as runner
+
+    captured = {"execute": [], "executemany": []}
+
+    class Conn:
+        async def execute(self, sql, *args):
+            captured["execute"].append((sql, args))
+
+        async def executemany(self, sql, rows):
+            captured["executemany"].append((sql, list(rows)))
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    async def phase():
+        return {
+            "by_type": {
+                "instagram/commented": {
+                    "processed": 8,
+                    "inserted": 5,
+                    "skipped_unresolved": 2,
+                    "skipped_self": 1,
+                }
+            }
+        }
+
+    monkeypatch.setattr(runner, "get_analyzer_pool", lambda: Pool())
+    result = asyncio.run(
+        runner._run_phase(
+            "00000000-0000-0000-0000-000000000000",
+            "incremental",
+            "interactions",
+            phase,
+            default={},
+        )
+    )
+
+    assert result["by_type"]["instagram/commented"]["inserted"] == 5
+    assert "INSERT INTO run_phase_status" in captured["execute"][0][0]
+    coverage_sql, coverage_rows = captured["executemany"][0]
+    assert "INSERT INTO pipeline_coverage_snapshots" in coverage_sql
+    assert coverage_rows[0][2:10] == (
+        "interactions",
+        "instagram/commented",
+        "ok",
+        8,
+        5,
+        2,
+        1,
+        0,
+    )
+
+
+def test_pipeline_coverage_write_failure_is_non_fatal(monkeypatch):
+    import src.pipeline.incremental_runner as runner
+
+    captured = {"execute": []}
+
+    class Conn:
+        async def execute(self, sql, *args):
+            captured["execute"].append((sql, args))
+
+        async def executemany(self, sql, rows):
+            raise RuntimeError("coverage table locked")
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    async def phase():
+        return {"processed": 4, "inserted": 3}
+
+    monkeypatch.setattr(runner, "get_analyzer_pool", lambda: Pool())
+    result = asyncio.run(
+        runner._run_phase(
+            "00000000-0000-0000-0000-000000000000",
+            "incremental",
+            "timeline",
+            phase,
+            default={},
+        )
+    )
+
+    assert result == {"processed": 4, "inserted": 3}
+    assert "INSERT INTO run_phase_status" in captured["execute"][0][0]
+
+
+def test_run_coverage_route_returns_snapshot_rows(monkeypatch):
+    from src.api.routes import alerts
+
+    class Conn:
+        async def fetch(self, sql, *args):
+            assert "FROM pipeline_coverage_snapshots" in sql
+            assert args == ("00000000-0000-0000-0000-000000000000",)
+            return [
+                {
+                    "phase": "timeline",
+                    "source": "telegram/REPLIED",
+                    "phase_status": "ok",
+                    "processed_count": 10,
+                    "attributed_count": 7,
+                    "unresolved_count": 2,
+                    "skipped_count": 1,
+                    "error_count": 0,
+                    "top_unresolved_json": "[\"sample-unresolved\"]",
+                    "duration_ms": 123,
+                    "resource_class": "collector_db",
+                    "created_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+                }
+            ]
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    monkeypatch.setattr(alerts, "get_analyzer_pool", lambda: Pool())
+    result = asyncio.run(alerts.get_run_coverage("00000000-0000-0000-0000-000000000000"))
+
+    assert result["total"] == 1
+    assert result["data"][0]["source"] == "telegram/REPLIED"
+    assert result["data"][0]["processed_count"] == 10
+    assert result["data"][0]["top_unresolved"] == ["sample-unresolved"]
+    assert result["data"][0]["resource_class"] == "collector_db"
+
+
+def test_schema_declares_pipeline_coverage_snapshots():
+    schema = (_REPO_ROOT / "src" / "db" / "schema.sql").read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS pipeline_coverage_snapshots" in schema
+    for column in (
+        "processed_count",
+        "attributed_count",
+        "unresolved_count",
+        "skipped_count",
+        "error_count",
+        "top_unresolved_json",
+        "resource_class",
+    ):
+        assert column in schema
+    assert "idx_pipeline_coverage_run_phase" in schema
 
 
 def test_skipped_alert_metadata_does_not_break_alert_count():
