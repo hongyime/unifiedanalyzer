@@ -423,6 +423,22 @@ def test_pipeline_coverage_resource_classes_cover_secondary_phases():
     assert missing == []
 
 
+def test_lexical_nlp_resource_class_and_alert_order():
+    import inspect
+    import src.pipeline.incremental_runner as runner
+
+    assert runner._PHASE_RESOURCE_CLASSES["lexical_nlp"] == "cpu"
+    source = inspect.getsource(runner.run_incremental)
+    lexical_call = 'run_id, "incremental", "lexical_nlp"'
+    alert_call = 'run_id, "incremental", "alerts"'
+    assert source.index(lexical_call) < source.index(alert_call)
+
+    full_source = inspect.getsource(runner.run_full_resolution)
+    full_lexical_call = 'run_id, "full_resolution", "lexical_nlp"'
+    full_alert_call = 'run_id, "full_resolution", "alerts"'
+    assert full_source.index(full_lexical_call) < full_source.index(full_alert_call)
+
+
 def test_pipeline_coverage_run_phase_writes_snapshot(monkeypatch):
     import src.pipeline.incremental_runner as runner
 
@@ -586,6 +602,27 @@ def test_schema_declares_pipeline_coverage_snapshots():
     ):
         assert column in schema
     assert "idx_pipeline_coverage_run_phase" in schema
+
+
+def test_schema_declares_timeline_text_features():
+    schema = (_REPO_ROOT / "src" / "db" / "schema.sql").read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS timeline_text_features" in schema
+    assert "event_id           UUID PRIMARY KEY" in schema
+    for column in (
+        "source_fingerprint",
+        "text_sha1",
+        "canonical_text",
+        "selected_metadata",
+        "mention_count",
+        "hashtag_count",
+        "method_versions",
+    ):
+        assert column in schema
+    assert "idx_timeline_text_entity_time" in schema
+    assert "idx_timeline_text_source_time" in schema
+    assert "idx_timeline_text_sha1" in schema
+    assert "idx_timeline_text_source_fingerprint" in schema
 
 
 def test_skipped_alert_metadata_does_not_break_alert_count():

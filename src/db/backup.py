@@ -25,7 +25,10 @@ DEFAULT_RETENTION: dict[BackupKind, int] = {
 }
 DEFAULT_BACKUP_ROOT_WINDOWS = Path(r"Z:\unifiedanalyzer\backups\db")
 DEFAULT_BACKUP_ROOT_POSIX = Path("/app/backups/db")
-DEFAULT_EXCLUDE_TABLE_DATA: tuple[str, ...] = ("public.timeline_embeddings",)
+DEFAULT_EXCLUDE_TABLE_DATA: tuple[str, ...] = (
+    "public.timeline_embeddings",
+    "public.timeline_text_features",
+)
 FILENAME_RE = re.compile(
     r"^unifiedanalyzer_(daily|weekly|monthly)_(\d{8}T\d{6}Z)\.dump$"
 )

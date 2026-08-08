@@ -201,7 +201,10 @@ def test_backup_config_from_env_uses_retention_defaults(monkeypatch: pytest.Monk
     assert config.retention_for("daily") == 7
     assert config.retention_for("weekly") == 4
     assert config.retention_for("monthly") == 3
-    assert config.exclude_table_data == ("public.timeline_embeddings",)
+    assert config.exclude_table_data == (
+        "public.timeline_embeddings",
+        "public.timeline_text_features",
+    )
     assert config.compression == "gzip:1"
 
 

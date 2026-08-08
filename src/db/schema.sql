@@ -590,6 +590,44 @@ CREATE TABLE IF NOT EXISTS drive_scan_state (
     updated_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- OSINT NLP text foundation (2026-08-08): analyzer-owned canonical text side
+-- table. timeline_events remains the normalized event ledger; this table keeps
+-- searchable/NLP feature material out of the partitioned event rows while
+-- preserving collector provenance through source/event_type/source_record_id.
+CREATE TABLE IF NOT EXISTS timeline_text_features (
+    event_id           UUID PRIMARY KEY,
+    entity_id          UUID,
+    occurred_at        TIMESTAMPTZ NOT NULL,
+    source             VARCHAR(30) NOT NULL,
+    event_type         VARCHAR(50) NOT NULL,
+    source_record_id   VARCHAR(255) NOT NULL,
+    source_fingerprint CHAR(64) NOT NULL,
+    text_sha1          CHAR(40) NOT NULL,
+    canonical_text     TEXT NOT NULL,
+    selected_metadata  JSONB NOT NULL DEFAULT '{}',
+    token_count        INTEGER NOT NULL DEFAULT 0,
+    char_count         INTEGER NOT NULL DEFAULT 0,
+    emoji_count        INTEGER NOT NULL DEFAULT 0,
+    mention_count      INTEGER NOT NULL DEFAULT 0,
+    hashtag_count      INTEGER NOT NULL DEFAULT 0,
+    url_count          INTEGER NOT NULL DEFAULT 0,
+    domain_count       INTEGER NOT NULL DEFAULT 0,
+    flags              JSONB NOT NULL DEFAULT '{}',
+    method_versions    JSONB NOT NULL DEFAULT '{}',
+    processed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_timeline_text_entity_time
+    ON timeline_text_features(entity_id, occurred_at DESC)
+    WHERE entity_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_timeline_text_source_time
+    ON timeline_text_features(source, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_timeline_text_sha1
+    ON timeline_text_features(text_sha1);
+CREATE INDEX IF NOT EXISTS idx_timeline_text_source_fingerprint
+    ON timeline_text_features(source_fingerprint);
+
 -- Axis-1 MVP: sentence embeddings for semantic timeline search. Lives in a
 -- SIDE TABLE (not on timeline_events itself) because pgvector HNSW cannot be
 -- built on partitioned parent tables (timeline_events is monthly-partitioned

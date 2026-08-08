@@ -56,7 +56,7 @@ The plan should be implemented against the current system shape:
 |---|---|---|---|---|---|
 | P0 | Monitoring | Add pipeline coverage snapshots | Current phase status says pass/fail/duration, but not what each phase processed, skipped, or failed to attribute | `run_phase_status`, new `pipeline_coverage_snapshots`, `incremental_runner.py` | Implemented 2026-08-08: `_run_phase()` writes per-phase/per-source snapshots and `/api/runs/{run_id}/coverage` reports processed/attributed/unresolved/skipped/error counts |
 | P0 | Monitoring | Expose run phases as first-class API/UI data | `run_phase_status` exists, but operators need a run waterfall, latest completed phase, active phase, and stale heartbeat view | `analysis_runs`, `run_phase_status`, `alerts.py` or run routes, `Runs.tsx`, websocket health | `/api/runs/{id}/phases`, heartbeat-age display, stale-threshold fixtures |
-| P0 | Search/NLP | Add canonical searchable text | `timeline_embeddings` currently embeds title-level text; social search needs title + detail + selected metadata | `timeline_events`, new `timeline_text_features`, `timeline_embedder.py`, `search.py` | Golden queries for handles, hashtags, captions, places, exact IDs |
+| P0 | Search/NLP | Add canonical searchable text | `timeline_embeddings` currently embeds title-level text; social search needs title + detail + selected metadata | `timeline_events`, new `timeline_text_features`, `timeline_embedder.py`, `search.py` | Initial slice implemented 2026-08-08: added analyzer-owned `timeline_text_features`, `text_normalizer.py`, `lexical_nlp` phase, embedding-seeded bounded backfill command, and tests for collector-derived text/provenance. Full timeline cursor/index expansion remains before FTS rollout. |
 | P0 | Search/NLP | Add sparse FTS and hybrid RRF | Dense-only search misses exact handles, URLs, usernames, hashtags, and IDs | `schema.sql`, `search.py`, frontend search page | Recall@20/MRR eval set, `EXPLAIN`, p95 latency |
 | P0 | Face-linking | Add face-link audit dashboard | Face acceptance depends on bridge coverage, ANN recall, label coverage, junk filtering, and FAISS/pgvector drift | `face_search.py`, `src/face/api/routes/stats.py`, `Faces.tsx`, `Triage.tsx` | Exact-vs-index sample, drift counts, labeled hit-rate trend |
 | P0 | Face-linking | Add face search index debug payload | `/api/faces/search` should prove catalog/index/planner health, not only report intended index metadata | `face_search.py`, `facetracker.faces`, `idx_faces_embedding_vec_ivfflat` | `pg_indexes`, partial predicate, `EXPLAIN JSON`, exact-vs-IVFFlat recall@20 |
@@ -1517,8 +1517,12 @@ What to improve for UnifiedAnalyzer:
 
 ### Phase B: Text Foundation
 
-1. Add `timeline_text_features`.
-2. Add `text_normalizer.py`.
+1. [x] Add `timeline_text_features`. Notes 2026-08-08: added analyzer-owned
+   side table in `src/db/schema.sql`, a bounded embedding-seeded `lexical_nlp`
+   phase before alerts, and `python -m src.main text-features-backfill`.
+2. [x] Add `text_normalizer.py`. Notes 2026-08-08: normalizes timeline title,
+   detail, and selected collector-derived metadata while preserving handles,
+   hashtags, URLs/domains, captions, message previews, and location names.
 3. Add language detection.
 4. Add VADER/AFINN/NRC sidecar.
 5. Add keyphrase/entity extraction.
@@ -1585,8 +1589,11 @@ The best first implementation slice is:
 
 1. [x] `pipeline_coverage_snapshots` - first commit adds the side table,
    centralized writer, run coverage API, and targeted tests.
-2. `timeline_text_features`.
-3. `text_normalizer.py`.
+2. [x] `timeline_text_features` - analyzer-owned side table,
+   embedding-seeded `lexical_nlp` phase, and bounded backfill command preserve
+   collector provenance without bloating `timeline_events`.
+3. [x] `text_normalizer.py` - shared canonical text builder for timeline title,
+   detail, and selected metadata.
 4. VADER/AFINN/NRC scoring.
 5. Postgres FTS.
 6. Hybrid RRF search.

@@ -56,6 +56,7 @@ from src.pipeline.face_associations import build_face_associations
 from src.pipeline.social_face_link import emit_social_face_link_signals
 from src.pipeline.identity_calibration import maybe_retrain
 from src.pipeline.auto_labeler import seed_ground_truth_labels
+from src.pipeline.timeline_text_features import build_timeline_text_features
 from src.pipeline.timeline_embedder import embed_new_timeline_events
 from src.pipeline.topical_similarity import emit_topical_similarity_signals
 from src.pipeline.calibration_watchdog import check_calibration_readiness
@@ -149,6 +150,7 @@ _PHASE_RESOURCE_CLASSES = {
     "interactions": "collector_db",
     "account_proximity": "db",
     "entity_event_ranges": "db",
+    "lexical_nlp": "cpu",
     "alerts": "db",
     "behavioral_profiles": "db",
     "whatsapp_group_graph": "collector_db",
@@ -818,6 +820,10 @@ async def run_incremental() -> dict:
         stats["entity_ranges"] = await _run_phase(
             run_id, "incremental", "entity_event_ranges", update_entity_event_ranges, default=0
         )
+        text_stats = await _run_phase(
+            run_id, "incremental", "lexical_nlp", build_timeline_text_features, default={}
+        )
+        stats["text_features"] = _sum_numeric_stats(text_stats)
 
         alert_stats = await _run_phase(
             run_id, "incremental", "alerts", run_alerts, default={}
@@ -968,6 +974,10 @@ async def run_full_resolution() -> dict:
         stats["entity_ranges"] = await _run_phase(
             run_id, "full_resolution", "entity_event_ranges", update_entity_event_ranges, default=0
         )
+        text_stats = await _run_phase(
+            run_id, "full_resolution", "lexical_nlp", build_timeline_text_features, default={}
+        )
+        stats["text_features"] = _sum_numeric_stats(text_stats)
 
         alert_stats = await _run_phase(
             run_id, "full_resolution", "alerts", run_alerts, default={}

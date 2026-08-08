@@ -162,6 +162,20 @@ def main():
                      help="Seconds to sleep after a failed iteration (default 30)")
     ebf.add_argument("--max-consecutive-failures", type=int, default=5,
                      help="Exit after this many failures in a row (default 5)")
+    tbf = sub.add_parser(
+        "text-features-backfill",
+        help="Backfill timeline_text_features canonical text side table",
+    )
+    tbf.add_argument("--batch-size", type=int, default=500,
+                     help="Per-iteration batch size (default 500)")
+    tbf.add_argument("--max-batches", type=int, default=None,
+                     help="Optional cap on total batches (default: run until drained)")
+    tbf.add_argument("--sleep-between", type=float, default=0.0,
+                     help="Seconds to sleep between successful batches (default 0)")
+    tbf.add_argument("--fail-backoff", type=float, default=10.0,
+                     help="Seconds to sleep after a failed iteration (default 10)")
+    tbf.add_argument("--max-consecutive-failures", type=int, default=5,
+                     help="Exit after this many failures in a row (default 5)")
 
     args = parser.parse_args()
 
@@ -435,6 +449,86 @@ def main():
             await init_pools()
             logger.info("Schema applied successfully")
             await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "text-features-backfill":
+        import time
+        import signal
+        import traceback
+        from src.db.connection import init_pools, close_pools
+        from src.pipeline.timeline_text_features import build_timeline_text_features
+
+        stop_flag = {"stop": False}
+
+        def _handle_sig(signum, frame):
+            logger.warning("text-features-backfill: received signal %d, will exit after current batch", signum)
+            stop_flag["stop"] = True
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, _handle_sig)
+            except (OSError, ValueError):
+                pass
+
+        async def _run():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                total = 0
+                iters = 0
+                fail_streak = 0
+                start = time.monotonic()
+                logger.info(
+                    "text-features-backfill: starting batch_size=%d max_batches=%s",
+                    args.batch_size, args.max_batches)
+                while not stop_flag["stop"]:
+                    if args.max_batches is not None and iters >= args.max_batches:
+                        logger.info("text-features-backfill: reached --max-batches=%d, stopping", args.max_batches)
+                        break
+                    t0 = time.monotonic()
+                    try:
+                        stats = await build_timeline_text_features(
+                            batch_size=args.batch_size,
+                            max_events=args.batch_size,
+                        )
+                        elapsed = time.monotonic() - t0
+                        processed = int(stats.get("processed", 0) or 0)
+                        written = int(stats.get("inserted", 0) or 0)
+                        if processed == 0:
+                            logger.info(
+                                "text-features-backfill: DRAINED. total=%d iters=%d wall=%.1fs",
+                                total, iters, time.monotonic() - start)
+                            break
+                        total += written
+                        iters += 1
+                        fail_streak = 0
+                        logger.info(
+                            "text-features-backfill: iter=%d scanned=%d written=%d cumulative_written=%d batch_wall=%.1fs",
+                            iters, processed, written, total, elapsed)
+                        if args.sleep_between > 0:
+                            await asyncio.sleep(args.sleep_between)
+                        continue
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        fail_streak += 1
+                        elapsed = time.monotonic() - t0
+                        logger.error(
+                            "text-features-backfill: iter FAILED after %.1fs (streak=%d) %s: %s\n%s",
+                            elapsed, fail_streak, type(e).__name__, e,
+                            traceback.format_exc())
+                    if fail_streak >= args.max_consecutive_failures:
+                        logger.error(
+                            "text-features-backfill: %d consecutive failures, giving up. total=%d iters=%d wall=%.1fs",
+                            fail_streak, total, iters, time.monotonic() - start)
+                        break
+                    if fail_streak > 0:
+                        await asyncio.sleep(args.fail_backoff)
+                logger.info(
+                    "text-features-backfill: exit. total_written=%d iters=%d wall=%.1fs stop_flag=%s",
+                    total, iters, time.monotonic() - start, stop_flag["stop"])
+            finally:
+                await close_pools()
 
         asyncio.run(_run())
 
