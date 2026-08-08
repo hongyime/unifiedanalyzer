@@ -57,3 +57,5 @@ holehe>=1.61
 
 # NER via spaCy (2026-07-08)
 spacy>=3.7.0
+vaderSentiment>=3.3.2
+afinn>=0.1

@@ -176,6 +176,16 @@ def main():
                      help="Seconds to sleep after a failed iteration (default 10)")
     tbf.add_argument("--max-consecutive-failures", type=int, default=5,
                      help="Exit after this many failures in a row (default 5)")
+    sbf = sub.add_parser(
+        "sentiment-backfill",
+        help="Backfill sentiment/emotion columns on timeline_text_features",
+    )
+    sbf.add_argument("--batch-size", type=int, default=1000,
+                     help="Per-iteration batch size (default 1000)")
+    sbf.add_argument("--max-batches", type=int, default=None,
+                     help="Optional cap on total batches (default: run until drained)")
+    sbf.add_argument("--sleep-between", type=float, default=0.0,
+                     help="Seconds to sleep between successful batches (default 0)")
 
     args = parser.parse_args()
 
@@ -527,6 +537,39 @@ def main():
                 logger.info(
                     "text-features-backfill: exit. total_written=%d iters=%d wall=%.1fs stop_flag=%s",
                     total, iters, time.monotonic() - start, stop_flag["stop"])
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "sentiment-backfill":
+        import time
+        from src.db.connection import init_pools, close_pools
+        from src.pipeline.sentiment_emotion import enrich_timeline_sentiment
+
+        async def _run():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                total = 0
+                iters = 0
+                start = time.monotonic()
+                while args.max_batches is None or iters < args.max_batches:
+                    stats = await enrich_timeline_sentiment(
+                        batch_size=args.batch_size,
+                        max_events=args.batch_size,
+                    )
+                    processed = int(stats.get("processed", 0) or 0)
+                    updated = int(stats.get("updated", 0) or 0)
+                    if processed == 0:
+                        break
+                    total += updated
+                    iters += 1
+                    logger.info("sentiment-backfill: iter=%d processed=%d updated=%d total=%d",
+                                iters, processed, updated, total)
+                    if args.sleep_between > 0:
+                        await asyncio.sleep(args.sleep_between)
+                logger.info("sentiment-backfill: exit total_updated=%d iters=%d wall=%.1fs",
+                            total, iters, time.monotonic() - start)
             finally:
                 await close_pools()
 

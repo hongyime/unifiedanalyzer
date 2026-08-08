@@ -604,6 +604,18 @@ CREATE TABLE IF NOT EXISTS timeline_text_features (
     source_fingerprint CHAR(64) NOT NULL,
     text_sha1          CHAR(40) NOT NULL,
     canonical_text     TEXT NOT NULL,
+    language_code      TEXT,
+    language_confidence REAL,
+    vader_compound     REAL,
+    vader_pos          REAL,
+    vader_neu          REAL,
+    vader_neg          REAL,
+    afinn_score        REAL,
+    nrc_emotions       JSONB NOT NULL DEFAULT '{}',
+    sentiment_label    TEXT,
+    sentiment_confidence REAL,
+    sentiment_flags    JSONB NOT NULL DEFAULT '{}',
+    search_vector      TSVECTOR,
     selected_metadata  JSONB NOT NULL DEFAULT '{}',
     token_count        INTEGER NOT NULL DEFAULT 0,
     char_count         INTEGER NOT NULL DEFAULT 0,
@@ -618,6 +630,18 @@ CREATE TABLE IF NOT EXISTS timeline_text_features (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS language_code TEXT;
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS language_confidence REAL;
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS vader_compound REAL;
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS vader_pos REAL;
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS vader_neu REAL;
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS vader_neg REAL;
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS afinn_score REAL;
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS nrc_emotions JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS sentiment_label TEXT;
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS sentiment_confidence REAL;
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS sentiment_flags JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS search_vector TSVECTOR;
 CREATE INDEX IF NOT EXISTS idx_timeline_text_entity_time
     ON timeline_text_features(entity_id, occurred_at DESC)
     WHERE entity_id IS NOT NULL;
@@ -627,6 +651,49 @@ CREATE INDEX IF NOT EXISTS idx_timeline_text_sha1
     ON timeline_text_features(text_sha1);
 CREATE INDEX IF NOT EXISTS idx_timeline_text_source_fingerprint
     ON timeline_text_features(source_fingerprint);
+CREATE INDEX IF NOT EXISTS idx_timeline_text_fts
+    ON timeline_text_features USING GIN(search_vector);
+CREATE INDEX IF NOT EXISTS idx_timeline_text_sentiment_time
+    ON timeline_text_features(sentiment_label, occurred_at DESC)
+    WHERE sentiment_label IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS conversation_threads (
+    thread_id          TEXT PRIMARY KEY,
+    source             VARCHAR(30) NOT NULL,
+    entity_id          UUID REFERENCES entities(id) ON DELETE CASCADE,
+    peer_entity_id     UUID REFERENCES entities(id) ON DELETE SET NULL,
+    title              TEXT,
+    started_at         TIMESTAMPTZ,
+    last_message_at    TIMESTAMPTZ,
+    message_count      INTEGER NOT NULL DEFAULT 0,
+    reply_count        INTEGER NOT NULL DEFAULT 0,
+    reaction_count     INTEGER NOT NULL DEFAULT 0,
+    forwarded_count    INTEGER NOT NULL DEFAULT 0,
+    avg_response_seconds REAL,
+    sentiment_summary  JSONB NOT NULL DEFAULT '{}',
+    preview            JSONB NOT NULL DEFAULT '[]',
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_threads_entity_time
+    ON conversation_threads(entity_id, last_message_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversation_threads_peer
+    ON conversation_threads(peer_entity_id, last_message_at DESC)
+    WHERE peer_entity_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS conversation_participant_metrics (
+    thread_id          TEXT NOT NULL REFERENCES conversation_threads(thread_id) ON DELETE CASCADE,
+    entity_id          UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    source             VARCHAR(30) NOT NULL,
+    message_count      INTEGER NOT NULL DEFAULT 0,
+    reply_count        INTEGER NOT NULL DEFAULT 0,
+    reaction_count     INTEGER NOT NULL DEFAULT 0,
+    avg_response_seconds REAL,
+    sentiment_summary  JSONB NOT NULL DEFAULT '{}',
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (thread_id, entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_participant_entity
+    ON conversation_participant_metrics(entity_id, updated_at DESC);
 
 -- Axis-1 MVP: sentence embeddings for semantic timeline search. Lives in a
 -- SIDE TABLE (not on timeline_events itself) because pgvector HNSW cannot be

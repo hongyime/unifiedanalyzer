@@ -294,6 +294,9 @@ def test_coordinated_posting_alerts_default_off(monkeypatch):
     monkeypatch.setenv("PROFILE_CHANGE_ALERT_ENABLED", "0")
     monkeypatch.setenv("NEW_IDENTITY_LINK_ALERT_ENABLED", "0")
     monkeypatch.setenv("LOCATION_MISMATCH_ALERT_ENABLED", "0")
+    monkeypatch.setenv("EMOTIONAL_SPIKE_ALERT_ENABLED", "0")
+    monkeypatch.setenv("FACE_LINK_DRIFT_ALERT_ENABLED", "0")
+    monkeypatch.setenv("LOCATION_EVIDENCE_SPIKE_ALERT_ENABLED", "0")
     monkeypatch.setattr(alerts, "_detect_coordinated_posting", fake_detector)
 
     stats = asyncio.run(alerts.run_alerts())
@@ -314,6 +317,9 @@ def test_coordinated_posting_alerts_can_be_enabled(monkeypatch):
     monkeypatch.setenv("PROFILE_CHANGE_ALERT_ENABLED", "0")
     monkeypatch.setenv("NEW_IDENTITY_LINK_ALERT_ENABLED", "0")
     monkeypatch.setenv("LOCATION_MISMATCH_ALERT_ENABLED", "0")
+    monkeypatch.setenv("EMOTIONAL_SPIKE_ALERT_ENABLED", "0")
+    monkeypatch.setenv("FACE_LINK_DRIFT_ALERT_ENABLED", "0")
+    monkeypatch.setenv("LOCATION_EVIDENCE_SPIKE_ALERT_ENABLED", "0")
     monkeypatch.setattr(alerts, "_detect_coordinated_posting", fake_detector)
 
     stats = asyncio.run(alerts.run_alerts())
@@ -617,12 +623,17 @@ def test_schema_declares_timeline_text_features():
         "mention_count",
         "hashtag_count",
         "method_versions",
+        "vader_compound",
+        "nrc_emotions",
+        "search_vector",
     ):
         assert column in schema
     assert "idx_timeline_text_entity_time" in schema
     assert "idx_timeline_text_source_time" in schema
     assert "idx_timeline_text_sha1" in schema
     assert "idx_timeline_text_source_fingerprint" in schema
+    assert "idx_timeline_text_fts" in schema
+    assert "CREATE TABLE IF NOT EXISTS conversation_threads" in schema
 
 
 def test_skipped_alert_metadata_does_not_break_alert_count():

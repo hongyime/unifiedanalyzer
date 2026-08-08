@@ -217,14 +217,16 @@ async def build_timeline_text_features(batch_size: int = 500, max_events: int | 
                         source_record_id, source_fingerprint, text_sha1,
                         canonical_text, selected_metadata, token_count,
                         char_count, emoji_count, mention_count, hashtag_count,
-                        url_count, domain_count, flags, method_versions
+                        url_count, domain_count, flags, method_versions,
+                        search_vector
                     )
                     VALUES (
                         $1::uuid, $2::uuid, $3, $4, $5,
                         $6, $7, $8,
                         $9, $10::jsonb, $11,
                         $12, $13, $14, $15,
-                        $16, $17, $18::jsonb, $19::jsonb
+                        $16, $17, $18::jsonb, $19::jsonb,
+                        to_tsvector('simple', $9)
                     )
                     ON CONFLICT (event_id) DO UPDATE SET
                         entity_id = EXCLUDED.entity_id,
@@ -245,6 +247,7 @@ async def build_timeline_text_features(batch_size: int = 500, max_events: int | 
                         domain_count = EXCLUDED.domain_count,
                         flags = EXCLUDED.flags,
                         method_versions = EXCLUDED.method_versions,
+                        search_vector = EXCLUDED.search_vector,
                         processed_at = NOW(),
                         updated_at = NOW()
                     WHERE timeline_text_features.source_fingerprint <> EXCLUDED.source_fingerprint
