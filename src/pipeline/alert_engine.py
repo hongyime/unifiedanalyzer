@@ -225,7 +225,7 @@ async def _detect_emotional_spikes() -> int:
                        count(*)::int AS event_count,
                        avg(vader_compound) AS current_mean,
                        avg(sentiment_confidence) AS avg_confidence,
-                       array_agg(event_id::text ORDER BY occurred_at DESC)[:10] AS event_ids
+                       (array_agg(event_id::text ORDER BY occurred_at DESC))[1:10] AS event_ids
                 FROM timeline_text_features
                 WHERE entity_id IS NOT NULL
                   AND vader_compound IS NOT NULL
@@ -319,7 +319,7 @@ async def _detect_location_evidence_spikes() -> int:
             SELECT le.entity_id::text, e.canonical_name, le.source,
                    count(*)::int AS event_count,
                    avg(le.confidence) AS avg_confidence,
-                   array_agg(le.evidence_key ORDER BY le.occurred_at DESC)[:10] AS evidence_keys
+                   (array_agg(le.evidence_key ORDER BY le.occurred_at DESC))[1:10] AS evidence_keys
             FROM location_evidence le
             JOIN entities e ON e.id = le.entity_id
             WHERE COALESCE(le.status, 'active') = 'active'
