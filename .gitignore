@@ -271,3 +271,7 @@ skills-lock.json
 # workflow, 1e4814f). Removed because analyzer docs are project-specific
 # tracked content, not sync-mirrored templates. See docs/README.md.
 templates/
+.env.*
+.venv/
+.next/
+coverage/
