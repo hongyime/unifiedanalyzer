@@ -19,6 +19,8 @@ completes) this is well below the 50-200ms budget. Tune with
 """
 from datetime import datetime
 import logging
+import os
+from pathlib import Path
 import time
 
 from fastapi import APIRouter, HTTPException, Query
@@ -28,6 +30,15 @@ from src.db.connection import get_analyzer_pool
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/search", tags=["search"])
+
+
+def _semantic_model_ready() -> bool:
+    base = Path(os.getenv("TEXT_EMBED_MODEL_PATH") or Path(os.getenv("MEDIA_DERIVED_PATH", "/app/media_derived")) / "models" / "text_embedder")
+    return (
+        (base / "tokenizer.json").is_file()
+        and (base / "config.json").is_file()
+        and ((base / "onnx" / "model_quantized.onnx").is_file() or (base / "onnx" / "model.onnx").is_file())
+    )
 
 
 @router.get("/timeline")
@@ -52,17 +63,21 @@ async def search_timeline(
     emb_literal = None
     embedder = None
     if mode in {"semantic", "hybrid"}:
-        try:
-            from src.pipeline.text_embedder import get_embedder
-            embedder = get_embedder()
-            vec = embedder.embed([q], is_query=True)[0]
-            emb_literal = "[" + ",".join(f"{float(x):.7f}" for x in vec) + "]"
-        except Exception as e:  # noqa: BLE001
-            if mode == "semantic":
-                logger.exception("search_timeline: embedder unavailable")
-                raise HTTPException(status_code=503, detail=f"Text embedder not ready: {str(e)[:200]}")
-            logger.warning("search_timeline: hybrid falling back to keyword: %s", e)
+        if mode == "hybrid" and not _semantic_model_ready():
+            logger.info("search_timeline: semantic model not local; hybrid falling back to keyword")
             mode = "keyword"
+        else:
+            try:
+                from src.pipeline.text_embedder import get_embedder
+                embedder = get_embedder()
+                vec = embedder.embed([q], is_query=True)[0]
+                emb_literal = "[" + ",".join(f"{float(x):.7f}" for x in vec) + "]"
+            except Exception as e:  # noqa: BLE001
+                if mode == "semantic":
+                    logger.exception("search_timeline: embedder unavailable")
+                    raise HTTPException(status_code=503, detail=f"Text embedder not ready: {str(e)[:200]}")
+                logger.warning("search_timeline: hybrid falling back to keyword: %s", e)
+                mode = "keyword"
 
     filter_values: list = []
 
