@@ -33,6 +33,8 @@ router = APIRouter(prefix="/api/search", tags=["search"])
 
 
 def _semantic_model_ready() -> bool:
+    if os.getenv("TEXT_SEARCH_HYBRID_SEMANTIC", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
     base = Path(os.getenv("TEXT_EMBED_MODEL_PATH") or Path(os.getenv("MEDIA_DERIVED_PATH", "/app/media_derived")) / "models" / "text_embedder")
     return (
         (base / "tokenizer.json").is_file()
