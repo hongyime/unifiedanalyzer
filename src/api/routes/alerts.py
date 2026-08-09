@@ -215,6 +215,65 @@ async def get_run_phases(run_id: str):
     }
 
 
+@router.get("/notifications/audit")
+async def list_notification_audit(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    message_type: str | None = None,
+    status: str | None = None,
+):
+    pool = get_analyzer_pool()
+    offset = (page - 1) * per_page
+    conditions: list[str] = []
+    params: list = []
+    idx = 1
+
+    if message_type:
+        conditions.append(f"message_type = ${idx}")
+        params.append(message_type)
+        idx += 1
+    if status:
+        conditions.append(f"status = ${idx}")
+        params.append(status)
+        idx += 1
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(f"SELECT count(*) FROM notification_audit {where}", *params)
+        params.extend([per_page, offset])
+        rows = await conn.fetch(f"""
+            SELECT id, channel, chat_id, message_type, text_preview, status,
+                   telegram_message_id, related_run_id, related_alert_id,
+                   error, created_at
+            FROM notification_audit
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ${idx} OFFSET ${idx + 1}
+        """, *params)
+
+    return {
+        "data": [
+            {
+                "id": str(r["id"]),
+                "channel": r["channel"],
+                "chat_id": r["chat_id"],
+                "message_type": r["message_type"],
+                "text_preview": r["text_preview"],
+                "status": r["status"],
+                "telegram_message_id": r["telegram_message_id"],
+                "related_run_id": str(r["related_run_id"]) if r["related_run_id"] else None,
+                "related_alert_id": str(r["related_alert_id"]) if r["related_alert_id"] else None,
+                "error": r["error"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }
+
+
 @router.post("/runs/trigger")
 async def trigger_run():
     try:

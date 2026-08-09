@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 
 from src.notifications import telegram
+from src.notifications.intelligence import INTELLIGENCE_ALERT_TYPES, intelligence_run_lines, intelligence_status_lines
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,16 @@ async def notify_startup():
     await telegram.send(
         f"✅ <b>UnifiedAnalyzer started</b>\n"
         f"Dashboard: {url}\n"
-        f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        message_type="startup",
     )
 
 
 async def notify_shutdown():
     await telegram.send(
         f"\U0001f534 <b>UnifiedAnalyzer shutting down</b>\n"
-        f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        message_type="shutdown",
     )
 
 
@@ -54,19 +57,27 @@ async def notify_new_alerts(alerts: list[dict]):
     for a in alerts[:10]:
         icon = _SEVERITY_ICON.get(a.get("severity", "info"), "•")
         lines.append(f"{icon} {a['title']}")
+    intel = [a for a in alerts if a.get("alert_type") in INTELLIGENCE_ALERT_TYPES]
+    if intel:
+        counts: dict[str, int] = {}
+        for a in intel:
+            counts[a["alert_type"]] = counts.get(a["alert_type"], 0) + 1
+        rendered = ", ".join(f"{k.replace('_', ' ').title()}: {v}" for k, v in sorted(counts.items()))
+        lines.append(f"Intel signals: {rendered}")
     if len(alerts) > 10:
         lines.append(f"  ...and {len(alerts) - 10} more")
     lines.append(f"\n{url}/alerts")
-    await telegram.send("\n".join(lines))
+    await telegram.send("\n".join(lines), message_type="new_alerts")
 
 
-async def notify_run_summary(run_type: str, stats: dict):
+async def notify_run_summary(run_type: str, stats: dict, *, run_id: str | None = None):
     events = stats.get("events", 0)
     alerts = stats.get("alerts", 0)
     entities = stats.get("entities", 0)
     signals = stats.get("signals", 0)
+    intel_lines = intelligence_run_lines(stats)
 
-    if events == 0 and alerts == 0 and entities == 0:
+    if events == 0 and alerts == 0 and entities == 0 and signals == 0 and not intel_lines:
         return
 
     icon = "\U0001f504" if run_type == "incremental" else "\U0001f9f9"
@@ -80,10 +91,11 @@ async def notify_run_summary(run_type: str, stats: dict):
     if signals:
         parts.append(f"{signals} signals")
 
-    await telegram.send(
-        f"{icon} <b>{run_type.title()} run complete</b>\n"
-        f"{', '.join(parts)}"
-    )
+    lines = [f"{icon} <b>{run_type.title()} run complete</b>"]
+    if parts:
+        lines.append(", ".join(parts))
+    lines.extend(intel_lines)
+    await telegram.send("\n".join(lines[:8]), message_type="run_summary", related_run_id=run_id)
 
 
 async def notify_collector_health(issues: list[dict]):
@@ -94,7 +106,7 @@ async def notify_collector_health(issues: list[dict]):
     for issue in issues:
         lines.append(f"• <b>{issue['source']}</b>: {issue['message']}")
     lines.append(f"\n{url}/collectors")
-    await telegram.send("\n".join(lines))
+    await telegram.send("\n".join(lines), message_type="collector_health")
 
 
 async def notify_daily_digest(digest: dict):
@@ -112,9 +124,13 @@ async def notify_daily_digest(digest: dict):
         lines.append(f"⚠️ Failing phases: {', '.join(digest['failing_phases'])}")
     if digest.get("collectors_down"):
         lines.append(f"⚠️ Collectors down: {', '.join(digest['collectors_down'])}")
+    if digest.get("intelligence"):
+        lines.append("")
+        lines.append("<b>Intelligence</b>")
+        lines.extend(intelligence_status_lines(digest["intelligence"])[:4])
 
     lines.append(f"\n{url}")
-    await telegram.send("\n".join(lines))
+    await telegram.send("\n".join(lines), message_type="daily_digest")
 
 
 async def notify_merge_candidate(entity_a_name: str, entity_b_name: str,
@@ -125,14 +141,16 @@ async def notify_merge_candidate(entity_a_name: str, entity_b_name: str,
         f"<b>{entity_a_name}</b> ↔ <b>{entity_b_name}</b>\n"
         f"Probability: {confidence:.0%} via {shared_signal}\n"
         f"No automatic merge occurred; review this pair before merging.\n"
-        f"{url}/entities"
+        f"{url}/entities",
+        message_type="merge_candidate",
     )
 
 
 async def notify_error(run_type: str, error: str):
     await telegram.send(
         f"❌ <b>{run_type.title()} run failed</b>\n"
-        f"<code>{error[:500]}</code>"
+        f"<code>{error[:500]}</code>",
+        message_type="error",
     )
 
 
@@ -229,6 +247,10 @@ async def notify_status(s: dict):
         lines.append("Failing phases: none currently reported.")
 
     lines.append("")
+    lines.append("<b>Intelligence</b>")
+    lines.extend(intelligence_status_lines(s.get("intelligence")))
+
+    lines.append("")
     lines.append("<b>Collector signals</b>")
     if s.get("collectors_down"):
         lines.append(
@@ -241,4 +263,4 @@ async def notify_status(s: dict):
 
     lines.append("")
     lines.append(f"Dashboard: {url}")
-    await telegram.send("\n".join(lines))
+    await telegram.send("\n".join(lines), message_type="status")

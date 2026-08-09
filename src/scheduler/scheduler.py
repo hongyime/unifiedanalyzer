@@ -17,6 +17,7 @@ from src.notifications.alerts import (
     notify_collector_health, notify_daily_digest, notify_merge_candidate,
     notify_status,
 )
+from src.notifications.intelligence import build_intelligence_status
 from src.merge_candidates import merge_candidate_notify_min_confidence
 from src.util.audit_log import retry_pending_decision_jsonl
 
@@ -261,6 +262,7 @@ async def _build_daily_digest() -> dict:
             failing_phases = await _fetch_failing_production_phases(conn)
         except Exception:
             failing_phases = []
+        intelligence = await build_intelligence_status(conn)
 
     collector_issues = await _check_collector_health()
 
@@ -278,6 +280,7 @@ async def _build_daily_digest() -> dict:
         "most_active": f"{most_active['canonical_name']} ({most_active['cnt']} events)"
             if most_active else None,
         "collectors_down": [i["source"] for i in collector_issues],
+        "intelligence": intelligence,
     }
 
 
@@ -409,6 +412,7 @@ async def _build_status() -> dict:
             failing_phases = await _fetch_failing_production_phases(conn)
         except Exception:
             failing_phases = []
+        intelligence = await build_intelligence_status(conn)
 
     now = datetime.now(timezone.utc)
     run_state = None
@@ -439,6 +443,7 @@ async def _build_status() -> dict:
         "recent_recovered_failed_runs": [dict(r) for r in recovered_failed],
         "failing_phases": failing_phases,
         "collectors_down": [i["source"] for i in issues],
+        "intelligence": intelligence,
     }
 
 

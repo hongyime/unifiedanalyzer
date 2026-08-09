@@ -259,6 +259,24 @@ CREATE TABLE IF NOT EXISTS run_phase_status (
 );
 CREATE INDEX IF NOT EXISTS idx_run_phase_status_phase ON run_phase_status(phase, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS notification_audit (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel             VARCHAR(30) NOT NULL DEFAULT 'telegram',
+    chat_id             TEXT,
+    message_type        VARCHAR(80) NOT NULL DEFAULT 'general',
+    text_preview        TEXT NOT NULL,
+    status              VARCHAR(20) NOT NULL, -- sent | failed | skipped
+    telegram_message_id BIGINT,
+    related_run_id      UUID REFERENCES analysis_runs(id) ON DELETE SET NULL,
+    related_alert_id    UUID REFERENCES alerts(id) ON DELETE SET NULL,
+    error               TEXT,
+    created_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_notification_audit_created
+    ON notification_audit(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notification_audit_type_created
+    ON notification_audit(message_type, created_at DESC);
+
 -- OSINT NLP/monitoring first slice (2026-08-08): per-phase coverage snapshots.
 -- run_phase_status remains the pass/fail/duration ledger; this side table records
 -- what each phase processed, attributed, skipped, or failed to resolve. Rows are

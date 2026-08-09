@@ -636,6 +636,14 @@ def test_schema_declares_timeline_text_features():
     assert "CREATE TABLE IF NOT EXISTS conversation_threads" in schema
 
 
+def test_schema_declares_notification_audit():
+    schema = (_REPO_ROOT / "src" / "db" / "schema.sql").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS notification_audit" in schema
+    assert "telegram_message_id BIGINT" in schema
+    assert "related_run_id      UUID REFERENCES analysis_runs" in schema
+    assert "idx_notification_audit_type_created" in schema
+
+
 def test_skipped_alert_metadata_does_not_break_alert_count():
     """Skipped alert phases return metadata strings, not only numeric counters."""
     from src.pipeline.incremental_runner import _sum_numeric_stats

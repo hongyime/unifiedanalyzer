@@ -838,6 +838,7 @@ async def run_incremental() -> dict:
         alert_stats = await _run_phase(
             run_id, "incremental", "alerts", run_alerts, default={}
         )
+        stats["alert_breakdown"] = dict(alert_stats) if isinstance(alert_stats, dict) else {}
         stats["alerts"] = _sum_numeric_stats(alert_stats)
 
         # Non-fatal: behavioral profiling scans entities x timeline_events and can
@@ -855,7 +856,7 @@ async def run_incremental() -> dict:
         await _finish_run(run_id, stats)
         await _alert_on_repeated_phase_failures()
         logger.info("Incremental run complete: %s", stats)
-        await notify_run_summary("incremental", stats)
+        await notify_run_summary("incremental", stats, run_id=run_id)
 
         if stats["alerts"] > 0:
             new_alerts = await _get_recent_alerts()
@@ -1000,6 +1001,7 @@ async def run_full_resolution() -> dict:
         alert_stats = await _run_phase(
             run_id, "full_resolution", "alerts", run_alerts, default={}
         )
+        stats["alert_breakdown"] = dict(alert_stats) if isinstance(alert_stats, dict) else {}
         stats["alerts"] = _sum_numeric_stats(alert_stats)
 
         # Non-fatal: behavioral profiling scans entities x timeline_events and can
@@ -1017,7 +1019,7 @@ async def run_full_resolution() -> dict:
         await _finish_run(run_id, stats)
         await _alert_on_repeated_phase_failures()
         logger.info("Full resolution run complete: %s", stats)
-        await notify_run_summary("full resolution", stats)
+        await notify_run_summary("full resolution", stats, run_id=run_id)
 
         if stats["alerts"] > 0:
             new_alerts = await _get_recent_alerts()

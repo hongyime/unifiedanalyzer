@@ -70,7 +70,51 @@ def get_collector_dashboard_url() -> str:
     return f"http://{host}:{_COLLECTOR_PORT}"
 
 
-def _send_sync(text: str, parse_mode: str = "HTML") -> bool:
+def _preview(text: str, limit: int = 1000) -> str:
+    single_line = " ".join(str(text).split())
+    return single_line[:limit]
+
+
+async def _audit_send(
+    *,
+    text: str,
+    message_type: str,
+    status: str,
+    telegram_message_id: int | None = None,
+    related_run_id: str | None = None,
+    related_alert_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    try:
+        from src.db.connection import get_analyzer_pool
+
+        pool = get_analyzer_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO notification_audit (
+                    channel, chat_id, message_type, text_preview, status,
+                    telegram_message_id, related_run_id, related_alert_id, error
+                )
+                VALUES (
+                    'telegram', $1, $2, $3, $4,
+                    $5, $6::uuid, $7::uuid, $8
+                )
+                """,
+                _CHAT_ID,
+                message_type[:80],
+                _preview(text),
+                status,
+                telegram_message_id,
+                related_run_id,
+                related_alert_id,
+                (error[:1000] if error else None),
+            )
+    except Exception:
+        logger.debug("Telegram notification audit write failed (non-fatal)", exc_info=True)
+
+
+def _send_sync(text: str, parse_mode: str = "HTML") -> tuple[bool, int | None, str | None]:
     url = f"https://api.telegram.org/bot{_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": _CHAT_ID,
@@ -88,18 +132,50 @@ def _send_sync(text: str, parse_mode: str = "HTML") -> bool:
     )
     try:
         resp = urllib.request.urlopen(req, timeout=15)
-        return resp.status == 200
+        body = resp.read().decode("utf-8", errors="replace")
+        message_id = None
+        try:
+            parsed = json.loads(body)
+            message_id = parsed.get("result", {}).get("message_id")
+        except (TypeError, json.JSONDecodeError):
+            pass
+        return resp.status == 200, message_id, None if resp.status == 200 else body[:200]
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")[:200]
         logger.warning("Telegram send failed: %s %s", e.code, body)
-        return False
+        return False, None, f"{e.code} {body}"
     except Exception:
         logger.debug("Telegram send failed (network)", exc_info=True)
-        return False
+        return False, None, "network_error"
 
 
-async def send(text: str, parse_mode: str = "HTML") -> bool:
+async def send(
+    text: str,
+    parse_mode: str = "HTML",
+    *,
+    message_type: str = "general",
+    related_run_id: str | None = None,
+    related_alert_id: str | None = None,
+) -> bool:
     if not _BOT_TOKEN:
         if not _get_config():
+            await _audit_send(
+                text=text,
+                message_type=message_type,
+                status="skipped",
+                related_run_id=related_run_id,
+                related_alert_id=related_alert_id,
+                error="telegram_not_configured",
+            )
             return False
-    return await asyncio.to_thread(_send_sync, text, parse_mode)
+    ok, message_id, error = await asyncio.to_thread(_send_sync, text, parse_mode)
+    await _audit_send(
+        text=text,
+        message_type=message_type,
+        status="sent" if ok else "failed",
+        telegram_message_id=message_id,
+        related_run_id=related_run_id,
+        related_alert_id=related_alert_id,
+        error=error,
+    )
+    return ok
