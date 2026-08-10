@@ -136,10 +136,23 @@ def _score_nrc(words: list[str]) -> dict[str, float]:
     return {}
 
 
-def analyze_text_sentiment(text: str, *, token_count: int | None = None) -> SentimentRecord:
+def analyze_text_sentiment(
+    text: str,
+    *,
+    token_count: int | None = None,
+    source_language: str | None = None,
+    machine_translated: bool = False,
+) -> SentimentRecord:
     text = text or ""
     words = _tokens(text)
-    language_code, language_confidence, flags = detect_language(text)
+    if machine_translated:
+        language_code = source_language or "und"
+        language_confidence = 0.7
+        flags = {"machine_translated": True, "scored_language": "en"}
+        scoring_language = "en"
+    else:
+        language_code, language_confidence, flags = detect_language(text)
+        scoring_language = language_code
     flags = dict(flags)
     if token_count is None:
         token_count = len(words)
@@ -149,14 +162,14 @@ def analyze_text_sentiment(text: str, *, token_count: int | None = None) -> Sent
         flags["all_caps_emphasis"] = True
 
     vader_scores: dict[str, float] | None = None
-    if language_code == "en":
+    if scoring_language == "en":
         vader = _get_vader()
         if vader is not None:
             vader_scores = {k: float(v) for k, v in vader.polarity_scores(text).items()}
         else:
             vader_scores = _fallback_vader(text, words)
-    afinn_score = _score_afinn(text, words) if language_code == "en" else 0.0
-    nrc = _score_nrc(words) if language_code == "en" else {}
+    afinn_score = _score_afinn(text, words) if scoring_language == "en" else 0.0
+    nrc = _score_nrc(words) if scoring_language == "en" else {}
 
     compound = float(vader_scores["compound"]) if vader_scores else 0.0
     if compound >= 0.05:
@@ -196,15 +209,33 @@ async def enrich_timeline_sentiment(batch_size: int = 1000, max_events: int | No
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT event_id::text, source, canonical_text, token_count, method_versions
-            FROM timeline_text_features
-            WHERE canonical_text IS NOT NULL
+            SELECT ttf.event_id::text,
+                   ttf.source,
+                   ttf.canonical_text,
+                   ttf.token_count,
+                   ttf.method_versions,
+                   COALESCE(lp.primary_language, ttf.language_code) AS profile_language,
+                   tr.translated_text,
+                   tr.translator_version
+            FROM timeline_text_features ttf
+            LEFT JOIN timeline_language_profiles lp ON lp.event_id = ttf.event_id
+            LEFT JOIN LATERAL (
+                SELECT translated_text, translator_version
+                FROM timeline_translations tr
+                WHERE tr.event_id = ttf.event_id
+                  AND tr.target_language = 'en'
+                  AND tr.status = 'translated'
+                  AND NULLIF(BTRIM(tr.translated_text), '') IS NOT NULL
+                ORDER BY tr.updated_at DESC
+                LIMIT 1
+            ) tr ON TRUE
+            WHERE ttf.canonical_text IS NOT NULL
               AND (
-                processed_at IS NULL
-                OR sentiment_label IS NULL
-                OR COALESCE(method_versions->>'sentiment_emotion', '') <> $2
+                ttf.processed_at IS NULL
+                OR ttf.sentiment_label IS NULL
+                OR COALESCE(ttf.method_versions->>'sentiment_emotion', '') <> $2
               )
-            ORDER BY occurred_at DESC
+            ORDER BY ttf.occurred_at DESC
             LIMIT $1
             """,
             min(batch_size, max_events),
@@ -220,9 +251,19 @@ async def enrich_timeline_sentiment(batch_size: int = 1000, max_events: int | No
         source = row["source"] or "unknown"
         by_source.setdefault(source, {"processed": 0, "updated": 0, "skipped_count": 0})
         by_source[source]["processed"] += 1
-        record = analyze_text_sentiment(row["canonical_text"], token_count=row["token_count"])
+        profile_language = (row["profile_language"] or "").lower()
+        translated_text = row["translated_text"]
+        use_translation = bool(translated_text and profile_language and profile_language not in {"en", "und"})
+        record = analyze_text_sentiment(
+            translated_text if use_translation else row["canonical_text"],
+            token_count=row["token_count"],
+            source_language=profile_language or None,
+            machine_translated=use_translation,
+        )
         method_versions = row["method_versions"] if isinstance(row["method_versions"], dict) else {}
         method_versions = {**method_versions, **record.method_versions}
+        if use_translation:
+            method_versions["translation"] = row["translator_version"] or "unknown"
         updates.append((
             row["event_id"],
             record.language_code,

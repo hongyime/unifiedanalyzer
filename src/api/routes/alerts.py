@@ -1,11 +1,23 @@
 from datetime import datetime, timezone
 import json
 from fastapi import APIRouter, Query, HTTPException
+from pydantic import BaseModel
 
 from src.db.connection import get_analyzer_pool
 from src.pipeline.incremental_runner import run_incremental
+from src.pipeline.stream_alerts import stream_alert_status
 
 router = APIRouter(tags=["alerts"])
+
+
+class AlertSuppressionIn(BaseModel):
+    scope: str = "manual"
+    alert_type: str | None = None
+    entity_id: str | None = None
+    source: str | None = None
+    reason: str
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
 
 
 def _decode_jsonb(raw, default=None):
@@ -84,6 +96,124 @@ async def list_alerts(
         "total": total,
         "page": page,
         "per_page": per_page,
+    }
+
+
+@router.get("/alerts/stream/status")
+async def get_stream_alert_status():
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        return await stream_alert_status(conn)
+
+
+@router.get("/alerts/fingerprints")
+async def list_alert_fingerprints(
+    alert_type: str | None = None,
+    status: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+):
+    conditions: list[str] = []
+    params: list = []
+    if alert_type:
+        params.append(alert_type)
+        conditions.append(f"alert_type = ${len(params)}")
+    if status:
+        params.append(status)
+        conditions.append(f"status = ${len(params)}")
+    params.append(limit)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT fingerprint, alert_type, entity_id::text, source, window_start,
+                   window_end, last_sent_at, count, status, detail, updated_at
+            FROM alert_fingerprints
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ${len(params)}
+            """,
+            *params,
+        )
+    return {"data": [_stream_alert_row(row) for row in rows], "total": len(rows)}
+
+
+@router.get("/alerts/suppressions")
+async def list_alert_suppressions(active_only: bool = True):
+    where = "WHERE starts_at <= NOW() AND (ends_at IS NULL OR ends_at >= NOW())" if active_only else ""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT id::text, scope, alert_type, entity_id::text, source, reason,
+                   starts_at, ends_at, created_at
+            FROM alert_suppressions
+            {where}
+            ORDER BY created_at DESC
+            LIMIT 200
+            """
+        )
+    return {"data": [_decode_alert_suppression(row) for row in rows], "total": len(rows)}
+
+
+@router.post("/alerts/suppressions")
+async def create_alert_suppression(payload: AlertSuppressionIn):
+    if not payload.reason.strip():
+        raise HTTPException(status_code=400, detail="reason is required")
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO alert_suppressions (
+                scope, alert_type, entity_id, source, reason, starts_at, ends_at, created_at
+            )
+            VALUES (
+                $1, $2, $3::uuid, $4, $5,
+                COALESCE($6::timestamptz, NOW()),
+                $7::timestamptz,
+                NOW()
+            )
+            RETURNING id::text, scope, alert_type, entity_id::text, source, reason,
+                      starts_at, ends_at, created_at
+            """,
+            payload.scope,
+            payload.alert_type,
+            payload.entity_id,
+            payload.source,
+            payload.reason,
+            payload.starts_at,
+            payload.ends_at,
+        )
+    return _decode_alert_suppression(row)
+
+
+def _stream_alert_row(row) -> dict:
+    return {
+        "fingerprint": row["fingerprint"],
+        "alert_type": row["alert_type"],
+        "entity_id": row["entity_id"],
+        "source": row["source"],
+        "window_start": row["window_start"].isoformat() if row["window_start"] else None,
+        "window_end": row["window_end"].isoformat() if row["window_end"] else None,
+        "last_sent_at": row["last_sent_at"].isoformat() if row["last_sent_at"] else None,
+        "count": row["count"],
+        "status": row["status"],
+        "detail": _decode_jsonb(row["detail"], {}),
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+
+
+def _decode_alert_suppression(row) -> dict:
+    return {
+        "id": row["id"],
+        "scope": row["scope"],
+        "alert_type": row["alert_type"],
+        "entity_id": row["entity_id"],
+        "source": row["source"],
+        "reason": row["reason"],
+        "starts_at": row["starts_at"].isoformat() if row["starts_at"] else None,
+        "ends_at": row["ends_at"].isoformat() if row["ends_at"] else None,
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
     }
 
 

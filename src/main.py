@@ -186,6 +186,42 @@ def main():
                      help="Optional cap on total batches (default: run until drained)")
     sbf.add_argument("--sleep-between", type=float, default=0.0,
                      help="Seconds to sleep between successful batches (default 0)")
+    lbf = sub.add_parser(
+        "language-backfill",
+        help="Backfill timeline_language_profiles from canonical text",
+    )
+    lbf.add_argument("--batch-size", type=int, default=500)
+    lbf.add_argument("--max-batches", type=int, default=None)
+    lbf.add_argument("--source", type=str, default=None)
+    lbf.add_argument("--language", type=str, default=None)
+    lbf.add_argument("--dry-run", action="store_true")
+    lbf.add_argument("--json", action="store_true")
+    trbf = sub.add_parser(
+        "translation-backfill",
+        help="Bounded machine-translation backfill for non-English text",
+    )
+    trbf.add_argument("--batch-size", type=int, default=100)
+    trbf.add_argument("--max-batches", type=int, default=None)
+    trbf.add_argument("--source", type=str, default=None)
+    trbf.add_argument("--language", type=str, default=None)
+    trbf.add_argument("--target-language", type=str, default="en")
+    trbf.add_argument("--dry-run", action="store_true")
+    trbf.add_argument("--json", action="store_true")
+    ev = sub.add_parser("eval", help="Run analyzer evaluation task")
+    ev.add_argument("--task", required=True, choices=["search", "identity", "sentiment", "face", "location", "alerts"])
+    ev.add_argument("--model-or-rule-version", default="manual")
+    ev.add_argument("--dry-run", action="store_true")
+    ev.add_argument("--json", action="store_true")
+    evs = sub.add_parser("eval-seed", help="Seed built-in evaluation smoke sets")
+    evs.add_argument("--seed-path", default=None)
+    evs.add_argument("--dry-run", action="store_true")
+    evs.add_argument("--json", action="store_true")
+    sta = sub.add_parser("stream-alerts", help="Run bounded near-real-time alert polling")
+    sta.add_argument("--once", action="store_true", help="Run one polling iteration and exit")
+    sta.add_argument("--poll-interval", type=float, default=30.0)
+    sta.add_argument("--batch-size", type=int, default=1000)
+    sta.add_argument("--term-threshold", type=int, default=10)
+    sta.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
 
@@ -570,6 +606,151 @@ def main():
                         await asyncio.sleep(args.sleep_between)
                 logger.info("sentiment-backfill: exit total_updated=%d iters=%d wall=%.1fs",
                             total, iters, time.monotonic() - start)
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "language-backfill":
+        from src.db.connection import init_pools, close_pools
+        from src.pipeline.language_id import backfill_language_profiles
+
+        async def _run():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                totals = {"processed": 0, "written": 0, "skipped_non_linguistic": 0, "by_language": {}}
+                iters = 0
+                while args.max_batches is None or iters < args.max_batches:
+                    stats = await backfill_language_profiles(
+                        batch_size=args.batch_size,
+                        max_events=args.batch_size,
+                        source=args.source,
+                        language=args.language,
+                        dry_run=args.dry_run,
+                    )
+                    if int(stats.get("processed", 0) or 0) == 0:
+                        break
+                    totals["processed"] += int(stats.get("processed", 0) or 0)
+                    totals["written"] += int(stats.get("written", 0) or 0)
+                    totals["skipped_non_linguistic"] += int(stats.get("skipped_non_linguistic", 0) or 0)
+                    for lang, count in (stats.get("by_language") or {}).items():
+                        totals["by_language"][lang] = totals["by_language"].get(lang, 0) + int(count)
+                    iters += 1
+                    if args.dry_run:
+                        break
+                totals["batches"] = iters
+                if args.json:
+                    print(json.dumps(totals, indent=2, sort_keys=True))
+                else:
+                    logger.info("language-backfill: %s", totals)
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "translation-backfill":
+        from src.db.connection import init_pools, close_pools
+        from src.pipeline.translation_worker import run_translation_backfill
+
+        async def _run():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                totals = {"processed": 0, "written": 0, "translated": 0, "skipped": 0, "failed": 0, "by_status": {}}
+                iters = 0
+                while args.max_batches is None or iters < args.max_batches:
+                    stats = await run_translation_backfill(
+                        batch_size=args.batch_size,
+                        max_events=args.batch_size,
+                        target_language=args.target_language,
+                        source=args.source,
+                        language=args.language,
+                        dry_run=args.dry_run,
+                    )
+                    if int(stats.get("processed", 0) or 0) == 0:
+                        break
+                    for key in ("processed", "written", "translated", "skipped", "failed"):
+                        totals[key] += int(stats.get(key, 0) or 0)
+                    for status, count in (stats.get("by_status") or {}).items():
+                        totals["by_status"][status] = totals["by_status"].get(status, 0) + int(count)
+                    iters += 1
+                    if args.dry_run:
+                        break
+                totals["batches"] = iters
+                if args.json:
+                    print(json.dumps(totals, indent=2, sort_keys=True))
+                else:
+                    logger.info("translation-backfill: %s", totals)
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "eval":
+        from src.db.connection import init_pools, close_pools, get_analyzer_pool
+        from src.eval.runner import run_eval
+
+        async def _run():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                async with get_analyzer_pool().acquire() as conn:
+                    report = await run_eval(
+                        conn,
+                        task=args.task,
+                        model_or_rule_version=args.model_or_rule_version,
+                        dry_run=args.dry_run,
+                    )
+                if args.json:
+                    print(json.dumps(report, indent=2, sort_keys=True, default=str))
+                else:
+                    logger.info("eval: %s", report)
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "eval-seed":
+        from src.db.connection import init_pools, close_pools, get_analyzer_pool
+        from src.eval.runner import seed_eval_sets
+
+        async def _run():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                async with get_analyzer_pool().acquire() as conn:
+                    report = await seed_eval_sets(
+                        conn,
+                        seed_path=args.seed_path,
+                        dry_run=args.dry_run,
+                    )
+                if args.json:
+                    print(json.dumps(report, indent=2, sort_keys=True, default=str))
+                else:
+                    logger.info("eval-seed: %s", report)
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "stream-alerts":
+        from src.db.connection import init_pools, close_pools, get_analyzer_pool
+        from src.pipeline.stream_alerts import run_stream_alert_once
+
+        async def _run():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                while True:
+                    async with get_analyzer_pool().acquire() as conn:
+                        report = await run_stream_alert_once(
+                            conn,
+                            batch_size=args.batch_size,
+                            term_threshold=args.term_threshold,
+                        )
+                    if args.json:
+                        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+                    else:
+                        logger.info("stream-alerts: %s", report)
+                    if args.once:
+                        break
+                    await asyncio.sleep(args.poll_interval)
             finally:
                 await close_pools()
 

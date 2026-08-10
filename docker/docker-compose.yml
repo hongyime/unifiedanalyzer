@@ -232,6 +232,32 @@ services:
     # guard against saturating the shared box. Default 2.0; tune via env.
     cpus: "${FACE_WORKER_MAX_CPUS:-2.0}"
 
+  # Near-real-time alert polling worker. Disabled unless explicitly started
+  # with `docker compose --profile stream-alerts up -d stream_alert_worker`.
+  # First run bootstraps its cursor at the latest timeline_text_features row so
+  # historical backfills do not create an alert storm.
+  stream_alert_worker:
+    container_name: unifiedanalyzer_stream_alert_worker
+    image: unifiedanalyzer:latest
+    profiles: ["stream-alerts"]
+    depends_on:
+      - analyzer
+    command: ["python", "-m", "src.main", "stream-alerts", "--poll-interval", "${STREAM_ALERT_POLL_INTERVAL:-30}", "--batch-size", "${STREAM_ALERT_BATCH_SIZE:-1000}", "--term-threshold", "${STREAM_ALERT_TERM_THRESHOLD:-10}"]
+    env_file:
+      - ../.env
+    environment:
+      ANALYZER_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedanalyzer
+      COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
+      COLLECTOR_DASHBOARD_URL: http://unifiedcollector_dashboard:8700
+      DB_MAX_POOL_SIZE: "${STREAM_ALERT_DB_POOL_SIZE:-3}"
+    volumes:
+      - "../src:/app/src"
+    networks:
+      - unifiedcollector_default
+    restart: unless-stopped
+    logging: *default-logging
+    cpu_shares: 256
+
 # CIFS volumes for the W:/X: drives on Tailscale host Prawn-E14. Credentials
 # come from .env (SMB_HOST/SMB_USER/SMB_PASS, gitignored) — pass
 # `--env-file ../.env` to docker compose so these ${...} refs interpolate.

@@ -69,6 +69,171 @@ def _relationship_why(relationship_type: str, sources) -> str | None:
     return None
 
 
+def _decode_sources(sources):
+    if isinstance(sources, str):
+        try:
+            import json as _json
+
+            return _json.loads(sources)
+        except Exception:
+            return {}
+    return sources if isinstance(sources, dict) else {}
+
+
+def confidence_bucket(relationship_type: str | None, weight: int | float | None, cross_platform: bool = False) -> str:
+    rtype = relationship_type or ""
+    if rtype in {"same_person_probability", "manual_identity", "identity_label"}:
+        return "hard" if float(weight or 0) >= 80 else "strong"
+    if cross_platform and rtype in {"shared_phone", "shared_email", "shared_website", "bio_mention"}:
+        return "strong"
+    if rtype in {"interaction", "social_graph_overlap", "face_coappearance", "location_copresence"}:
+        return "weak" if float(weight or 0) >= 2 else "context-only"
+    if rtype.startswith("temporal_"):
+        return "context-only"
+    return "weak" if float(weight or 0) >= 3 else "context-only"
+
+
+def _relationship_row(row) -> dict:
+    sources = _decode_sources(row["sources"])
+    bucket = confidence_bucket(row["relationship_type"], row["weight"], bool(row["cross_platform"]))
+    return {
+        "id": str(row["id"]),
+        "from_entity_id": str(row["entity_a_id"]) if row["entity_a_id"] else None,
+        "to_entity_id": str(row["entity_b_id"]) if row["entity_b_id"] else None,
+        "relationship_type": row["relationship_type"],
+        "weight": row["weight"],
+        "cross_platform": row["cross_platform"],
+        "confidence_bucket": bucket,
+        "source": "entity_relationships",
+        "sources": sources,
+        "why": _relationship_why(row["relationship_type"], sources),
+        "last_seen_at": row["last_seen_at"].isoformat() if row["last_seen_at"] else None,
+        "evidence_refs": sources.get("evidence_refs", []) if isinstance(sources, dict) else [],
+    }
+
+
+@router.get("/graph/path")
+async def graph_path(
+    from_entity_id: str,
+    to_entity_id: str,
+    max_hops: int = Query(3, ge=1, le=4),
+    include_context_only: bool = False,
+):
+    from_entity_id = require_uuid(from_entity_id)
+    to_entity_id = require_uuid(to_entity_id)
+    min_weight = 0 if include_context_only else 2
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        path = await conn.fetchrow(
+            """
+            WITH RECURSIVE edges AS (
+                SELECT id, entity_a_id, entity_b_id, relationship_type, weight, cross_platform
+                FROM entity_relationships
+                WHERE entity_a_id IS NOT NULL
+                  AND entity_b_id IS NOT NULL
+                  AND ($4::boolean OR weight >= $5)
+                UNION ALL
+                SELECT id, entity_b_id AS entity_a_id, entity_a_id AS entity_b_id,
+                       relationship_type, weight, cross_platform
+                FROM entity_relationships
+                WHERE entity_a_id IS NOT NULL
+                  AND entity_b_id IS NOT NULL
+                  AND ($4::boolean OR weight >= $5)
+            ),
+            paths AS (
+                SELECT ARRAY[e.id] AS edge_ids,
+                       ARRAY[e.entity_a_id, e.entity_b_id] AS node_ids,
+                       e.entity_b_id AS current_entity_id,
+                       1 AS depth
+                FROM edges e
+                WHERE e.entity_a_id = $1::uuid
+                UNION ALL
+                SELECT p.edge_ids || e.id,
+                       p.node_ids || e.entity_b_id,
+                       e.entity_b_id,
+                       p.depth + 1
+                FROM paths p
+                JOIN edges e ON e.entity_a_id = p.current_entity_id
+                WHERE p.depth < $3
+                  AND NOT e.entity_b_id = ANY(p.node_ids)
+            )
+            SELECT edge_ids
+            FROM paths
+            WHERE current_entity_id = $2::uuid
+            ORDER BY depth
+            LIMIT 1
+            """,
+            from_entity_id,
+            to_entity_id,
+            max_hops,
+            include_context_only,
+            min_weight,
+        )
+        if not path:
+            return {"path": [], "hops": 0, "found": False}
+        rows = await conn.fetch(
+            """
+            SELECT id, entity_a_id, entity_b_id, relationship_type, weight,
+                   cross_platform, sources, last_seen_at
+            FROM entity_relationships
+            WHERE id = ANY($1::uuid[])
+            """,
+            path["edge_ids"],
+        )
+    by_id = {str(row["id"]): _relationship_row(row) for row in rows}
+    ordered = [by_id[str(edge_id)] for edge_id in path["edge_ids"] if str(edge_id) in by_id]
+    return {"path": ordered, "hops": len(ordered), "found": bool(ordered)}
+
+
+@router.get("/graph/pivots/{entity_id}")
+async def graph_pivots(entity_id: str, include_context_only: bool = False):
+    entity_id = require_uuid(entity_id)
+    min_weight = 0 if include_context_only else 2
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, entity_a_id, entity_b_id, relationship_type, weight,
+                   cross_platform, sources, last_seen_at
+            FROM entity_relationships
+            WHERE (entity_a_id = $1::uuid OR entity_b_id = $1::uuid)
+              AND ($2::boolean OR weight >= $3)
+            ORDER BY last_seen_at DESC NULLS LAST, weight DESC
+            LIMIT 200
+            """,
+            entity_id,
+            include_context_only,
+            min_weight,
+        )
+    groups: dict[str, list[dict]] = {
+        "shared_chats": [],
+        "shared_locations": [],
+        "face_coappearance": [],
+        "username_domain_overlap": [],
+        "interaction_edges": [],
+        "recon_leads": [],
+        "other": [],
+    }
+    for row in rows:
+        item = _relationship_row(row)
+        rtype = row["relationship_type"] or ""
+        if "chat" in rtype or "group" in rtype:
+            groups["shared_chats"].append(item)
+        elif "location" in rtype or "geo" in rtype:
+            groups["shared_locations"].append(item)
+        elif "face" in rtype:
+            groups["face_coappearance"].append(item)
+        elif "website" in rtype or "domain" in rtype or "username" in rtype or "bio" in rtype:
+            groups["username_domain_overlap"].append(item)
+        elif rtype == "interaction":
+            groups["interaction_edges"].append(item)
+        elif "recon" in rtype or (isinstance(row["sources"], dict) and row["sources"].get("source") == "spiderfoot"):
+            groups["recon_leads"].append(item)
+        else:
+            groups["other"].append(item)
+    return {"entity_id": entity_id, "groups": groups, "total": sum(len(v) for v in groups.values())}
+
+
 def _decode_polyline(s: str) -> list[list[float]]:
     """Decode a Google encoded polyline (strava summary_polyline) -> [[lat,lng]]."""
     points: list[list[float]] = []

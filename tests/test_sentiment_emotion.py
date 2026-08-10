@@ -42,6 +42,9 @@ def test_enrich_timeline_sentiment_writes_updates(monkeypatch):
                 "canonical_text": "I love this great update",
                 "token_count": 5,
                 "method_versions": {},
+                "profile_language": "en",
+                "translated_text": None,
+                "translator_version": None,
             }]
 
         async def executemany(self, sql, rows):
@@ -73,3 +76,16 @@ def test_enrich_timeline_sentiment_writes_updates(monkeypatch):
     assert stats["processed"] == 1
     assert stats["updated"] == 1
     assert pool.conn.updates[0][9] == "positive"
+
+
+def test_sentiment_scores_machine_translation_as_context():
+    result = sentiment.analyze_text_sentiment(
+        "I love this great update",
+        token_count=5,
+        source_language="zh",
+        machine_translated=True,
+    )
+
+    assert result.language_code == "zh"
+    assert result.sentiment_label == "positive"
+    assert result.flags["machine_translated"] is True

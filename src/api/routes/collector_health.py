@@ -300,3 +300,46 @@ async def collector_health():
         "collector_dashboard": "unreachable",
         "source": "collector_db",
     }
+
+
+@router.get("/collector/coverage")
+async def collector_coverage():
+    try:
+        pool = get_collector_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (source)
+                       source, expected_cadence::text, latest_data_at, latest_run_at,
+                       status, rows_24h, media_24h, errors_24h, rate_limits_24h,
+                       private_access_failures, stale_targets, created_at
+                FROM collection_coverage_snapshots
+                ORDER BY source, created_at DESC
+                """
+            )
+    except Exception as exc:  # noqa: BLE001 - collector is optional for analyzer uptime
+        return {"collector_db": "unreachable", "sources": [], "error": str(exc)[:300]}
+    sources = []
+    for row in rows:
+        sources.append({
+            "source": row["source"],
+            "expected_cadence": row["expected_cadence"],
+            "latest_data_at": row["latest_data_at"].isoformat() if row["latest_data_at"] else None,
+            "latest_run_at": row["latest_run_at"].isoformat() if row["latest_run_at"] else None,
+            "status": row["status"],
+            "rows_24h": row["rows_24h"],
+            "media_24h": row["media_24h"],
+            "errors_24h": row["errors_24h"],
+            "rate_limits_24h": row["rate_limits_24h"],
+            "private_access_failures": row["private_access_failures"],
+            "stale_targets": row["stale_targets"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        })
+    fresh = sum(1 for row in sources if row["status"] == "fresh")
+    degraded = sum(1 for row in sources if row["status"] == "degraded")
+    stale = sum(1 for row in sources if row["status"] == "stale")
+    return {
+        "collector_db": "connected",
+        "sources": sources,
+        "summary": {"total": len(sources), "fresh": fresh, "degraded": degraded, "stale": stale},
+    }

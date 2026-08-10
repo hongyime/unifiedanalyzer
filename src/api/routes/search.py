@@ -118,7 +118,16 @@ async def search_timeline(
                    ranked.entity_id::text AS entity_id,
                    ranked.source AS platform,
                    ranked.occurred_at,
-                   LEFT(ranked.canonical_text, 500) AS snippet,
+                   LEFT(
+                       ranked.canonical_text ||
+                       CASE
+                         WHEN ranked.translated_text IS NOT NULL
+                         THEN E'\n[translated en] ' || ranked.translated_text
+                         ELSE ''
+                       END,
+                       500
+                   ) AS snippet,
+                   ranked.matched_translation,
                    ranked.keyword_score AS score,
                    ranked.keyword_score,
                    NULL::float8 AS semantic_score,
@@ -128,8 +137,9 @@ async def search_timeline(
             FROM (
                 SELECT ttf.*,
                        ts_rank_cd(ttf.search_vector, query.tsq) AS keyword_score,
+                       (ttf.translated_text IS NOT NULL AND to_tsvector('simple', ttf.translated_text) @@ query.tsq) AS matched_translation,
                        row_number() OVER (ORDER BY ts_rank_cd(ttf.search_vector, query.tsq) DESC, ttf.occurred_at DESC)::int AS keyword_rank
-                FROM timeline_text_features ttf, query
+                FROM timeline_translation_search ttf, query
                 WHERE ttf.search_vector @@ query.tsq {filter_sql}
             ) ranked
             ORDER BY ranked.keyword_rank
@@ -144,6 +154,7 @@ async def search_timeline(
                    ttf.source AS platform,
                    ttf.occurred_at,
                    LEFT(ttf.canonical_text, 500) AS snippet,
+                   false AS matched_translation,
                    1 - (emb.embedding <=> $1::vector) AS score,
                    NULL::float8 AS keyword_score,
                    1 - (emb.embedding <=> $1::vector) AS semantic_score,
@@ -151,7 +162,7 @@ async def search_timeline(
                    row_number() OVER (ORDER BY emb.embedding <=> $1::vector)::int AS semantic_rank,
                    row_number() OVER (ORDER BY emb.embedding <=> $1::vector)::int AS rrf_rank
             FROM timeline_embeddings emb
-            JOIN timeline_text_features ttf ON ttf.event_id = emb.event_id
+            JOIN timeline_translation_search ttf ON ttf.event_id = emb.event_id
             WHERE TRUE {filter_sql}
             ORDER BY emb.embedding <=> $1::vector
             LIMIT ${limit_idx}
@@ -165,7 +176,7 @@ async def search_timeline(
                 SELECT ttf.event_id,
                        ts_rank_cd(ttf.search_vector, query.tsq) AS keyword_score,
                        row_number() OVER (ORDER BY ts_rank_cd(ttf.search_vector, query.tsq) DESC, ttf.occurred_at DESC)::int AS keyword_rank
-                FROM timeline_text_features ttf, query
+                FROM timeline_translation_search ttf, query
                 WHERE ttf.search_vector @@ query.tsq {filter_sql}
                 ORDER BY keyword_rank
                 LIMIT ${limit_idx}
@@ -194,7 +205,16 @@ async def search_timeline(
                    ttf.entity_id::text AS entity_id,
                    ttf.source AS platform,
                    ttf.occurred_at,
-                   LEFT(ttf.canonical_text, 500) AS snippet,
+                   LEFT(
+                       ttf.canonical_text ||
+                       CASE
+                         WHEN ttf.translated_text IS NOT NULL
+                         THEN E'\n[translated en] ' || ttf.translated_text
+                         ELSE ''
+                       END,
+                       500
+                   ) AS snippet,
+                   (ttf.translated_text IS NOT NULL AND to_tsvector('simple', ttf.translated_text) @@ websearch_to_tsquery('simple', $1)) AS matched_translation,
                    fused.rrf_score AS score,
                    fused.keyword_score,
                    fused.semantic_score,
@@ -202,7 +222,7 @@ async def search_timeline(
                    fused.semantic_rank,
                    row_number() OVER (ORDER BY fused.rrf_score DESC, ttf.occurred_at DESC)::int AS rrf_rank
             FROM fused
-            JOIN timeline_text_features ttf ON ttf.event_id = fused.event_id
+            JOIN timeline_translation_search ttf ON ttf.event_id = fused.event_id
             ORDER BY fused.rrf_score DESC, ttf.occurred_at DESC
             LIMIT ${limit_idx}
         """
@@ -218,6 +238,9 @@ async def search_timeline(
             "platform": r["platform"],
             "occurred_at": r["occurred_at"].isoformat() if r["occurred_at"] else None,
             "snippet": r["snippet"],
+            "match_debug": {
+                "matched_translation": bool(r["matched_translation"]),
+            },
             "score": round(float(r["score"] or 0), 4),
             "keyword_score": round(float(r["keyword_score"]), 4) if r["keyword_score"] is not None else None,
             "semantic_score": round(float(r["semantic_score"]), 4) if r["semantic_score"] is not None else None,

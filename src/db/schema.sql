@@ -675,6 +675,171 @@ CREATE INDEX IF NOT EXISTS idx_timeline_text_sentiment_time
     ON timeline_text_features(sentiment_label, occurred_at DESC)
     WHERE sentiment_label IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS timeline_language_profiles (
+    event_id                 UUID PRIMARY KEY,
+    primary_language         TEXT NOT NULL,
+    primary_confidence       REAL NOT NULL DEFAULT 0,
+    language_candidates_json JSONB NOT NULL DEFAULT '[]',
+    code_mixed               BOOLEAN NOT NULL DEFAULT FALSE,
+    flags                    JSONB NOT NULL DEFAULT '{}',
+    detector                 TEXT NOT NULL,
+    detector_version         TEXT NOT NULL,
+    processed_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_timeline_language_profiles_language
+    ON timeline_language_profiles(primary_language, processed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_timeline_language_profiles_code_mixed
+    ON timeline_language_profiles(code_mixed, processed_at DESC)
+    WHERE code_mixed;
+
+CREATE TABLE IF NOT EXISTS timeline_translations (
+    event_id            UUID NOT NULL,
+    source_language     TEXT NOT NULL,
+    target_language     TEXT NOT NULL DEFAULT 'en',
+    translated_text     TEXT,
+    translator          TEXT NOT NULL,
+    translator_version  TEXT NOT NULL,
+    confidence          REAL,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    error               TEXT,
+    text_sha1           CHAR(40),
+    metadata            JSONB NOT NULL DEFAULT '{}',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (event_id, target_language, translator_version)
+);
+CREATE INDEX IF NOT EXISTS idx_timeline_translations_status
+    ON timeline_translations(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_timeline_translations_language
+    ON timeline_translations(source_language, target_language);
+CREATE INDEX IF NOT EXISTS idx_timeline_translations_fts
+    ON timeline_translations USING GIN(to_tsvector('simple', COALESCE(translated_text, '')))
+    WHERE status = 'translated';
+
+CREATE OR REPLACE VIEW timeline_translation_search AS
+SELECT ttf.event_id,
+       ttf.entity_id,
+       ttf.source,
+       ttf.occurred_at,
+       ttf.canonical_text,
+       tr.target_language,
+       tr.translated_text,
+       tr.translator,
+       tr.translator_version,
+       (COALESCE(ttf.search_vector, to_tsvector('simple', ttf.canonical_text)) ||
+        COALESCE(to_tsvector('simple', tr.translated_text), ''::tsvector)) AS search_vector
+FROM timeline_text_features ttf
+LEFT JOIN LATERAL (
+    SELECT *
+    FROM timeline_translations tr
+    WHERE tr.event_id = ttf.event_id
+      AND tr.target_language = 'en'
+      AND tr.status = 'translated'
+    ORDER BY tr.updated_at DESC
+    LIMIT 1
+) tr ON TRUE;
+
+CREATE TABLE IF NOT EXISTS stream_alert_offsets (
+    source_name    TEXT NOT NULL,
+    cursor_table   TEXT NOT NULL,
+    cursor_value   TEXT,
+    last_seen_at   TIMESTAMPTZ,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (source_name, cursor_table)
+);
+
+CREATE TABLE IF NOT EXISTS alert_fingerprints (
+    fingerprint   TEXT PRIMARY KEY,
+    alert_type    TEXT NOT NULL,
+    entity_id     UUID,
+    source        TEXT,
+    window_start  TIMESTAMPTZ NOT NULL,
+    window_end    TIMESTAMPTZ NOT NULL,
+    last_sent_at  TIMESTAMPTZ,
+    count         INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    detail        JSONB NOT NULL DEFAULT '{}',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_alert_fingerprints_type_window
+    ON alert_fingerprints(alert_type, window_end DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_fingerprints_entity
+    ON alert_fingerprints(entity_id, window_end DESC)
+    WHERE entity_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS alert_suppressions (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scope       TEXT NOT NULL DEFAULT 'manual',
+    alert_type  TEXT,
+    entity_id   UUID,
+    source      TEXT,
+    reason      TEXT NOT NULL,
+    starts_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ends_at     TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_alert_suppressions_active
+    ON alert_suppressions(alert_type, source, starts_at, ends_at);
+
+CREATE TABLE IF NOT EXISTS alert_windows (
+    bucket_start  TIMESTAMPTZ NOT NULL,
+    bucket_end    TIMESTAMPTZ NOT NULL,
+    alert_type    TEXT NOT NULL,
+    bucket_key    TEXT NOT NULL,
+    entity_id     UUID,
+    source        TEXT,
+    count         INTEGER NOT NULL DEFAULT 0,
+    baseline      REAL,
+    metadata      JSONB NOT NULL DEFAULT '{}',
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (bucket_start, alert_type, bucket_key)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_windows_type_end
+    ON alert_windows(alert_type, bucket_end DESC);
+
+CREATE TABLE IF NOT EXISTS eval_sets (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name         TEXT NOT NULL UNIQUE,
+    task_type    TEXT NOT NULL,
+    description  TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS eval_items (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    set_id        UUID NOT NULL REFERENCES eval_sets(id) ON DELETE CASCADE,
+    input_json    JSONB NOT NULL,
+    expected_json JSONB NOT NULL,
+    source_ref    TEXT,
+    label_source  TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_eval_items_set ON eval_items(set_id);
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    set_id                UUID NOT NULL REFERENCES eval_sets(id) ON DELETE CASCADE,
+    model_or_rule_version TEXT NOT NULL,
+    status                TEXT NOT NULL DEFAULT 'running',
+    metrics_json          JSONB NOT NULL DEFAULT '{}',
+    started_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at           TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_set_started
+    ON eval_runs(set_id, started_at DESC);
+CREATE TABLE IF NOT EXISTS eval_predictions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id          UUID NOT NULL REFERENCES eval_runs(id) ON DELETE CASCADE,
+    item_id         UUID NOT NULL REFERENCES eval_items(id) ON DELETE CASCADE,
+    prediction_json JSONB NOT NULL DEFAULT '{}',
+    score_json      JSONB NOT NULL DEFAULT '{}',
+    correct         BOOLEAN,
+    error           TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (run_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_eval_predictions_run
+    ON eval_predictions(run_id);
+
 CREATE TABLE IF NOT EXISTS conversation_threads (
     thread_id          TEXT PRIMARY KEY,
     source             VARCHAR(30) NOT NULL,

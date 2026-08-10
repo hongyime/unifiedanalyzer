@@ -1,0 +1,53 @@
+[
+  {
+    "name": "sentiment_smoke_v1",
+    "task_type": "sentiment",
+    "description": "Small sentiment smoke set including multilingual translation context.",
+    "items": [
+      {
+        "input_json": {"text": "I love this great update", "prediction": "positive"},
+        "expected_json": {"label": "positive"},
+        "source_ref": "seed:sentiment:positive",
+        "label_source": "hand_seed"
+      },
+      {
+        "input_json": {"text": "I hate this terrible mess", "prediction": "negative"},
+        "expected_json": {"label": "negative"},
+        "source_ref": "seed:sentiment:negative",
+        "label_source": "hand_seed"
+      },
+      {
+        "input_json": {"text": "非常生气", "prediction": "unsupported"},
+        "expected_json": {"label": "unsupported"},
+        "source_ref": "seed:sentiment:unsupported_non_en",
+        "label_source": "hand_seed"
+      }
+    ]
+  },
+  {
+    "name": "search_smoke_v1",
+    "task_type": "search",
+    "description": "Search metric smoke set. Replace ranked_event_ids with live golden query outputs as labels mature.",
+    "items": [
+      {
+        "input_json": {"query": "example domain", "ranked_event_ids": ["event-a", "event-b"]},
+        "expected_json": {"event_ids": ["event-a"]},
+        "source_ref": "seed:search:domain",
+        "label_source": "hand_seed"
+      }
+    ]
+  },
+  {
+    "name": "alerts_smoke_v1",
+    "task_type": "alerts",
+    "description": "Alert duplicate metric smoke set.",
+    "items": [
+      {
+        "input_json": {"fingerprint": "term-burst-example"},
+        "expected_json": {"label": "fired"},
+        "source_ref": "seed:alerts:term_burst",
+        "label_source": "synthetic_seed"
+      }
+    ]
+  }
+]
