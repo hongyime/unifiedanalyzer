@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from src.notifications import telegram
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,98 @@ async def stream_alert_status(conn) -> dict[str, Any]:
 
 def alert_detail_json(**kwargs: Any) -> str:
     return json.dumps({k: v for k, v in kwargs.items() if v is not None}, default=str)
+
+
+def _detail_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _format_window(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    if value:
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        except ValueError:
+            return str(value)
+    return "unknown"
+
+
+def format_stream_alert_notification(rows: list[dict[str, Any]], *, dashboard_url: str) -> str:
+    lines = [f"\U0001f514 <b>Stream alert digest</b>", f"{len(rows)} grouped alert(s) ready for triage."]
+    for row in rows[:12]:
+        detail = _detail_dict(row.get("detail"))
+        alert_type = str(row.get("alert_type") or "alert").replace("_", " ").title()
+        source = html.escape(str(row.get("source") or "unknown source"))
+        count = int(row.get("count") or 0)
+        window = _format_window(row.get("window_start"))
+        term = detail.get("term")
+        target = f" term <code>{html.escape(str(term))}</code>" if term else ""
+        lines.append(
+            f"• <b>{html.escape(alert_type)}</b> on {source}{target}: "
+            f"{count:,} signal(s), window {html.escape(window)}."
+        )
+    if len(rows) > 12:
+        lines.append(f"...and {len(rows) - 12} more grouped alert(s).")
+    lines.append(f"\n{html.escape(dashboard_url)}/alerts")
+    return "\n".join(lines)
+
+
+async def send_pending_stream_alert_notifications(
+    conn,
+    *,
+    limit: int = 20,
+    retry_after_hours: int = 6,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    retry_after = now - timedelta(hours=retry_after_hours)
+    rows = await conn.fetch(
+        """
+        SELECT fingerprint, alert_type, entity_id::text, source, window_start, window_end,
+               last_sent_at, count, status, detail
+        FROM alert_fingerprints
+        WHERE status = 'pending'
+           OR (status = 'notify_failed' AND (last_sent_at IS NULL OR last_sent_at <= $2::timestamptz))
+        ORDER BY window_end DESC, updated_at DESC
+        LIMIT $1
+        """,
+        limit,
+        retry_after,
+    )
+    payload = [dict(row) for row in rows]
+    if not payload:
+        return {"pending": 0, "sent": 0, "failed": 0}
+
+    ok = await telegram.send(
+        format_stream_alert_notification(payload, dashboard_url=telegram.get_dashboard_url()),
+        message_type="stream_alerts",
+    )
+    fingerprints = [row["fingerprint"] for row in payload]
+    status = "sent" if ok else "notify_failed"
+    await conn.execute(
+        """
+        UPDATE alert_fingerprints
+        SET status = $1, last_sent_at = $2, updated_at = NOW()
+        WHERE fingerprint = ANY($3::text[])
+        """,
+        status,
+        now,
+        fingerprints,
+    )
+    return {
+        "pending": len(payload),
+        "sent": len(payload) if ok else 0,
+        "failed": 0 if ok else len(payload),
+    }
 
 
 _TERM_RE = re.compile(r"(?:[#@][\w_]{3,}|https?://[^\s]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b)", re.IGNORECASE)

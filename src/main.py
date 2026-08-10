@@ -221,6 +221,8 @@ def main():
     sta.add_argument("--poll-interval", type=float, default=30.0)
     sta.add_argument("--batch-size", type=int, default=1000)
     sta.add_argument("--term-threshold", type=int, default=10)
+    sta.add_argument("--notify", dest="notify", action="store_true", default=True)
+    sta.add_argument("--no-notify", dest="notify", action="store_false")
     sta.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
@@ -732,7 +734,7 @@ def main():
 
     elif args.command == "stream-alerts":
         from src.db.connection import init_pools, close_pools, get_analyzer_pool
-        from src.pipeline.stream_alerts import run_stream_alert_once
+        from src.pipeline.stream_alerts import run_stream_alert_once, send_pending_stream_alert_notifications
 
         async def _run():
             await init_pools(apply_schema_ddl=False)
@@ -744,6 +746,8 @@ def main():
                             batch_size=args.batch_size,
                             term_threshold=args.term_threshold,
                         )
+                        if args.notify:
+                            report["notifications"] = await send_pending_stream_alert_notifications(conn)
                     if args.json:
                         print(json.dumps(report, indent=2, sort_keys=True, default=str))
                     else:
