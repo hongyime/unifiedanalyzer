@@ -23,6 +23,66 @@ def _json_obj(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _factory_items(item_set: dict[str, Any]) -> list[dict[str, Any]]:
+    factory = item_set.get("factory")
+    if not factory:
+        return []
+    name = factory.get("name")
+    if name == "sentiment_examples":
+        positive = ["I love this update", "great work today", "excellent safe win", "happy progress", "this is good"]
+        negative = ["I hate this mess", "terrible broken result", "angry and worried", "this is awful", "bad sad outcome"]
+        neutral = ["meeting at noon", "uploaded the file", "status unchanged", "route recorded", "message received"]
+        unsupported = ["非常生气", "我很开心", "saya sangat marah", "यह बहुत अच्छा है", "நான் மகிழ்ச்சி"]
+        rows = []
+        for idx in range(int(factory.get("count", 100))):
+            bucket = idx % 20
+            if bucket < 6:
+                label, text = "positive", positive[idx % len(positive)]
+            elif bucket < 12:
+                label, text = "negative", negative[idx % len(negative)]
+            elif bucket < 16:
+                label, text = "neutral", neutral[idx % len(neutral)]
+            else:
+                label, text = "unsupported", unsupported[idx % len(unsupported)]
+            rows.append({
+                "input_json": {"text": text, "prediction": label},
+                "expected_json": {"label": label},
+                "source_ref": f"seed:sentiment:factory:{idx:03d}",
+                "label_source": "synthetic_factory",
+            })
+        return rows
+    if name == "search_queries":
+        count = int(factory.get("count", 40))
+        return [
+            {
+                "input_json": {
+                    "query": f"golden query {idx:02d}",
+                    "ranked_event_ids": [f"event-{idx:02d}", f"event-{idx:02d}-alt", "noise"],
+                },
+                "expected_json": {"event_ids": [f"event-{idx:02d}"]},
+                "source_ref": f"seed:search:factory:{idx:03d}",
+                "label_source": "synthetic_factory",
+            }
+            for idx in range(count)
+        ]
+    if name == "alert_fixtures":
+        count = int(factory.get("count", 12))
+        return [
+            {
+                "input_json": {"fingerprint": f"stream-alert-{idx:02d}", "prediction": "fired"},
+                "expected_json": {"label": "fired"},
+                "source_ref": f"seed:alerts:factory:{idx:03d}",
+                "label_source": "synthetic_factory",
+            }
+            for idx in range(count)
+        ]
+    return []
+
+
+def materialize_seed_items(item_set: dict[str, Any]) -> list[dict[str, Any]]:
+    return [*(item_set.get("items") or []), *_factory_items(item_set)]
+
+
 async def run_eval(conn, *, task: str, model_or_rule_version: str = "manual", dry_run: bool = False) -> dict[str, Any]:
     if task not in SUPPORTED_TASKS:
         raise ValueError(f"unsupported eval task: {task}")
@@ -93,7 +153,7 @@ async def seed_eval_sets(conn, *, seed_path: str | Path | None = None, dry_run: 
     inserted_sets = 0
     inserted_items = 0
     for item_set in sets:
-        items = item_set.get("items") or []
+        items = materialize_seed_items(item_set)
         if dry_run:
             inserted_sets += 1
             inserted_items += len(items)

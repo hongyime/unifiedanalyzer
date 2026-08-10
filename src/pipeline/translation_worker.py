@@ -13,6 +13,36 @@ logger = logging.getLogger(__name__)
 
 TRANSLATOR_VERSION = "translation-worker-v1"
 DEFAULT_TARGET_LANGUAGE = "en"
+DEFAULT_NLLB_MODEL = "facebook/nllb-200-distilled-600M"
+DEFAULT_OPUS_PREFIX = "Helsinki-NLP/opus-mt"
+
+_OPUS_LANG = {
+    "cmn": "zh",
+    "zh-cn": "zh",
+    "zh-hans": "zh",
+    "zh-hant": "zh",
+    "yue": "zh",
+    "id": "id",
+    "ind": "id",
+    "ms": "ms",
+    "msa": "ms",
+    "hi": "hi",
+    "hin": "hi",
+    "ta": "ta",
+    "tam": "ta",
+}
+
+_NLLB_LANG = {
+    "en": "eng_Latn",
+    "zh": "zho_Hans",
+    "zh-cn": "zho_Hans",
+    "zh-hans": "zho_Hans",
+    "zh-hant": "zho_Hant",
+    "id": "ind_Latn",
+    "ms": "zsm_Latn",
+    "hi": "hin_Deva",
+    "ta": "tam_Taml",
+}
 
 
 class Translator(Protocol):
@@ -37,17 +67,79 @@ class NoopTranslator:
         raise RuntimeError("No local translator configured")
 
 
-class TransformersTranslator:
-    name = "transformers-opus-mt"
-    version = TRANSLATOR_VERSION
+def normalize_translation_language(language: str | None, *, provider: str = "opus") -> str:
+    lang = (language or "und").strip().lower().replace("_", "-")
+    if provider == "nllb":
+        return _NLLB_LANG.get(lang, lang)
+    return _OPUS_LANG.get(lang, lang.split("-")[0])
+
+
+def opus_model_name(source_language: str, target_language: str = DEFAULT_TARGET_LANGUAGE) -> str:
+    source = normalize_translation_language(source_language, provider="opus")
+    target = normalize_translation_language(target_language, provider="opus")
+    override_key = f"TRANSLATION_OPUS_MODEL_{source.upper()}_{target.upper()}".replace("-", "_")
+    override = os.getenv(override_key)
+    if override:
+        return override
+    return f"{os.getenv('TRANSLATION_OPUS_MODEL_PREFIX', DEFAULT_OPUS_PREFIX).rstrip('/')}-{source}-{target}"
+
+
+def nllb_language_code(language: str) -> str:
+    return normalize_translation_language(language, provider="nllb")
+
+
+class OpusMtTranslator:
+    name = "opus-mt"
+    version = f"{TRANSLATOR_VERSION}:opus-mt"
+
+    def __init__(self) -> None:
+        self._pipelines: dict[tuple[str, str], Any] = {}
+
+    def _pipeline_for(self, source_language: str, target_language: str):
+        key = (
+            normalize_translation_language(source_language, provider="opus"),
+            normalize_translation_language(target_language, provider="opus"),
+        )
+        if key not in self._pipelines:
+            from transformers import pipeline  # type: ignore
+
+            self._pipelines[key] = pipeline(
+                "translation",
+                model=opus_model_name(key[0], key[1]),
+            )
+        return self._pipelines[key]
+
+    def translate(self, text: str, source_language: str, target_language: str) -> str:
+        result = self._pipeline_for(source_language, target_language)(
+            text,
+            max_length=int(os.getenv("TRANSLATION_MAX_LENGTH", "512")),
+        )
+        if isinstance(result, list) and result:
+            translated = result[0].get("translation_text")
+            if translated:
+                return str(translated)
+        raise RuntimeError("translator returned no text")
+
+
+class NllbTranslator:
+    name = "nllb-200"
+    version = f"{TRANSLATOR_VERSION}:nllb-200-distilled-600m"
 
     def __init__(self) -> None:
         from transformers import pipeline  # type: ignore
 
-        self._pipeline = pipeline("translation")
+        self._pipeline = pipeline(
+            "translation",
+            model=os.getenv("TRANSLATION_NLLB_MODEL", DEFAULT_NLLB_MODEL),
+        )
 
     def translate(self, text: str, source_language: str, target_language: str) -> str:
-        result = self._pipeline(text, max_length=512)
+        result = self._pipeline(
+            text,
+            src_lang=nllb_language_code(source_language),
+            tgt_lang=nllb_language_code(target_language),
+            max_length=int(os.getenv("TRANSLATION_MAX_LENGTH", "512")),
+        )
         if isinstance(result, list) and result:
             translated = result[0].get("translation_text")
             if translated:
@@ -59,9 +151,14 @@ def get_translator() -> Translator:
     provider = os.getenv("TRANSLATION_PROVIDER", "noop").strip().lower()
     if provider in {"transformers", "opus", "opus-mt"}:
         try:
-            return TransformersTranslator()
+            return OpusMtTranslator()
         except Exception as exc:  # noqa: BLE001
             logger.warning("local translation provider unavailable, using noop: %s", exc)
+    if provider in {"nllb", "nllb-200"}:
+        try:
+            return NllbTranslator()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("local NLLB translation provider unavailable, using noop: %s", exc)
     return NoopTranslator()
 
 

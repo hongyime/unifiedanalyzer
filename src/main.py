@@ -223,6 +223,9 @@ def main():
     sta.add_argument("--term-threshold", type=int, default=10)
     sta.add_argument("--message-threshold", type=int, default=50)
     sta.add_argument("--media-threshold", type=int, default=25)
+    sta.add_argument("--location-threshold", type=int, default=8)
+    sta.add_argument("--emotion-z-threshold", type=float, default=2.5)
+    sta.add_argument("--emotion-min-current", type=int, default=5)
     sta.add_argument("--notify", dest="notify", action="store_true", default=True)
     sta.add_argument("--no-notify", dest="notify", action="store_false")
     sta.add_argument("--json", action="store_true")
@@ -735,21 +738,79 @@ def main():
         asyncio.run(_run())
 
     elif args.command == "stream-alerts":
-        from src.db.connection import init_pools, close_pools, get_analyzer_pool
-        from src.pipeline.stream_alerts import run_stream_alert_once, send_pending_stream_alert_notifications
+        from src.db.connection import (
+            CollectorUnavailableError,
+            close_pools,
+            get_analyzer_pool,
+            get_collector_pool,
+            init_pools,
+        )
+        from src.pipeline.stream_alerts import (
+            run_collector_resume_stream_alert_once,
+            run_emotional_spike_stream_alert_once,
+            run_location_evidence_stream_alert_once,
+            run_stream_alert_once,
+            send_pending_stream_alert_notifications,
+        )
+
+        async def _degraded_sources() -> set[str]:
+            try:
+                async with get_collector_pool().acquire(timeout=3) as collector:
+                    rows = await collector.fetch(
+                        """
+                        SELECT DISTINCT ON (source) source, status
+                        FROM collection_coverage_snapshots
+                        ORDER BY source, created_at DESC
+                        """
+                    )
+                return {
+                    row["source"]
+                    for row in rows
+                    if row["status"] in {"degraded", "stale"}
+                }
+            except Exception:
+                return set()
 
         async def _run():
             await init_pools(apply_schema_ddl=False)
             try:
                 while True:
+                    degraded_sources = await _degraded_sources()
                     async with get_analyzer_pool().acquire() as conn:
-                        report = await run_stream_alert_once(
+                        report = {"detectors": {}}
+                        report["detectors"]["timeline"] = await run_stream_alert_once(
                             conn,
                             batch_size=args.batch_size,
                             term_threshold=args.term_threshold,
                             message_threshold=args.message_threshold,
                             media_threshold=args.media_threshold,
+                            degraded_sources=degraded_sources,
                         )
+                        report["detectors"]["location"] = await run_location_evidence_stream_alert_once(
+                            conn,
+                            batch_size=args.batch_size,
+                            threshold=args.location_threshold,
+                            degraded_sources=degraded_sources,
+                        )
+                        report["detectors"]["emotion"] = await run_emotional_spike_stream_alert_once(
+                            conn,
+                            batch_size=args.batch_size,
+                            min_current=args.emotion_min_current,
+                            z_threshold=args.emotion_z_threshold,
+                            degraded_sources=degraded_sources,
+                        )
+                        try:
+                            async with get_collector_pool().acquire(timeout=3) as collector:
+                                report["detectors"]["collector_resume"] = await run_collector_resume_stream_alert_once(
+                                    conn,
+                                    collector,
+                                    batch_size=args.batch_size,
+                                )
+                        except CollectorUnavailableError:
+                            report["detectors"]["collector_resume"] = {"skipped": "collector_unavailable"}
+                        except Exception as exc:  # noqa: BLE001 - optional upstream
+                            report["detectors"]["collector_resume"] = {"skipped": exc.__class__.__name__}
+                        report["degraded_sources"] = sorted(degraded_sources)
                         if args.notify:
                             report["notifications"] = await send_pending_stream_alert_notifications(conn)
                     if args.json:

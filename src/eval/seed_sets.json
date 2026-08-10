@@ -3,6 +3,7 @@
     "name": "sentiment_smoke_v1",
     "task_type": "sentiment",
     "description": "Small sentiment smoke set including multilingual translation context.",
+    "factory": {"name": "sentiment_examples", "count": 100},
     "items": [
       {
         "input_json": {"text": "I love this great update", "prediction": "positive"},
@@ -27,7 +28,8 @@
   {
     "name": "search_smoke_v1",
     "task_type": "search",
-    "description": "Search metric smoke set. Replace ranked_event_ids with live golden query outputs as labels mature.",
+    "description": "Search metric smoke set with synthetic golden rankings for Recall@20 and MRR@20.",
+    "factory": {"name": "search_queries", "count": 40},
     "items": [
       {
         "input_json": {"query": "example domain", "ranked_event_ids": ["event-a", "event-b"]},
@@ -40,12 +42,94 @@
   {
     "name": "alerts_smoke_v1",
     "task_type": "alerts",
-    "description": "Alert duplicate metric smoke set.",
+    "description": "Alert duplicate metric smoke set including stream-alert fixture fingerprints.",
+    "factory": {"name": "alert_fixtures", "count": 12},
     "items": [
       {
         "input_json": {"fingerprint": "term-burst-example"},
         "expected_json": {"label": "fired"},
         "source_ref": "seed:alerts:term_burst",
+        "label_source": "synthetic_seed"
+      }
+    ]
+  },
+  {
+    "name": "identity_smoke_v1",
+    "task_type": "identity",
+    "description": "Identity scoring smoke labels; production labels can be seeded from identity_labels later.",
+    "items": [
+      {
+        "input_json": {"prediction": "same"},
+        "expected_json": {"label": "same"},
+        "source_ref": "seed:identity:same:001",
+        "label_source": "synthetic_seed"
+      },
+      {
+        "input_json": {"prediction": "different"},
+        "expected_json": {"label": "different"},
+        "source_ref": "seed:identity:different:001",
+        "label_source": "synthetic_seed"
+      },
+      {
+        "input_json": {"prediction": "same"},
+        "expected_json": {"label": "same"},
+        "source_ref": "seed:identity:same:002",
+        "label_source": "synthetic_seed"
+      },
+      {
+        "input_json": {"prediction": "different"},
+        "expected_json": {"label": "different"},
+        "source_ref": "seed:identity:different:002",
+        "label_source": "synthetic_seed"
+      }
+    ]
+  },
+  {
+    "name": "face_smoke_v1",
+    "task_type": "face",
+    "description": "Face matching smoke labels for recall and false-positive sampling hooks.",
+    "items": [
+      {
+        "input_json": {"prediction": "match"},
+        "expected_json": {"label": "match"},
+        "source_ref": "seed:face:match:001",
+        "label_source": "synthetic_seed"
+      },
+      {
+        "input_json": {"prediction": "non_match"},
+        "expected_json": {"label": "non_match"},
+        "source_ref": "seed:face:non_match:001",
+        "label_source": "synthetic_seed"
+      },
+      {
+        "input_json": {"prediction": "match"},
+        "expected_json": {"label": "match"},
+        "source_ref": "seed:face:match:002",
+        "label_source": "synthetic_seed"
+      }
+    ]
+  },
+  {
+    "name": "location_smoke_v1",
+    "task_type": "location",
+    "description": "Confirmed/rejected location evidence smoke labels.",
+    "items": [
+      {
+        "input_json": {"prediction": "confirmed"},
+        "expected_json": {"label": "confirmed"},
+        "source_ref": "seed:location:confirmed:001",
+        "label_source": "synthetic_seed"
+      },
+      {
+        "input_json": {"prediction": "rejected"},
+        "expected_json": {"label": "rejected"},
+        "source_ref": "seed:location:rejected:001",
+        "label_source": "synthetic_seed"
+      },
+      {
+        "input_json": {"prediction": "confirmed"},
+        "expected_json": {"label": "confirmed"},
+        "source_ref": "seed:location:confirmed:002",
         "label_source": "synthetic_seed"
       }
     ]

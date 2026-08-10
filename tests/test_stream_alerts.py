@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from src.pipeline import stream_alerts
 from src.pipeline.stream_alerts import (
     burst_alert_type_for_event_type,
+    collector_resume_from_status,
+    emotional_z_score,
     extract_burst_terms,
     format_stream_alert_notification,
     is_suppressed,
@@ -58,6 +60,18 @@ def test_burst_alert_type_classifies_message_and_media_events():
     assert burst_alert_type_for_event_type("CONTENT_PUBLISHED") == "MEDIA_BURST"
     assert burst_alert_type_for_event_type("PHOTO_COAPPEARANCE") == "MEDIA_BURST"
     assert burst_alert_type_for_event_type("FOLLOWED") is None
+
+
+def test_collector_resume_transition_requires_recovery():
+    assert collector_resume_from_status("stale", "fresh")
+    assert collector_resume_from_status("degraded", "fresh")
+    assert not collector_resume_from_status("fresh", "fresh")
+    assert not collector_resume_from_status("stale", "degraded")
+
+
+def test_emotional_z_score_uses_minimum_stddev():
+    assert emotional_z_score(0.5, 0.0, 0.25) == 2.0
+    assert emotional_z_score(0.5, 0.0, 0.0) == 10.0
 
 
 def test_stream_alert_notification_uses_safe_summary_only():

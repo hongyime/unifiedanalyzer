@@ -2,7 +2,7 @@ import asyncio
 import json
 
 from src.eval.metrics import classification_metrics, duplicate_count, mrr_at_k, recall_at_k
-from src.eval.runner import _json_obj, seed_eval_sets
+from src.eval.runner import _json_obj, materialize_seed_items, seed_eval_sets
 
 
 def test_classification_metrics_reports_precision_recall_f1():
@@ -51,3 +51,19 @@ def test_seed_eval_sets_inserts_idempotent_items(tmp_path):
 
     assert report["sets"] == 1
     assert report["items"] == 1
+
+
+def test_default_seed_factories_cover_core_tasks():
+    sentiment = materialize_seed_items({
+        "factory": {"name": "sentiment_examples", "count": 100},
+        "items": [{"input_json": {}, "expected_json": {}, "source_ref": "manual"}],
+    })
+    search = materialize_seed_items({"factory": {"name": "search_queries", "count": 40}})
+    alerts = materialize_seed_items({"factory": {"name": "alert_fixtures", "count": 12}})
+
+    assert len(sentiment) == 101
+    assert len(search) == 40
+    assert len(alerts) == 12
+    assert {row["expected_json"]["label"] for row in sentiment[1:]} >= {"positive", "negative", "neutral", "unsupported"}
+    assert search[0]["expected_json"]["event_ids"][0] in search[0]["input_json"]["ranked_event_ids"]
+    assert len({row["input_json"]["fingerprint"] for row in alerts}) == 12

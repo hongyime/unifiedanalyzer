@@ -19,6 +19,26 @@ def test_translation_decision_skips_english_and_short_text():
     assert translation_worker.translation_decision(source_language="zh", token_count=2, watched=True).should_translate is True
 
 
+def test_translation_provider_model_helpers(monkeypatch):
+    monkeypatch.delenv("TRANSLATION_OPUS_MODEL_ZH_EN", raising=False)
+
+    assert translation_worker.normalize_translation_language("zh-Hans") == "zh"
+    assert translation_worker.opus_model_name("zh-Hans", "en") == "Helsinki-NLP/opus-mt-zh-en"
+    assert translation_worker.nllb_language_code("ms") == "zsm_Latn"
+
+    monkeypatch.setenv("TRANSLATION_OPUS_MODEL_ZH_EN", "local/zh-en")
+    assert translation_worker.opus_model_name("zh", "en") == "local/zh-en"
+
+
+def test_translation_provider_falls_back_to_noop(monkeypatch):
+    monkeypatch.setenv("TRANSLATION_PROVIDER", "opus-mt")
+    monkeypatch.setattr(translation_worker, "OpusMtTranslator", lambda: (_ for _ in ()).throw(RuntimeError("missing")))
+
+    translator = translation_worker.get_translator()
+
+    assert translator.name == "noop"
+
+
 def test_translation_backfill_is_idempotent_shape_and_stores_failures(monkeypatch):
     class Conn:
         def __init__(self):
