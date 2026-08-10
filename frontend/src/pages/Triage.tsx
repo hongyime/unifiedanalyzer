@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
-import { GitCompare, Bell, UserPlus, MapPin, MessageCircle, ScanFace } from 'lucide-react'
-import { api, TriageData } from '../api'
+import { GitCompare, Bell, UserPlus, MapPin, MessageCircle, ScanFace, Database, Gauge } from 'lucide-react'
+import { api, CollectorCoverageRow, EvalRun, TriageData } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { PageHeader } from '../components/ui/PageHeader'
 import { MetricCard } from '../components/ui/MetricCard'
@@ -17,12 +17,20 @@ import { LABELS } from '../lib/labels'
  */
 export default function TriagePage() {
   const [data, setData] = useState<TriageData | null>(null)
+  const [coverage, setCoverage] = useState<CollectorCoverageRow[]>([])
+  const [evalRuns, setEvalRuns] = useState<EvalRun[]>([])
   useEffect(() => {
     api.getTriage().then(setData).catch(() => setData(null))
+    api.getCollectorCoverage().then((r) => setCoverage(r.sources)).catch(() => setCoverage([]))
+    api.getEvalLatest().then((r) => setEvalRuns(r.data)).catch(() => setEvalRuns([]))
   }, [])
 
   if (!data) return <LoadingSpinner label="Loading triage…" />
   const cov = data.coverage
+  const freshSources = coverage.filter((row) => row.status === 'fresh').length
+  const degradedSources = coverage.filter((row) => row.status === 'degraded').length
+  const staleSources = coverage.filter((row) => row.status === 'stale').length
+  const evalFailures = evalRuns.filter((run) => run.status !== 'completed').length
 
   return (
     <div>
@@ -78,6 +86,42 @@ export default function TriagePage() {
         <Link to="/entities" className="rounded-lg border border-border bg-surface p-3 hover:bg-hover">
           <div className="mb-1 flex items-center gap-2 text-sm font-semibold"><MapPin className="h-4 w-4" /> Location quality</div>
           <div className="text-xs text-text-muted">Evidence chips expose source, review state, confidence, and weak samples per person.</div>
+        </Link>
+      </div>
+
+      <div className="mb-6 grid gap-3 lg:grid-cols-2">
+        <Link to="/alerts" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-semibold"><Database className="h-4 w-4" /> Collector coverage</div>
+            <span className={staleSources || degradedSources ? 'text-xs text-warning' : 'text-xs text-success'}>
+              {freshSources}/{coverage.length || 0} fresh
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="rounded-md bg-hover p-2"><div className="font-semibold">{freshSources}</div><div className="text-[0.7rem] text-text-muted">fresh</div></div>
+            <div className="rounded-md bg-hover p-2"><div className="font-semibold">{degradedSources}</div><div className="text-[0.7rem] text-text-muted">degraded</div></div>
+            <div className="rounded-md bg-hover p-2"><div className="font-semibold">{staleSources}</div><div className="text-[0.7rem] text-text-muted">stale</div></div>
+          </div>
+          <div className="mt-2 text-xs text-text-muted">Alert confidence should be discounted when a source is degraded or stale.</div>
+        </Link>
+
+        <Link to="/runs" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-semibold"><Gauge className="h-4 w-4" /> Evaluation checks</div>
+            <span className={evalFailures ? 'text-xs text-warning' : 'text-xs text-success'}>
+              {evalRuns.length} latest
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {evalRuns.length === 0 ? (
+              <span className="text-xs text-text-muted">No eval runs recorded yet.</span>
+            ) : evalRuns.map((run) => (
+              <span key={run.id} className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
+                {run.task_type}: {run.status}
+              </span>
+            ))}
+          </div>
+          <div className="mt-2 text-xs text-text-muted">Search, sentiment, and alert rules now have machine-readable regression evidence.</div>
         </Link>
       </div>
 

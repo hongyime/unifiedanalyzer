@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.pipeline import stream_alerts
 from src.pipeline.stream_alerts import (
+    burst_alert_type_for_event_type,
     extract_burst_terms,
     format_stream_alert_notification,
     is_suppressed,
@@ -49,6 +50,14 @@ def test_parse_cursor_datetime_accepts_iso_text():
 
     assert parsed.year == 2026
     assert parsed.tzinfo is not None
+
+
+def test_burst_alert_type_classifies_message_and_media_events():
+    assert burst_alert_type_for_event_type("MESSAGE_SENT") == "MESSAGE_BURST"
+    assert burst_alert_type_for_event_type("REPLIED") == "MESSAGE_BURST"
+    assert burst_alert_type_for_event_type("CONTENT_PUBLISHED") == "MEDIA_BURST"
+    assert burst_alert_type_for_event_type("PHOTO_COAPPEARANCE") == "MEDIA_BURST"
+    assert burst_alert_type_for_event_type("FOLLOWED") is None
 
 
 def test_stream_alert_notification_uses_safe_summary_only():

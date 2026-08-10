@@ -196,6 +196,92 @@ export interface RunPhase {
   created_at: string | null
 }
 
+export interface EvalRun {
+  id: string
+  name: string
+  task_type: string
+  model_or_rule_version: string
+  status: string
+  metrics: Record<string, unknown> | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface StreamAlertStatus {
+  offsets: {
+    source_name: string
+    cursor_table: string
+    cursor_value: string | null
+    last_seen_at: string | null
+    updated_at: string | null
+  }[]
+  sent_fingerprints: number
+  suppressed_fingerprints: number
+  active_suppressions: number
+}
+
+export interface AlertFingerprint {
+  fingerprint: string
+  alert_type: string
+  entity_id: string | null
+  source: string | null
+  window_start: string | null
+  window_end: string | null
+  last_sent_at: string | null
+  count: number
+  status: string
+  detail: Record<string, unknown>
+  updated_at: string | null
+}
+
+export interface AlertSuppression {
+  id: string
+  scope: string
+  alert_type: string | null
+  entity_id: string | null
+  source: string | null
+  reason: string
+  starts_at: string | null
+  ends_at: string | null
+  created_at: string | null
+}
+
+export interface CollectorCoverageRow {
+  source: string
+  expected_cadence: string | null
+  latest_data_at: string | null
+  latest_run_at: string | null
+  status: string
+  rows_24h: number
+  media_24h: number
+  errors_24h: number
+  rate_limits_24h: number
+  private_access_failures: number
+  stale_targets: number
+  created_at: string | null
+}
+
+export interface GraphExplainEdge {
+  id: string
+  from_entity_id: string | null
+  to_entity_id: string | null
+  relationship_type: string
+  weight: number
+  cross_platform: boolean
+  confidence_bucket: 'hard' | 'strong' | 'weak' | 'context-only' | string
+  source: string
+  sources: Record<string, unknown>
+  why: string | null
+  last_seen_at: string | null
+  evidence_refs: unknown[]
+}
+
+export interface GraphPivots {
+  entity_id: string
+  total: number
+  groups: Record<string, GraphExplainEdge[]>
+}
+
 export interface HealthInfo {
   status: string
   analyzer_db: string
@@ -852,6 +938,36 @@ export const api = {
   getBehavior: (entityId: string) => get<BehaviorProfile>(`/entities/${entityId}/behavior`),
 
   getCollectorHealth: () => get<{ collectors: CollectorInfo[] }>('/collector/health'),
+  getCollectorCoverage: () => get<{ sources: CollectorCoverageRow[]; total: number }>('/collector/coverage'),
+
+  getStreamAlertStatus: () => get<StreamAlertStatus>('/alerts/stream/status'),
+  getAlertFingerprints: (status = '', alertType = '', limit = 50) => {
+    const q = new URLSearchParams()
+    q.set('limit', String(limit))
+    if (status) q.set('status', status)
+    if (alertType) q.set('alert_type', alertType)
+    return get<{ data: AlertFingerprint[]; total: number }>(`/alerts/fingerprints?${q.toString()}`)
+  },
+  getAlertSuppressions: (activeOnly = true) =>
+    get<{ data: AlertSuppression[]; total: number }>(`/alerts/suppressions?active_only=${activeOnly ? 'true' : 'false'}`),
+  createAlertSuppression: (body: {
+    scope?: string
+    alert_type?: string | null
+    entity_id?: string | null
+    source?: string | null
+    reason: string
+    starts_at?: string | null
+    ends_at?: string | null
+  }) => post<AlertSuppression>('/alerts/suppressions', body),
+
+  getEvalLatest: () => get<{ data: EvalRun[]; total: number }>('/eval/latest'),
+  getEvalRuns: (task = '', limit = 50) => {
+    const q = new URLSearchParams()
+    q.set('limit', String(limit))
+    if (task) q.set('task', task)
+    return get<{ data: EvalRun[]; total: number }>(`/eval/runs?${q.toString()}`)
+  },
+  getEvalRegressions: (task: string) => get<{ task: string; runs: EvalRun[]; delta: Record<string, number> }>(`/eval/${task}/regressions`),
 
   mergeEntities: (ids: string[], reason = '') =>
     post<{ ok: boolean; target_entity_id: string }>('/entities/merge', { source_entity_ids: ids, reason }),
@@ -889,6 +1005,17 @@ export const api = {
 
   getRelationships: (entityId: string) =>
     get<{ data: Relationship[] }>(`/entities/${entityId}/relationships`),
+
+  getGraphPath: (fromEntityId: string, toEntityId: string, includeContextOnly = false, maxHops = 3) => {
+    const q = new URLSearchParams()
+    q.set('from_entity_id', fromEntityId)
+    q.set('to_entity_id', toEntityId)
+    q.set('max_hops', String(maxHops))
+    q.set('include_context_only', includeContextOnly ? 'true' : 'false')
+    return get<{ path: GraphExplainEdge[]; hops: number; found: boolean }>(`/graph/path?${q.toString()}`)
+  },
+  getGraphPivots: (entityId: string, includeContextOnly = false) =>
+    get<GraphPivots>(`/graph/pivots/${entityId}?include_context_only=${includeContextOnly ? 'true' : 'false'}`),
 
   decideRelationship: (body: RelationshipDecisionRequest) =>
     post<{ ok: boolean; action: string }>('/entities/relationship-decision', body),

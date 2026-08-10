@@ -221,6 +221,8 @@ def main():
     sta.add_argument("--poll-interval", type=float, default=30.0)
     sta.add_argument("--batch-size", type=int, default=1000)
     sta.add_argument("--term-threshold", type=int, default=10)
+    sta.add_argument("--message-threshold", type=int, default=50)
+    sta.add_argument("--media-threshold", type=int, default=25)
     sta.add_argument("--notify", dest="notify", action="store_true", default=True)
     sta.add_argument("--no-notify", dest="notify", action="store_false")
     sta.add_argument("--json", action="store_true")
@@ -745,6 +747,8 @@ def main():
                             conn,
                             batch_size=args.batch_size,
                             term_threshold=args.term_threshold,
+                            message_threshold=args.message_threshold,
+                            media_threshold=args.media_threshold,
                         )
                         if args.notify:
                             report["notifications"] = await send_pending_stream_alert_notifications(conn)

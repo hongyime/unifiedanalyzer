@@ -1,11 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   createColumnHelper, flexRender, getCoreRowModel, getSortedRowModel,
   useReactTable, SortingState,
 } from '@tanstack/react-table'
 import { ChevronUp, ChevronDown, Play } from 'lucide-react'
 import { useRuns, useTriggerRun } from '../hooks'
-import { api, RunInfo, RunPhase } from '../api'
+import { api, EvalRun, RunInfo, RunPhase } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { LoadingSpinner } from '../components/ui/LoadingSpinner'
@@ -35,6 +35,15 @@ function duration(start: string | null, end: string | null) {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
+function metricSummary(metrics: Record<string, unknown> | null) {
+  if (!metrics) return 'no metrics'
+  return Object.entries(metrics)
+    .filter(([, value]) => typeof value === 'number')
+    .slice(0, 4)
+    .map(([key, value]) => `${key.replace(/_/g, ' ')} ${Number(value).toFixed(Number(value) <= 1 ? 2 : 0)}`)
+    .join(' · ') || 'no numeric metrics'
+}
+
 const col = createColumnHelper<RunInfo>()
 const columns = [
   // Show the friendly run-type label if we have one (LABELS.tier acts as a
@@ -61,8 +70,13 @@ export default function RunsPage() {
   const [sorting, setSorting] = useState<SortingState>([])
   const [phaseRun, setPhaseRun] = useState<string | null>(null)
   const [phases, setPhases] = useState<RunPhase[]>([])
+  const [evalRuns, setEvalRuns] = useState<EvalRun[]>([])
   const { data, isLoading } = useRuns(page)
   const trigger = useTriggerRun()
+
+  useEffect(() => {
+    api.getEvalLatest().then((r) => setEvalRuns(r.data)).catch(() => setEvalRuns([]))
+  }, [])
 
   const rows = useMemo(() => data?.data ?? [], [data])
   const total = data?.total ?? 0
@@ -99,6 +113,32 @@ export default function RunsPage() {
           </Button>
         }
       />
+
+      <div className="mb-6 rounded-lg border border-border bg-surface p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-semibold">Evaluation harness</div>
+            <div className="text-xs text-text-muted">Latest regression checks for search, sentiment, and alert rules.</div>
+          </div>
+          <StatusBadge status={evalRuns.some((run) => run.status !== 'completed') ? 'warning' : 'success'} label={`${evalRuns.length} tasks`} />
+        </div>
+        {evalRuns.length === 0 ? (
+          <div className="text-sm text-text-muted">No eval runs have been recorded yet. Use the eval CLI after seeding sets.</div>
+        ) : (
+          <div className="grid gap-2 md:grid-cols-3">
+            {evalRuns.map((run) => (
+              <div key={run.id} className="rounded-md border border-border bg-background px-3 py-2">
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium">{run.task_type}</span>
+                  {statusPill(run.status)}
+                </div>
+                <div className="text-xs text-text-muted">{metricSummary(run.metrics)}</div>
+                <div className="mt-1 text-[0.7rem] text-text-muted">{fmtDate(run.finished_at || run.started_at)}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {isLoading ? (
         <LoadingSpinner />

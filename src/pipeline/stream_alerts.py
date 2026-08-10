@@ -199,6 +199,23 @@ async def send_pending_stream_alert_notifications(
 
 
 _TERM_RE = re.compile(r"(?:[#@][\w_]{3,}|https?://[^\s]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b)", re.IGNORECASE)
+_MESSAGE_EVENT_TYPES = {"MESSAGE_SENT", "REPLIED", "FORWARDED_MESSAGE"}
+_MEDIA_EVENT_TYPES = {
+    "CONTENT_PUBLISHED",
+    "VIDEO_PUBLISHED",
+    "STORY_POSTED",
+    "HIGHLIGHT_POSTED",
+    "TAGGED_IN",
+    "PHOTO_COAPPEARANCE",
+}
+
+
+def burst_alert_type_for_event_type(event_type: str | None) -> str | None:
+    if event_type in _MESSAGE_EVENT_TYPES:
+        return "MESSAGE_BURST"
+    if event_type in _MEDIA_EVENT_TYPES:
+        return "MEDIA_BURST"
+    return None
 
 
 def extract_burst_terms(text: str) -> list[str]:
@@ -233,6 +250,8 @@ async def run_stream_alert_once(
     *,
     batch_size: int = 1000,
     term_threshold: int = 10,
+    message_threshold: int = 50,
+    media_threshold: int = 25,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
@@ -263,7 +282,7 @@ async def run_stream_alert_once(
     cursor_dt = parse_cursor_datetime(cursor["cursor_value"], now)
     rows = await conn.fetch(
         """
-        SELECT event_id::text, entity_id::text, source, occurred_at, canonical_text
+        SELECT event_id::text, entity_id::text, source, event_type, occurred_at, canonical_text
         FROM timeline_text_features
         WHERE occurred_at > $1::timestamptz
         ORDER BY occurred_at ASC
@@ -275,14 +294,15 @@ async def run_stream_alert_once(
     if not rows:
         return {"processed": 0, "bootstrapped": False, "alerts": 0}
 
-    buckets: dict[tuple[str, str | None], dict[str, Any]] = {}
+    term_buckets: dict[tuple[str, str | None, datetime], dict[str, Any]] = {}
+    event_buckets: dict[tuple[str, str | None, str | None, datetime], dict[str, Any]] = {}
     latest_seen = rows[-1]["occurred_at"]
     for row in rows:
         window_start = row["occurred_at"].replace(minute=0, second=0, microsecond=0)
         window_end = window_start + timedelta(hours=1)
         for term in extract_burst_terms(row["canonical_text"]):
-            key = (term, row["source"])
-            bucket = buckets.setdefault(key, {
+            key = (term, row["source"], window_start)
+            bucket = term_buckets.setdefault(key, {
                 "term": term,
                 "source": row["source"],
                 "window_start": window_start,
@@ -293,8 +313,30 @@ async def run_stream_alert_once(
             bucket["count"] += 1
             bucket["events"].append(row["event_id"])
 
+        event_type = row["event_type"]
+        alert_type = burst_alert_type_for_event_type(event_type)
+        if alert_type:
+            # Entity-level when attributed; source-level when not. This keeps
+            # private content out of notifications while preserving a useful pivot.
+            bucket_key = row["entity_id"] or f"source:{row['source']}"
+            key = (alert_type, row["source"], row["entity_id"], window_start)
+            bucket = event_buckets.setdefault(key, {
+                "alert_type": alert_type,
+                "bucket_key": bucket_key,
+                "entity_id": row["entity_id"],
+                "source": row["source"],
+                "window_start": window_start,
+                "window_end": window_end,
+                "count": 0,
+                "events": [],
+                "event_types": {},
+            })
+            bucket["count"] += 1
+            bucket["events"].append(row["event_id"])
+            bucket["event_types"][event_type] = bucket["event_types"].get(event_type, 0) + 1
+
     alerts = 0
-    for bucket in buckets.values():
+    for bucket in term_buckets.values():
         await conn.execute(
             """
             INSERT INTO alert_windows (
@@ -344,6 +386,61 @@ async def run_stream_alert_once(
         )
         alerts += 1
 
+    for bucket in event_buckets.values():
+        alert_type = bucket["alert_type"]
+        threshold = message_threshold if alert_type == "MESSAGE_BURST" else media_threshold
+        await conn.execute(
+            """
+            INSERT INTO alert_windows (
+                bucket_start, bucket_end, alert_type, bucket_key, entity_id, source, count, metadata, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5::uuid, $6, $7, $8::jsonb, NOW())
+            ON CONFLICT (bucket_start, alert_type, bucket_key) DO UPDATE SET
+                count = alert_windows.count + EXCLUDED.count,
+                metadata = EXCLUDED.metadata,
+                updated_at = NOW()
+            """,
+            bucket["window_start"],
+            bucket["window_end"],
+            alert_type,
+            bucket["bucket_key"],
+            bucket["entity_id"],
+            bucket["source"],
+            bucket["count"],
+            alert_detail_json(event_types=bucket["event_types"], sample_event_ids=bucket["events"][:10]),
+        )
+        if bucket["count"] < threshold:
+            continue
+        fp = make_alert_fingerprint(
+            alert_type,
+            entity_id=bucket["entity_id"],
+            source=bucket["source"],
+            bucket_key=bucket["bucket_key"],
+            window_start=bucket["window_start"],
+            window_end=bucket["window_end"],
+        )
+        await conn.execute(
+            """
+            INSERT INTO alert_fingerprints (
+                fingerprint, alert_type, entity_id, source, window_start, window_end,
+                count, status, detail, created_at, updated_at
+            )
+            VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, 'pending', $8::jsonb, NOW(), NOW())
+            ON CONFLICT (fingerprint) DO UPDATE SET
+                count = alert_fingerprints.count + EXCLUDED.count,
+                updated_at = NOW()
+            """,
+            fp.fingerprint,
+            fp.alert_type,
+            fp.entity_id,
+            fp.source,
+            fp.window_start,
+            fp.window_end,
+            bucket["count"],
+            alert_detail_json(event_types=bucket["event_types"], sample_event_ids=bucket["events"][:10]),
+        )
+        alerts += 1
+
     await conn.execute(
         """
         INSERT INTO stream_alert_offsets (source_name, cursor_table, cursor_value, last_seen_at, updated_at)
@@ -356,4 +453,10 @@ async def run_stream_alert_once(
         latest_seen.isoformat(),
         latest_seen,
     )
-    return {"processed": len(rows), "bootstrapped": False, "alerts": alerts, "terms": len(buckets)}
+    return {
+        "processed": len(rows),
+        "bootstrapped": False,
+        "alerts": alerts,
+        "terms": len(term_buckets),
+        "event_buckets": len(event_buckets),
+    }

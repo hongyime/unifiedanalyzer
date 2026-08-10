@@ -1,12 +1,13 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router'
-import { CheckCircle2, List, Network, Users2, XCircle } from 'lucide-react'
+import { CheckCircle2, List, Network, Users2, X, XCircle } from 'lucide-react'
 import { FaceAvatar } from './FaceAvatar'
 import { NetworkGraph } from './NetworkGraph'
 import { Card } from './ui/Card'
 import { Button } from './ui/Button'
 import { EmptyState } from './ui/EmptyState'
 import { InfoTip } from './ui/InfoTip'
+import { api, type GraphExplainEdge, type GraphPivots } from '../api'
 import type {
   Relationship,
   InteractionPeer,
@@ -99,6 +100,14 @@ type RelationshipDecisionHandler = (
   isReal: boolean,
 ) => Promise<void> | void
 
+type ExplanationState = {
+  connection: Connection
+  path: GraphExplainEdge[]
+  pivots: GraphPivots | null
+  loading: boolean
+  error: string | null
+}
+
 const RELATIONSHIP_LABELS: Record<string, string> = {
   temporal_copost: 'activity overlap',
   temporal_hour_similarity: 'similar active hours',
@@ -160,6 +169,7 @@ export function ConnectionsPanel({
   const [filter, setFilter] = useState<FilterKind>('all')
   const [pendingDecision, setPendingDecision] = useState<string | null>(null)
   const [decisionMessage, setDecisionMessage] = useState('')
+  const [explanation, setExplanation] = useState<ExplanationState | null>(null)
 
   // ── Fuse all sources into one keyed map of connections ────────────────────
   const connections = useMemo<Connection[]>(() => {
@@ -304,6 +314,20 @@ export function ConnectionsPanel({
     }
   }
 
+  const openExplanation = (connection: Connection) => {
+    if (!connection.entityId) return
+    setExplanation({ connection, path: [], pivots: null, loading: true, error: null })
+    Promise.all([
+      api.getGraphPath(entityId, connection.entityId, false, 3),
+      api.getGraphPivots(entityId),
+    ]).then(([path, pivots]) => {
+      setExplanation({ connection, path: path.path, pivots, loading: false, error: null })
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      setExplanation({ connection, path: [], pivots: null, loading: false, error: message })
+    })
+  }
+
   if (!hasAnything) {
     return (
       <EmptyState
@@ -398,6 +422,7 @@ export function ConnectionsPanel({
                 <ConnectionRow
                   key={keyOf(c.entityId, c.name ?? '')}
                   c={c}
+                  onExplain={openExplanation}
                   onRelationshipDecision={onRelationshipDecision ? runRelationshipDecision : undefined}
                   pendingDecision={pendingDecision}
                 />
@@ -425,6 +450,13 @@ export function ConnectionsPanel({
           </div>
         </Card>
       )}
+
+      {explanation && (
+        <ConnectionExplanationDrawer
+          state={explanation}
+          onClose={() => setExplanation(null)}
+        />
+      )}
     </div>
   )
 }
@@ -432,10 +464,12 @@ export function ConnectionsPanel({
 /** A single ranked connection, showing every facet that applies to it. */
 function ConnectionRow({
   c,
+  onExplain,
   onRelationshipDecision,
   pendingDecision,
 }: {
   c: Connection
+  onExplain?: (connection: Connection) => void
   onRelationshipDecision?: RelationshipDecisionHandler
   pendingDecision: string | null
 }) {
@@ -494,8 +528,19 @@ function ConnectionRow({
               {groups.length > 6 ? ` +${groups.length - 6} more` : ''}
             </div>
           )}
-          {c.entityId && onRelationshipDecision && relTop.length > 0 && (
-            <div className="mt-2 flex flex-wrap items-center gap-1">
+          <div className="mt-2 flex flex-wrap items-center gap-1">
+            {c.entityId && onExplain && (
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<Network className="h-3.5 w-3.5" />}
+                onClick={() => onExplain(c)}
+              >
+                Why connected?
+              </Button>
+            )}
+            {c.entityId && onRelationshipDecision && relTop.length > 0 && (
+              <>
               {relTop.map((r) => {
                 const confirmKey = relationshipDecisionKey(c.entityId as string, r.type, true)
                 const rejectKey = relationshipDecisionKey(c.entityId as string, r.type, false)
@@ -533,8 +578,9 @@ function ConnectionRow({
                   </div>
                 )
               })}
-            </div>
-          )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -552,6 +598,107 @@ function ConnectionRow({
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function bucketClass(bucket: string) {
+  if (bucket === 'hard') return 'bg-success/15 text-success'
+  if (bucket === 'strong') return 'bg-info/15 text-info'
+  if (bucket === 'weak') return 'bg-warning/15 text-warning'
+  return 'bg-hover text-text-muted'
+}
+
+function groupLabel(key: string) {
+  return key.replace(/_/g, ' ')
+}
+
+function ConnectionExplanationDrawer({ state, onClose }: { state: ExplanationState; onClose: () => void }) {
+  const label = state.connection.name || state.connection.entityId?.slice(0, 8) || 'connection'
+  const pivotGroups = Object.entries(state.pivots?.groups ?? {}).filter(([, rows]) => rows.length > 0)
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/50" role="dialog" aria-modal="true">
+      <div className="h-full w-full max-w-xl overflow-y-auto border-l border-border bg-surface p-5 shadow-xl">
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <div className="text-lg font-semibold">Why connected?</div>
+            <div className="text-sm text-text-muted">{label}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border p-1 text-text-muted hover:bg-hover hover:text-text-primary"
+            aria-label="Close explanation"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {state.loading ? (
+          <div className="text-sm text-text-muted">Loading graph evidence…</div>
+        ) : state.error ? (
+          <div className="rounded-md border border-error/40 bg-error/10 p-3 text-sm text-error">{state.error}</div>
+        ) : (
+          <div className="space-y-4">
+            <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Shortest path</div>
+              {state.path.length === 0 ? (
+                <div className="rounded-md border border-border bg-background p-3 text-sm text-text-muted">
+                  No strong path found within the hop limit. Context-only edges are hidden by default.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {state.path.map((edge) => (
+                    <div key={edge.id} className="rounded-md border border-border bg-background p-3">
+                      <div className="mb-1 flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-medium">{relationshipLabel(edge.relationship_type)}</span>
+                        <span className={`rounded-full px-2 py-0.5 text-[0.7rem] ${bucketClass(edge.confidence_bucket)}`}>
+                          {edge.confidence_bucket}
+                        </span>
+                        <span className="text-xs text-text-muted">weight {edge.weight}</span>
+                      </div>
+                      <div className="text-sm text-text-secondary">{edge.why || 'No explanation text recorded.'}</div>
+                      {edge.last_seen_at && <div className="mt-1 text-xs text-text-muted">Last seen {new Date(edge.last_seen_at).toLocaleString()}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Available pivots</div>
+              {pivotGroups.length === 0 ? (
+                <div className="rounded-md border border-border bg-background p-3 text-sm text-text-muted">
+                  No grouped pivots for this entity.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {pivotGroups.map(([group, rows]) => (
+                    <details key={group} className="rounded-md border border-border bg-background p-3">
+                      <summary className="cursor-pointer text-sm font-medium capitalize">
+                        {groupLabel(group)} ({rows.length})
+                      </summary>
+                      <div className="mt-2 space-y-2">
+                        {rows.slice(0, 8).map((edge) => (
+                          <div key={edge.id} className="border-t border-border pt-2 text-sm">
+                            <div className="flex items-center justify-between gap-2">
+                              <span>{relationshipLabel(edge.relationship_type)}</span>
+                              <span className={`rounded-full px-2 py-0.5 text-[0.65rem] ${bucketClass(edge.confidence_bucket)}`}>
+                                {edge.confidence_bucket}
+                              </span>
+                            </div>
+                            <div className="mt-0.5 text-xs text-text-muted">{edge.why}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
