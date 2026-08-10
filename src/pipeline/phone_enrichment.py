@@ -28,8 +28,8 @@ def _is_enabled() -> bool:
 
 
 def _parse_phone(value_field: str) -> str | None:
-    """Extract the E.164 phone from a phone_match value like 'phone:+6592348112'
-    or a bare '+6592348112'. Returns None if not parseable."""
+    """Extract the E.164 phone from a phone_match value like 'phone:00000000'
+    or a bare '00000000'. Returns None if not parseable."""
     if not value_field:
         return None
     if value_field.startswith("phone:"):

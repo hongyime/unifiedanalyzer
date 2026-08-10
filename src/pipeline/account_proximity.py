@@ -33,7 +33,7 @@ DEFAULT_OWNER_ACCOUNTS = {
     ("tiktok", "6592362267399716866"),
     ("telegram", "8367748717"),
     ("telegram", "154320684"),
-    ("whatsapp", "6592348112@s.whatsapp.net"),
+    ("whatsapp", "00000000@s.whatsapp.net"),
 }
 
 BEEPER_ID_RE = re.compile(r"^@(?P<prefix>[a-z]+)(?:go)?_(?P<value>[^:]+):", re.I)
