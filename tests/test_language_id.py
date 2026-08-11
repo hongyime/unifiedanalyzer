@@ -21,6 +21,14 @@ def test_language_profile_flags_non_linguistic_and_short_text():
     assert short.flags["too_short"] is True
 
 
+def test_language_profile_confidence_threshold_is_configurable(monkeypatch):
+    monkeypatch.setenv("LANGUAGE_ID_MIN_CONFIDENCE", "0.99")
+
+    profile = language_id.detect_language_profile("hello this is a useful update")
+
+    assert profile.flags["low_confidence"] is True
+
+
 def test_language_backfill_writes_profiles(monkeypatch):
     class Conn:
         def __init__(self):

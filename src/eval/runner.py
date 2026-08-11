@@ -4,7 +4,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.eval.metrics import classification_metrics, duplicate_count, mrr_at_k, recall_at_k
+from src.eval.metrics import (
+    classification_metrics,
+    duplicate_count,
+    evaluate_metric_gates,
+    mrr_at_k,
+    recall_at_k,
+)
 
 
 SUPPORTED_TASKS = {"search", "identity", "sentiment", "face", "location", "alerts"}
@@ -124,6 +130,21 @@ async def run_eval(conn, *, task: str, model_or_rule_version: str = "manual", dr
         pred = [str(_json_obj(row["input_json"]).get("prediction", "")) for row in rows]
         metrics = classification_metrics(truth, pred)
 
+    previous_row = await conn.fetchrow(
+        """
+        SELECT r.metrics_json
+        FROM eval_runs r
+        JOIN eval_sets s ON s.id = r.set_id
+        WHERE s.task_type = $1
+        ORDER BY r.started_at DESC
+        LIMIT 1
+        """,
+        task,
+    )
+    previous_metrics = _json_obj(previous_row["metrics_json"]) if previous_row else None
+    gate = evaluate_metric_gates(task, metrics, previous_metrics)
+    metrics = {**metrics, **gate}
+
     run_id = None
     if rows and not dry_run:
         run_id = await conn.fetchval(
@@ -143,6 +164,9 @@ async def run_eval(conn, *, task: str, model_or_rule_version: str = "manual", dr
         "run_id": run_id,
         "items": len(rows),
         "metrics": metrics,
+        "gate_status": gate["gate_status"],
+        "gate_failures": gate["gate_failures"],
+        "gate_warnings": gate["gate_warnings"],
     }
 
 

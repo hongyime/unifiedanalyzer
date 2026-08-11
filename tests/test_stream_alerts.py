@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.pipeline import stream_alerts
 from src.pipeline.stream_alerts import (
+    _upsert_alert_fingerprint,
     burst_alert_type_for_event_type,
     collector_resume_from_status,
     emotional_z_score,
@@ -72,6 +73,41 @@ def test_collector_resume_transition_requires_recovery():
 def test_emotional_z_score_uses_minimum_stddev():
     assert emotional_z_score(0.5, 0.0, 0.25) == 2.0
     assert emotional_z_score(0.5, 0.0, 0.0) == 10.0
+
+
+def test_repeat_window_suppresses_recent_sent_fingerprint():
+    class Conn:
+        def __init__(self):
+            self.insert_status = None
+            self.detail = None
+
+        async def fetchval(self, sql, *args):
+            assert "last_sent_at" in sql
+            return 1
+
+        async def execute(self, sql, *args):
+            self.insert_status = args[7]
+            self.detail = args[8]
+
+    now = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
+    conn = Conn()
+    status = asyncio.run(_upsert_alert_fingerprint(
+        conn,
+        alert_type="TERM_BURST",
+        bucket_key="#topic",
+        window_start=now,
+        window_end=now + timedelta(hours=1),
+        count=12,
+        detail='{"term":"#topic"}',
+        suppressions=[],
+        degraded_sources=set(),
+        now=now,
+        source="telegram",
+    ))
+
+    assert status == "suppressed"
+    assert conn.insert_status == "suppressed"
+    assert "repeat_bucket" in conn.detail
 
 
 def test_stream_alert_notification_uses_safe_summary_only():

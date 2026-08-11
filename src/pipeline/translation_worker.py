@@ -162,6 +162,13 @@ def get_translator() -> Translator:
     return NoopTranslator()
 
 
+def translation_max_per_run() -> int:
+    try:
+        return max(1, int(os.getenv("TRANSLATION_MAX_PER_RUN", "500")))
+    except (TypeError, ValueError):
+        return 500
+
+
 def text_version_hash(text: str, translator_version: str = TRANSLATOR_VERSION) -> str:
     return hashlib.sha1(f"{translator_version}\0{text}".encode("utf-8")).hexdigest()
 
@@ -191,7 +198,7 @@ async def run_translation_backfill(
     dry_run: bool = False,
     translator: Translator | None = None,
 ) -> dict[str, Any]:
-    max_events = max_events if max_events is not None else min(batch_size, 500)
+    max_events = max_events if max_events is not None else min(batch_size, translation_max_per_run())
     translator = translator or get_translator()
     pool = get_analyzer_pool()
     args: list[Any] = [min(batch_size, max_events), target_language, translator.version]

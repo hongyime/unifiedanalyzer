@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
-import { BellOff, Radio, ShieldCheck } from 'lucide-react'
+import { BellOff, Radio, ShieldCheck, X } from 'lucide-react'
 import { api, Alert, AlertFingerprint, AlertSuppression, StreamAlertStatus } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -63,7 +63,10 @@ export default function AlertsPage() {
   const [fingerprints, setFingerprints] = useState<AlertFingerprint[]>([])
   const [suppressions, setSuppressions] = useState<AlertSuppression[]>([])
   const [streamFilter, setStreamFilter] = useState('pending')
-  const [silence, setSilence] = useState({ alert_type: '', source: '', reason: '' })
+  const [streamTypeFilter, setStreamTypeFilter] = useState('')
+  const [streamSourceFilter, setStreamSourceFilter] = useState('')
+  const [selectedFingerprint, setSelectedFingerprint] = useState<AlertFingerprint | null>(null)
+  const [silence, setSilence] = useState({ alert_type: '', source: '', reason: '', hours: '6' })
   const [streamMsg, setStreamMsg] = useState('')
 
   const load = () => {
@@ -78,7 +81,7 @@ export default function AlertsPage() {
   const loadStream = () => {
     Promise.all([
       api.getStreamAlertStatus(),
-      api.getAlertFingerprints(streamFilter, '', 50),
+      api.getAlertFingerprints(streamFilter, streamTypeFilter, 100),
       api.getAlertSuppressions(true),
     ]).then(([status, fp, sup]) => {
       setStreamStatus(status)
@@ -87,7 +90,7 @@ export default function AlertsPage() {
     }).catch(() => {})
   }
 
-  useEffect(loadStream, [streamFilter])
+  useEffect(loadStream, [streamFilter, streamTypeFilter])
 
   const markRead = async (id: string) => {
     await api.markRead(id)
@@ -109,11 +112,24 @@ export default function AlertsPage() {
       alert_type: silence.alert_type || null,
       source: silence.source || null,
       reason: silence.reason,
+      ends_at: new Date(Date.now() + Math.max(1, Number(silence.hours) || 6) * 60 * 60 * 1000).toISOString(),
     })
-    setSilence({ alert_type: '', source: '', reason: '' })
+    setSilence({ alert_type: '', source: '', reason: '', hours: '6' })
     setStreamMsg('Suppression added.')
     loadStream()
   }
+
+  const visibleFingerprints = fingerprints.filter((fp) => {
+    if (streamSourceFilter && fp.source !== streamSourceFilter) return false
+    return true
+  })
+  const streamSources = Array.from(new Set(fingerprints.map((fp) => fp.source).filter(Boolean) as string[])).sort()
+  const groupedFingerprints = visibleFingerprints.reduce<Record<string, AlertFingerprint[]>>((acc, fp) => {
+    const key = fp.alert_type || 'unknown'
+    acc[key] = acc[key] || []
+    acc[key].push(fp)
+    return acc
+  }, {})
 
   return (
     <div>
@@ -172,35 +188,51 @@ export default function AlertsPage() {
               <option value="notify_failed">notify failed</option>
               <option value="suppressed">suppressed</option>
             </select>
+            <input
+              value={streamTypeFilter}
+              onChange={(e) => setStreamTypeFilter(e.target.value)}
+              placeholder="type filter"
+              className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+            />
+            <select
+              value={streamSourceFilter}
+              onChange={(e) => setStreamSourceFilter(e.target.value)}
+              className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+            >
+              <option value="">all sources</option>
+              {streamSources.map((source) => <option key={source} value={source}>{source}</option>)}
+            </select>
           </div>
-          {fingerprints.length === 0 ? (
+          {visibleFingerprints.length === 0 ? (
             <div className="text-sm text-text-muted">No stream fingerprints for this filter.</div>
           ) : (
-            <div className="max-h-72 overflow-auto">
-              <table className="text-xs">
-                <thead>
-                  <tr>
-                    <th>Type</th>
-                    <th>Source</th>
-                    <th>Term</th>
-                    <th>Count</th>
-                    <th>Status</th>
-                    <th>Window</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {fingerprints.map((fp) => (
-                    <tr key={fp.fingerprint}>
-                      <td>{fp.alert_type.replace(/_/g, ' ')}</td>
-                      <td>{fp.source || '—'}</td>
-                      <td><code>{detailTerm(fp.detail) || '—'}</code></td>
-                      <td>{fp.count.toLocaleString()}</td>
-                      <td><span className={`rounded-full px-2 py-0.5 ${statusClass(fp.status)}`}>{fp.status}</span></td>
-                      <td>{smallTime(fp.window_start)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="max-h-80 space-y-3 overflow-auto">
+              {Object.entries(groupedFingerprints).map(([type, rows]) => (
+                <div key={type} className="rounded-md border border-border bg-background p-2">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="text-xs font-semibold">{type.replace(/_/g, ' ')}</div>
+                    <span className="text-[0.7rem] text-text-muted">{rows.length} groups</span>
+                  </div>
+                  <div className="grid gap-2 md:grid-cols-2">
+                    {rows.map((fp) => (
+                      <button
+                        key={fp.fingerprint}
+                        type="button"
+                        onClick={() => setSelectedFingerprint(fp)}
+                        className="rounded-md border border-border bg-surface p-2 text-left hover:bg-hover"
+                      >
+                        <div className="mb-1 flex items-center justify-between gap-2">
+                          <span className="truncate text-xs font-medium">{fp.source || 'all sources'} · {detailTerm(fp.detail) || fp.entity_id || 'source group'}</span>
+                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[0.65rem] ${statusClass(fp.status)}`}>{fp.status}</span>
+                        </div>
+                        <div className="text-[0.7rem] text-text-muted">
+                          {fp.count.toLocaleString()} events · {smallTime(fp.window_start)}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </Card>
@@ -210,7 +242,7 @@ export default function AlertsPage() {
         <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
           <BellOff className="h-4 w-4" /> Stream suppressions
         </div>
-        <div className="mb-3 grid gap-2 md:grid-cols-[1fr_1fr_2fr_auto]">
+        <div className="mb-3 grid gap-2 md:grid-cols-[1fr_1fr_2fr_0.7fr_auto]">
           <input
             value={silence.alert_type}
             onChange={(e) => setSilence({ ...silence, alert_type: e.target.value })}
@@ -227,6 +259,15 @@ export default function AlertsPage() {
             value={silence.reason}
             onChange={(e) => setSilence({ ...silence, reason: e.target.value })}
             placeholder="reason"
+            className="rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+          />
+          <input
+            value={silence.hours}
+            onChange={(e) => setSilence({ ...silence, hours: e.target.value })}
+            placeholder="hours"
+            type="number"
+            min={1}
+            max={168}
             className="rounded-md border border-border bg-background px-2 py-1.5 text-sm"
           />
           <button onClick={createSilence}>Silence</button>
@@ -280,6 +321,81 @@ export default function AlertsPage() {
           </div>
         </>
       )}
+      {selectedFingerprint && (
+        <StreamFingerprintDrawer
+          fingerprint={selectedFingerprint}
+          onClose={() => setSelectedFingerprint(null)}
+          onSilence={(fp) => {
+            setSilence({
+              alert_type: fp.alert_type,
+              source: fp.source || '',
+              reason: `Investigating ${fp.alert_type}`,
+              hours: '6',
+            })
+            setSelectedFingerprint(null)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function StreamFingerprintDrawer({
+  fingerprint,
+  onClose,
+  onSilence,
+}: {
+  fingerprint: AlertFingerprint
+  onClose: () => void
+  onSilence: (fingerprint: AlertFingerprint) => void
+}) {
+  const entries = Object.entries(fingerprint.detail || {}).filter(([, value]) => value != null)
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/50" role="dialog" aria-modal="true">
+      <div className="h-full w-full max-w-xl overflow-y-auto border-l border-border bg-surface p-5 shadow-xl">
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <div className="text-lg font-semibold">Stream fingerprint</div>
+            <div className="text-sm text-text-muted">{fingerprint.alert_type.replace(/_/g, ' ')}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border p-1 text-text-muted hover:bg-hover hover:text-text-primary"
+            aria-label="Close fingerprint details"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="grid grid-cols-2 gap-2 text-sm">
+          <div className="rounded-md bg-background p-2"><div className="text-xs text-text-muted">Status</div><div>{fingerprint.status}</div></div>
+          <div className="rounded-md bg-background p-2"><div className="text-xs text-text-muted">Count</div><div>{fingerprint.count.toLocaleString()}</div></div>
+          <div className="rounded-md bg-background p-2"><div className="text-xs text-text-muted">Source</div><div>{fingerprint.source || 'all'}</div></div>
+          <div className="rounded-md bg-background p-2"><div className="text-xs text-text-muted">Last sent</div><div>{smallTime(fingerprint.last_sent_at)}</div></div>
+        </div>
+        <div className="mt-4 rounded-md border border-border bg-background p-3">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Window</div>
+          <div className="text-sm text-text-secondary">{smallTime(fingerprint.window_start)} to {smallTime(fingerprint.window_end)}</div>
+        </div>
+        <div className="mt-4 rounded-md border border-border bg-background p-3">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">Safe detail</div>
+          {entries.length === 0 ? (
+            <div className="text-sm text-text-muted">No structured detail recorded.</div>
+          ) : (
+            <div className="space-y-2">
+              {entries.map(([key, value]) => (
+                <div key={key} className="text-sm">
+                  <span className="text-text-muted">{key.replace(/_/g, ' ')}: </span>
+                  <code className="break-all text-text-secondary">{Array.isArray(value) ? `${value.length} refs` : String(value)}</code>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={() => onSilence(fingerprint)}>Prepare silence</button>
+        </div>
+      </div>
     </div>
   )
 }

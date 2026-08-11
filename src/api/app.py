@@ -28,6 +28,7 @@ from src.api.routes.search import router as search_router
 from src.api.routes.intersections import router as intersections_router
 from src.api.routes.face_search import router as face_search_router
 from src.api.routes.eval import router as eval_router
+from src.api.routes.multilingual import router as multilingual_router
 from src.api.websocket import router as websocket_router
 
 logging.basicConfig(
@@ -70,6 +71,7 @@ app.include_router(changelog_router, prefix="/api")
 app.include_router(intersections_router, prefix="/api")
 app.include_router(face_search_router, prefix="/api")
 app.include_router(eval_router, prefix="/api")
+app.include_router(multilingual_router, prefix="/api")
 # Axis-1 MVP: semantic timeline search. Router carries its own /api/search
 # prefix, so mount without a further prefix here.
 app.include_router(search_router)

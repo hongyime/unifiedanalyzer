@@ -1,7 +1,13 @@
 import asyncio
 import json
 
-from src.eval.metrics import classification_metrics, duplicate_count, mrr_at_k, recall_at_k
+from src.eval.metrics import (
+    classification_metrics,
+    duplicate_count,
+    evaluate_metric_gates,
+    mrr_at_k,
+    recall_at_k,
+)
 from src.eval.runner import _json_obj, materialize_seed_items, seed_eval_sets
 
 
@@ -17,6 +23,31 @@ def test_search_and_alert_metrics():
     assert recall_at_k(["a", "b"], ["x", "a"], 2) == 0.5
     assert mrr_at_k(["a"], ["x", "a"], 5) == 0.5
     assert duplicate_count(["a", "a", "b", "b", "b"]) == 3
+
+
+def test_eval_gates_fail_on_search_drop_and_alert_duplicates():
+    search = evaluate_metric_gates(
+        "search",
+        {"recall_at_20": 0.60, "mrr_at_20": 0.8},
+        {"recall_at_20": 0.95, "mrr_at_20": 0.8},
+    )
+    alerts = evaluate_metric_gates("alerts", {"duplicate_count": 2, "support": 10})
+
+    assert search["gate_status"] == "fail"
+    assert any("recall_at_20" in item for item in search["gate_failures"])
+    assert alerts["gate_status"] == "fail"
+    assert any("duplicate_count" in item for item in alerts["gate_failures"])
+
+
+def test_eval_gates_warn_on_identity_regression():
+    result = evaluate_metric_gates(
+        "identity",
+        {"macro_f1": 0.82, "support": 20},
+        {"macro_f1": 0.90, "support": 20},
+    )
+
+    assert result["gate_status"] == "warn"
+    assert result["gate_warnings"]
 
 
 def test_json_obj_accepts_jsonb_text():

@@ -1,0 +1,8 @@
+# Optional multilingual NLP runtime dependencies.
+# Install only on the worker image/host that runs language/translation backfills;
+# API and scheduler defaults remain safe without these packages.
+fasttext-wheel>=0.9.2
+transformers>=4.44.0
+torch>=2.3.0
+sentencepiece>=0.2.0
+sacremoses>=0.1.1

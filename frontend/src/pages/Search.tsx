@@ -77,6 +77,9 @@ export default function SearchPage() {
                 {row.keyword_rank && <span>sparse #{row.keyword_rank}</span>}
                 {row.semantic_rank && <span>dense #{row.semantic_rank}</span>}
                 {row.rrf_rank && <span>rrf #{row.rrf_rank}</span>}
+                {row.match_debug?.matched_translation && (
+                  <span className="rounded-full bg-info/15 px-2 py-0.5 text-info">translated match</span>
+                )}
               </div>
               <div className="line-clamp-3 text-sm text-text-primary">{row.snippet || row.event_id}</div>
             </a>

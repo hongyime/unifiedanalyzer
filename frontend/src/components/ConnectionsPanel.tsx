@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { CheckCircle2, List, Network, Users2, X, XCircle } from 'lucide-react'
 import { FaceAvatar } from './FaceAvatar'
@@ -52,6 +52,8 @@ type FilterKind =
   | 'relationship' // typed graph edges (group co-membership, temporal, etc.)
   | 'associate' // co-tagged in photos ("seen with")
   | 'face' // face associations from this person's own photos
+
+type ConfidenceFilter = 'all' | 'hard' | 'strong' | 'weak' | 'context-only'
 
 type Associate = {
   username: string
@@ -144,6 +146,31 @@ function relationshipDecisionKey(otherEntityId: string, relationshipType: string
   return `${otherEntityId}:${relationshipType}:${isReal ? 'real' : 'not-real'}`
 }
 
+function uiConfidenceBucket(type: string | null, weight: number | null, crossPlatform = false): ConfidenceFilter {
+  const rtype = type || ''
+  const w = Number(weight || 0)
+  if (rtype === 'same_person_probability' || rtype === 'manual_identity' || rtype === 'identity_label') {
+    return w >= 80 ? 'hard' : 'strong'
+  }
+  if (crossPlatform && ['shared_phone', 'shared_email', 'shared_website', 'bio_mention'].includes(rtype)) return 'strong'
+  if (['interaction', 'social_graph_overlap', 'face_coappearance', 'location_copresence'].includes(rtype)) {
+    return w >= 2 ? 'weak' : 'context-only'
+  }
+  if (rtype.startsWith('temporal_')) return 'context-only'
+  return w >= 3 ? 'weak' : 'context-only'
+}
+
+function connectionConfidence(c: Connection): ConfidenceFilter {
+  const buckets = c.relTypes.map((r) => uiConfidenceBucket(r.type, r.weight))
+  if (c.faceOnly) buckets.push('weak')
+  if (c.interaction) buckets.push('weak')
+  if (c.associateShared) buckets.push('context-only')
+  if (buckets.includes('hard')) return 'hard'
+  if (buckets.includes('strong')) return 'strong'
+  if (buckets.includes('weak')) return 'weak'
+  return 'context-only'
+}
+
 export function ConnectionsPanel({
   entityId,
   centerName,
@@ -167,9 +194,33 @@ export function ConnectionsPanel({
 }) {
   const [view, setView] = useState<'list' | 'graph'>('list')
   const [filter, setFilter] = useState<FilterKind>('all')
+  const [confidenceFilter, setConfidenceFilter] = useState<ConfidenceFilter>('all')
+  const [includeContextOnly, setIncludeContextOnly] = useState(false)
   const [pendingDecision, setPendingDecision] = useState<string | null>(null)
   const [decisionMessage, setDecisionMessage] = useState('')
   const [explanation, setExplanation] = useState<ExplanationState | null>(null)
+  const localViewKey = `ua:connections:${entityId}:view`
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(localViewKey) || '{}')
+      if (saved.view === 'list' || saved.view === 'graph') setView(saved.view)
+      if (saved.filter) setFilter(saved.filter)
+      if (saved.confidenceFilter) setConfidenceFilter(saved.confidenceFilter)
+      if (typeof saved.includeContextOnly === 'boolean') setIncludeContextOnly(saved.includeContextOnly)
+    } catch {
+      /* ignore corrupt browser-local view state */
+    }
+  }, [localViewKey])
+
+  useEffect(() => {
+    window.localStorage.setItem(localViewKey, JSON.stringify({
+      view,
+      filter,
+      confidenceFilter,
+      includeContextOnly,
+    }))
+  }, [localViewKey, view, filter, confidenceFilter, includeContextOnly])
 
   // ── Fuse all sources into one keyed map of connections ────────────────────
   const connections = useMemo<Connection[]>(() => {
@@ -255,8 +306,10 @@ export function ConnectionsPanel({
   }, [connections])
 
   const filtered = useMemo(
-    () => (filter === 'all' ? connections : connections.filter((c) => c.kinds.has(filter))),
-    [connections, filter],
+    () => (filter === 'all' ? connections : connections.filter((c) => c.kinds.has(filter)))
+      .filter((c) => includeContextOnly || connectionConfidence(c) !== 'context-only')
+      .filter((c) => confidenceFilter === 'all' || connectionConfidence(c) === confidenceFilter),
+    [connections, filter, confidenceFilter, includeContextOnly],
   )
 
   // ── Graph payload: build from the same filtered set so the toggle is honest.
@@ -318,8 +371,8 @@ export function ConnectionsPanel({
     if (!connection.entityId) return
     setExplanation({ connection, path: [], pivots: null, loading: true, error: null })
     Promise.all([
-      api.getGraphPath(entityId, connection.entityId, false, 3),
-      api.getGraphPivots(entityId),
+      api.getGraphPath(entityId, connection.entityId, includeContextOnly, 3),
+      api.getGraphPivots(entityId, includeContextOnly),
     ]).then(([path, pivots]) => {
       setExplanation({ connection, path: path.path, pivots, loading: false, error: null })
     }).catch((error) => {
@@ -366,6 +419,31 @@ export function ConnectionsPanel({
             Graph
           </Button>
           <InfoTip text="Switch between the ranked list of closest associates and the visual connection graph. The filter chips apply to both." />
+        </div>
+        <div className="flex flex-wrap items-center gap-1">
+          {(['all', 'hard', 'strong', 'weak', 'context-only'] as ConfidenceFilter[]).map((bucket) => (
+            <button
+              key={bucket}
+              type="button"
+              onClick={() => setConfidenceFilter(bucket)}
+              className={[
+                'rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors',
+                confidenceFilter === bucket
+                  ? 'bg-white text-black'
+                  : 'border border-border bg-background text-text-secondary hover:bg-hover',
+              ].join(' ')}
+            >
+              {bucket}
+            </button>
+          ))}
+          <label className="ml-1 inline-flex items-center gap-1 rounded-full border border-border bg-background px-2.5 py-0.5 text-xs text-text-secondary">
+            <input
+              type="checkbox"
+              checked={includeContextOnly}
+              onChange={(event) => setIncludeContextOnly(event.target.checked)}
+            />
+            context-only
+          </label>
         </div>
         <div className="flex flex-wrap items-center gap-1">
           {chips.map((chip) => {
@@ -658,6 +736,18 @@ function ConnectionExplanationDrawer({ state, onClose }: { state: ExplanationSta
                         <span className="text-xs text-text-muted">weight {edge.weight}</span>
                       </div>
                       <div className="text-sm text-text-secondary">{edge.why || 'No explanation text recorded.'}</div>
+                      {edge.evidence_refs.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {edge.evidence_refs.slice(0, 6).map((ref, idx) => (
+                            <code key={idx} className="rounded bg-hover px-1.5 py-0.5 text-[0.65rem] text-text-muted">
+                              {String(ref)}
+                            </code>
+                          ))}
+                          {edge.evidence_refs.length > 6 && (
+                            <span className="text-[0.65rem] text-text-muted">+{edge.evidence_refs.length - 6} more</span>
+                          )}
+                        </div>
+                      )}
                       {edge.last_seen_at && <div className="mt-1 text-xs text-text-muted">Last seen {new Date(edge.last_seen_at).toLocaleString()}</div>}
                     </div>
                   ))}
@@ -688,6 +778,12 @@ function ConnectionExplanationDrawer({ state, onClose }: { state: ExplanationSta
                               </span>
                             </div>
                             <div className="mt-0.5 text-xs text-text-muted">{edge.why}</div>
+                            {edge.evidence_refs.length > 0 && (
+                              <div className="mt-1 truncate text-[0.65rem] text-text-muted" title={edge.evidence_refs.map(String).join(', ')}>
+                                evidence: {edge.evidence_refs.slice(0, 3).map(String).join(', ')}
+                                {edge.evidence_refs.length > 3 ? ` +${edge.evidence_refs.length - 3} more` : ''}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>

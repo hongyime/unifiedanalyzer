@@ -211,6 +211,8 @@ def main():
     ev.add_argument("--task", required=True, choices=["search", "identity", "sentiment", "face", "location", "alerts"])
     ev.add_argument("--model-or-rule-version", default="manual")
     ev.add_argument("--dry-run", action="store_true")
+    ev.add_argument("--fail-on-gate", action="store_true",
+                    help="Exit non-zero when the eval regression gate fails")
     ev.add_argument("--json", action="store_true")
     evs = sub.add_parser("eval-seed", help="Seed built-in evaluation smoke sets")
     evs.add_argument("--seed-path", default=None)
@@ -710,6 +712,8 @@ def main():
                     print(json.dumps(report, indent=2, sort_keys=True, default=str))
                 else:
                     logger.info("eval: %s", report)
+                if args.fail_on_gate and report.get("gate_status") == "fail":
+                    raise SystemExit(2)
             finally:
                 await close_pools()
 

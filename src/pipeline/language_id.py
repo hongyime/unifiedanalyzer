@@ -44,6 +44,13 @@ _fasttext_model = None
 _fasttext_load_attempted = False
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _token_count(text: str) -> int:
     return len(_WORD_RE.findall(text or ""))
 
@@ -78,8 +85,8 @@ def _detect_fasttext(text: str) -> LanguageProfile | None:
     if not candidates:
         return None
     top = candidates[0]
-    code_mixed = len(candidates) > 1 and float(candidates[1]["confidence"]) >= 0.25
-    flags = {"low_confidence": float(top["confidence"]) < 0.65}
+    code_mixed = len(candidates) > 1 and float(candidates[1]["confidence"]) >= _env_float("LANGUAGE_ID_CODE_MIX_SECONDARY_CONFIDENCE", 0.25)
+    flags = {"low_confidence": float(top["confidence"]) < _env_float("LANGUAGE_ID_MIN_CONFIDENCE", 0.65)}
     return LanguageProfile(
         primary_language=str(top["language"]),
         primary_confidence=float(top["confidence"]),
@@ -129,9 +136,9 @@ def _fallback_detect(text: str) -> LanguageProfile:
 
     candidates.sort(key=lambda item: float(item["confidence"]), reverse=True)
     top = candidates[0]
-    code_mixed = len(candidates) > 1 and float(candidates[1]["confidence"]) >= 0.2
+    code_mixed = len(candidates) > 1 and float(candidates[1]["confidence"]) >= _env_float("LANGUAGE_ID_CODE_MIX_SECONDARY_CONFIDENCE", 0.2)
     confidence = min(0.95, max(float(top["confidence"]), 0.55 if not flags.get("too_short") else 0.35))
-    flags["low_confidence"] = confidence < 0.6
+    flags["low_confidence"] = confidence < _env_float("LANGUAGE_ID_MIN_CONFIDENCE", 0.6)
     return LanguageProfile(
         primary_language=str(top["language"]),
         primary_confidence=round(confidence, 4),

@@ -39,6 +39,14 @@ def test_translation_provider_falls_back_to_noop(monkeypatch):
     assert translator.name == "noop"
 
 
+def test_translation_max_per_run_env(monkeypatch):
+    monkeypatch.setenv("TRANSLATION_MAX_PER_RUN", "12")
+    assert translation_worker.translation_max_per_run() == 12
+
+    monkeypatch.setenv("TRANSLATION_MAX_PER_RUN", "invalid")
+    assert translation_worker.translation_max_per_run() == 500
+
+
 def test_translation_backfill_is_idempotent_shape_and_stores_failures(monkeypatch):
     class Conn:
         def __init__(self):

@@ -338,6 +338,28 @@ async def _upsert_alert_fingerprint(
         source=source,
         now=now,
     )
+    detail_obj = _detail_dict(detail)
+    detail_obj["repeat_bucket"] = bucket_key
+    if not suppressed:
+        recent = await conn.fetchval(
+            """
+            SELECT 1
+            FROM alert_fingerprints
+            WHERE alert_type = $1
+              AND COALESCE(entity_id::text, '') = COALESCE($2, '')
+              AND COALESCE(source, '') = COALESCE($3, '')
+              AND detail->>'repeat_bucket' = $4
+              AND status = 'sent'
+              AND last_sent_at > $5::timestamptz - INTERVAL '6 hours'
+            LIMIT 1
+            """,
+            alert_type,
+            entity_id,
+            source,
+            bucket_key,
+            now,
+        )
+        suppressed = bool(recent)
     fp = make_alert_fingerprint(
         alert_type,
         entity_id=entity_id,
@@ -370,7 +392,7 @@ async def _upsert_alert_fingerprint(
         fp.window_end,
         count,
         "suppressed" if suppressed else "pending",
-        detail,
+        json.dumps(detail_obj),
     )
     return "suppressed" if suppressed else "pending"
 

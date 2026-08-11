@@ -242,6 +242,8 @@ frontend/node_modules/
 
 # AI / editor dot directories (managed via sourcerepo)
 .*
+!.agents/
+!.agents/**
 !.github/
 !.gitignore
 !.gitattributes

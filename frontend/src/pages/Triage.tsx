@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
-import { GitCompare, Bell, UserPlus, MapPin, MessageCircle, ScanFace, Database, Gauge } from 'lucide-react'
-import { api, CollectorCoverageRow, EvalRun, TriageData } from '../api'
+import { GitCompare, Bell, UserPlus, MapPin, MessageCircle, ScanFace, Database, Gauge, Languages } from 'lucide-react'
+import { api, CollectorCoverageRow, EvalRun, MultilingualStatus, TriageData } from '../api'
 import { FaceAvatar } from '../components/FaceAvatar'
 import { PageHeader } from '../components/ui/PageHeader'
 import { MetricCard } from '../components/ui/MetricCard'
@@ -19,10 +19,12 @@ export default function TriagePage() {
   const [data, setData] = useState<TriageData | null>(null)
   const [coverage, setCoverage] = useState<CollectorCoverageRow[]>([])
   const [evalRuns, setEvalRuns] = useState<EvalRun[]>([])
+  const [multilingual, setMultilingual] = useState<MultilingualStatus | null>(null)
   useEffect(() => {
     api.getTriage().then(setData).catch(() => setData(null))
     api.getCollectorCoverage().then((r) => setCoverage(r.sources)).catch(() => setCoverage([]))
     api.getEvalLatest().then((r) => setEvalRuns(r.data)).catch(() => setEvalRuns([]))
+    api.getMultilingualStatus().then(setMultilingual).catch(() => setMultilingual(null))
   }, [])
 
   if (!data) return <LoadingSpinner label="Loading triage…" />
@@ -89,7 +91,7 @@ export default function TriagePage() {
         </Link>
       </div>
 
-      <div className="mb-6 grid gap-3 lg:grid-cols-2">
+      <div className="mb-6 grid gap-3 lg:grid-cols-3">
         <Link to="/alerts" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
           <div className="mb-2 flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-semibold"><Database className="h-4 w-4" /> Collector coverage</div>
@@ -122,6 +124,32 @@ export default function TriagePage() {
             ))}
           </div>
           <div className="mt-2 text-xs text-text-muted">Search, sentiment, and alert rules now have machine-readable regression evidence.</div>
+        </Link>
+
+        <Link to="/search" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-semibold"><Languages className="h-4 w-4" /> Multilingual NLP</div>
+            <span className={multilingual?.failed_translation_rows ? 'text-xs text-warning' : 'text-xs text-success'}>
+              {multilingual ? `${multilingual.profile_coverage_pct}% profiled` : 'unavailable'}
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="rounded-md bg-hover p-2"><div className="font-semibold">{multilingual?.profile_rows.toLocaleString() ?? 0}</div><div className="text-[0.7rem] text-text-muted">profiles</div></div>
+            <div className="rounded-md bg-hover p-2"><div className="font-semibold">{multilingual?.translated_rows.toLocaleString() ?? 0}</div><div className="text-[0.7rem] text-text-muted">translated</div></div>
+            <div className="rounded-md bg-hover p-2"><div className="font-semibold">{multilingual?.code_mixed_rows.toLocaleString() ?? 0}</div><div className="text-[0.7rem] text-text-muted">code-mix</div></div>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1">
+            {(multilingual?.languages ?? []).slice(0, 5).map((row) => (
+              <span key={row.language} className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
+                {row.language}: {row.count.toLocaleString()}
+              </span>
+            ))}
+          </div>
+          {multilingual?.failed_translation_rows ? (
+            <div className="mt-2 text-xs text-warning">{multilingual.failed_translation_rows.toLocaleString()} translation failures need review.</div>
+          ) : (
+            <div className="mt-2 text-xs text-text-muted">Translated matches are labeled in timeline search.</div>
+          )}
         </Link>
       </div>
 

@@ -44,6 +44,14 @@ function metricSummary(metrics: Record<string, unknown> | null) {
     .join(' · ') || 'no numeric metrics'
 }
 
+function gateStatus(run: EvalRun): Parameters<typeof StatusBadge>[0]['status'] {
+  const gate = run.metrics?.gate_status
+  if (gate === 'fail') return 'error'
+  if (gate === 'warn') return 'warning'
+  if (gate === 'pass') return 'success'
+  return run.status === 'completed' ? 'success' : 'warning'
+}
+
 const col = createColumnHelper<RunInfo>()
 const columns = [
   // Show the friendly run-type label if we have one (LABELS.tier acts as a
@@ -120,7 +128,7 @@ export default function RunsPage() {
             <div className="text-sm font-semibold">Evaluation harness</div>
             <div className="text-xs text-text-muted">Latest regression checks for search, sentiment, and alert rules.</div>
           </div>
-          <StatusBadge status={evalRuns.some((run) => run.status !== 'completed') ? 'warning' : 'success'} label={`${evalRuns.length} tasks`} />
+          <StatusBadge status={evalRuns.some((run) => run.metrics?.gate_status === 'fail' || run.status !== 'completed') ? 'warning' : 'success'} label={`${evalRuns.length} tasks`} />
         </div>
         {evalRuns.length === 0 ? (
           <div className="text-sm text-text-muted">No eval runs have been recorded yet. Use the eval CLI after seeding sets.</div>
@@ -130,9 +138,12 @@ export default function RunsPage() {
               <div key={run.id} className="rounded-md border border-border bg-background px-3 py-2">
                 <div className="mb-1 flex items-center justify-between gap-2">
                   <span className="text-sm font-medium">{run.task_type}</span>
-                  {statusPill(run.status)}
+                  <StatusBadge status={gateStatus(run)} label={String(run.metrics?.gate_status || run.status)} />
                 </div>
                 <div className="text-xs text-text-muted">{metricSummary(run.metrics)}</div>
+                {Array.isArray(run.metrics?.gate_failures) && run.metrics.gate_failures.length > 0 && (
+                  <div className="mt-1 text-xs text-error">{run.metrics.gate_failures.slice(0, 2).join(' · ')}</div>
+                )}
                 <div className="mt-1 text-[0.7rem] text-text-muted">{fmtDate(run.finished_at || run.started_at)}</div>
               </div>
             ))}

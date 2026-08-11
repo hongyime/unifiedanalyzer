@@ -207,6 +207,21 @@ export interface EvalRun {
   finished_at: string | null
 }
 
+export interface MultilingualStatus {
+  text_rows: number
+  profile_rows: number
+  profile_coverage_pct: number
+  code_mixed_rows: number
+  unsupported_rows: number
+  translation_rows: number
+  translated_rows: number
+  translation_coverage_pct: number
+  failed_translation_rows: number
+  skipped_translation_rows: number
+  languages: { language: string; count: number }[]
+  failures: { reason: string; count: number }[]
+}
+
 export interface StreamAlertStatus {
   offsets: {
     source_name: string
@@ -734,6 +749,9 @@ export interface TimelineSearchResult {
   keyword_rank: number | null
   semantic_rank: number | null
   rrf_rank: number | null
+  match_debug?: {
+    matched_translation?: boolean
+  }
 }
 
 export interface TimelineSearchResponse {
@@ -968,6 +986,7 @@ export const api = {
     return get<{ data: EvalRun[]; total: number }>(`/eval/runs?${q.toString()}`)
   },
   getEvalRegressions: (task: string) => get<{ task: string; runs: EvalRun[]; delta: Record<string, number> }>(`/eval/${task}/regressions`),
+  getMultilingualStatus: () => get<MultilingualStatus>('/multilingual/status'),
 
   mergeEntities: (ids: string[], reason = '') =>
     post<{ ok: boolean; target_entity_id: string }>('/entities/merge', { source_entity_ids: ids, reason }),
