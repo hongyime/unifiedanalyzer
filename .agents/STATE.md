@@ -1,8 +1,8 @@
 # UnifiedAnalyzer Agent State
 
-Updated: 2026-08-12 00:52 SGT
+Updated: 2026-08-12 08:09 SGT
 
-Current task: complete production-readiness work across UnifiedAnalyzer and UnifiedCollector for the six agreed workstreams.
+Current task: production-readiness slice for UnifiedAnalyzer and UnifiedCollector is implemented, committed, pushed, and live-verified.
 
 Active workstreams:
 - Multilingual NLP productionization.
@@ -17,16 +17,17 @@ Current evidence:
 - Analyzer tracked worktree was clean at task start.
 - Collector `.agents/STATE.md` exists and reports recon sidecar healthy, source health recently OK, and media revisit stale-claim work needing commit/push verification.
 - Subagents are auditing Analyzer backend, Analyzer frontend, and Collector ops in parallel.
-- Analyzer backend focused tests passed: `pytest tests/test_eval_metrics.py tests/test_multilingual_status_api.py tests/test_language_id.py tests/test_translation_worker.py tests/test_stream_alerts.py tests/test_graph_path_helpers.py -q` -> 27 passed.
-- Analyzer frontend production build passed with `npm run build`.
 - Added eval gate policy, CLI `--fail-on-gate`, multilingual status API, dashboard multilingual tile, search translated-match badge, and eval gate display.
-- Collector audit verified media stale-claim fix is already committed as `423fbbf3`; Collector dashboard is being patched to show non-TikTok revisit queue health separately from stale claims.
 - Added graph confidence/context filters, evidence refs in the graph explanation drawer, browser-local connection view state, alert fingerprint grouping/detail drawer, explicit suppression expiry, multilingual optional dependency/config template, env-driven language thresholds, translation cap, and stream-alert 6h repeat suppression.
-- Latest Analyzer verification: focused backend tests passed with 30 tests, frontend `npm run build` passed, `eval-seed --dry-run`, `eval --task search --dry-run`, `language-backfill --dry-run`, `translation-backfill --dry-run`, and `stream-alerts --once --no-notify` all returned bounded JSON reports.
-- Live API still needs analyzer service restart to pick up the new `/api/multilingual/status` route because the running process was started before this edit.
+- Analyzer production-readiness slice committed and pushed as `2e64161 feat: complete analyzer production readiness surfaces`.
+- Focused backend tests passed: `pytest tests/test_eval_metrics.py tests/test_multilingual_status_api.py tests/test_language_id.py tests/test_translation_worker.py tests/test_stream_alerts.py tests/test_graph_path_helpers.py -q` -> 30 passed.
+- Frontend production build passed with `npm run build`.
+- Bounded dry-run/live-ish CLIs passed: `eval-seed --dry-run`, `eval --task search --dry-run`, `language-backfill --dry-run`, `translation-backfill --dry-run`, and `stream-alerts --once --no-notify`.
+- Live Analyzer services were restarted. `/api/health`, `/api/alerts/stream/status`, `/api/eval/latest`, and `/api/multilingual/status` returned HTTP 200. `/api/multilingual/status` returned counts only, not raw private text.
+- Stream alert worker is running and polling with no pending/sent/failed notification storm in the latest log window.
+- Analyzer tracked worktree is clean after push.
 
 Next steps:
-1. Commit and push the Analyzer production readiness slice.
-2. Restart Analyzer API/stream-alert services and verify live endpoints.
-3. Commit and push Collector dashboard queue-health slice.
-4. Run final live API/container verification.
+1. Continue replacing smoke eval seeds with real labeled ground truth over time.
+2. Install optional NLP model dependencies and model files only when CPU/RAM/cache budget is ready.
+3. Keep recon, translation, sentiment, and graph weak/context evidence labels visible in UI.
