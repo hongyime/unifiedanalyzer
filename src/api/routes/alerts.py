@@ -20,6 +20,12 @@ class AlertSuppressionIn(BaseModel):
     ends_at: datetime | None = None
 
 
+class AlertSuppressionPatch(BaseModel):
+    reason: str | None = None
+    ends_at: datetime | None = None
+    status: str | None = None
+
+
 def _decode_jsonb(raw, default=None):
     if raw is None:
         return [] if default is None else default
@@ -138,6 +144,46 @@ async def list_alert_fingerprints(
     return {"data": [_stream_alert_row(row) for row in rows], "total": len(rows)}
 
 
+@router.get("/alerts/windows")
+async def list_alert_windows(
+    bucket_type: str | None = None,
+    source: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+):
+    conditions: list[str] = []
+    params: list = []
+    if bucket_type:
+        params.append(bucket_type)
+        conditions.append(f"alert_type = ${len(params)}")
+    if source:
+        params.append(source)
+        conditions.append(f"source = ${len(params)}")
+    params.append(limit)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT alert_type AS bucket_type,
+                   bucket_key,
+                   source,
+                   bucket_start AS window_start,
+                   bucket_end AS window_end,
+                   count,
+                   baseline,
+                   metadata AS detail,
+                   updated_at AS created_at,
+                   updated_at
+            FROM alert_windows
+            {where}
+            ORDER BY bucket_end DESC, count DESC
+            LIMIT ${len(params)}
+            """,
+            *params,
+        )
+    return {"data": [_alert_window_row(row) for row in rows], "total": len(rows)}
+
+
 @router.get("/alerts/suppressions")
 async def list_alert_suppressions(active_only: bool = True):
     where = "WHERE starts_at <= NOW() AND (ends_at IS NULL OR ends_at >= NOW())" if active_only else ""
@@ -187,6 +233,56 @@ async def create_alert_suppression(payload: AlertSuppressionIn):
     return _decode_alert_suppression(row)
 
 
+@router.patch("/alerts/suppressions/{suppression_id}")
+async def update_alert_suppression(suppression_id: str, payload: AlertSuppressionPatch):
+    if payload.reason is not None and not payload.reason.strip():
+        raise HTTPException(status_code=400, detail="reason cannot be empty")
+    if payload.status is not None and payload.status not in {"active", "expired"}:
+        raise HTTPException(status_code=400, detail="status must be active or expired")
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE alert_suppressions
+            SET reason = COALESCE($2, reason),
+                ends_at = CASE
+                    WHEN $4 = 'expired' THEN NOW()
+                    WHEN $4 = 'active' AND $3::timestamptz IS NULL THEN NULL
+                    ELSE COALESCE($3::timestamptz, ends_at)
+                END
+            WHERE id = $1::uuid
+            RETURNING id::text, scope, alert_type, entity_id::text, source, reason,
+                      starts_at, ends_at, created_at
+            """,
+            suppression_id,
+            payload.reason,
+            payload.ends_at,
+            payload.status,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="suppression not found")
+    return _decode_alert_suppression(row)
+
+
+@router.delete("/alerts/suppressions/{suppression_id}")
+async def expire_alert_suppression(suppression_id: str):
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE alert_suppressions
+            SET ends_at = NOW()
+            WHERE id = $1::uuid
+            RETURNING id::text, scope, alert_type, entity_id::text, source, reason,
+                      starts_at, ends_at, created_at
+            """,
+            suppression_id,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="suppression not found")
+    return {"ok": True, "suppression": _decode_alert_suppression(row)}
+
+
 def _stream_alert_row(row) -> dict:
     return {
         "fingerprint": row["fingerprint"],
@@ -199,6 +295,21 @@ def _stream_alert_row(row) -> dict:
         "count": row["count"],
         "status": row["status"],
         "detail": _decode_jsonb(row["detail"], {}),
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+
+
+def _alert_window_row(row) -> dict:
+    return {
+        "bucket_type": row["bucket_type"],
+        "bucket_key": row["bucket_key"],
+        "source": row["source"],
+        "window_start": row["window_start"].isoformat() if row["window_start"] else None,
+        "window_end": row["window_end"].isoformat() if row["window_end"] else None,
+        "count": row["count"],
+        "baseline": float(row["baseline"]) if row["baseline"] is not None else None,
+        "detail": _decode_jsonb(row["detail"], {}),
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
     }
 

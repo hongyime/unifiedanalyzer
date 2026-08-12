@@ -57,6 +57,8 @@ from src.pipeline.social_face_link import emit_social_face_link_signals
 from src.pipeline.identity_calibration import maybe_retrain
 from src.pipeline.auto_labeler import seed_ground_truth_labels
 from src.pipeline.timeline_text_features import build_timeline_text_features
+from src.pipeline.language_id import backfill_language_profiles
+from src.pipeline.translation_worker import run_translation_backfill, translation_max_per_run
 from src.pipeline.sentiment_emotion import enrich_timeline_sentiment
 from src.pipeline.conversation_analytics import build_conversation_analytics
 from src.pipeline.timeline_embedder import embed_new_timeline_events
@@ -142,6 +144,56 @@ _SKIPPED_KEYS = (
 )
 _ERROR_KEYS = ("error_count", "errors", "failed", "failures")
 
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _translation_phase_enabled() -> bool:
+    if os.getenv("ENABLE_TRANSLATION_PHASE") is not None:
+        return _env_bool("ENABLE_TRANSLATION_PHASE", False)
+    provider = os.getenv("TRANSLATION_PROVIDER", "noop").strip().lower()
+    return provider not in {"", "noop", "none", "disabled", "off"}
+
+
+async def _run_language_id_phase() -> dict:
+    return await backfill_language_profiles(
+        batch_size=_env_int("PIPELINE_LANGUAGE_ID_BATCH_SIZE", 1000),
+        max_events=_env_int("PIPELINE_LANGUAGE_ID_MAX_EVENTS", 1000),
+    )
+
+
+async def _run_translation_phase() -> dict:
+    provider = os.getenv("TRANSLATION_PROVIDER", "noop").strip().lower() or "noop"
+    if not _translation_phase_enabled():
+        return {
+            "processed": 0,
+            "written": 0,
+            "translated": 0,
+            "failed": 0,
+            "skipped": 0,
+            "reason": "disabled",
+            "provider": provider,
+        }
+    max_events = min(
+        _env_int("PIPELINE_TRANSLATION_MAX_EVENTS", 100),
+        translation_max_per_run(),
+    )
+    return await run_translation_backfill(
+        batch_size=_env_int("PIPELINE_TRANSLATION_BATCH_SIZE", max_events),
+        max_events=max_events,
+    )
+
 _PHASE_RESOURCE_CLASSES = {
     "resolve_entities": "db",
     "beeper_bridge": "collector_db",
@@ -153,6 +205,8 @@ _PHASE_RESOURCE_CLASSES = {
     "account_proximity": "db",
     "entity_event_ranges": "db",
     "lexical_nlp": "cpu",
+    "language_id": "cpu",
+    "translation": "cpu",
     "alerts": "db",
     "behavioral_profiles": "db",
     "whatsapp_group_graph": "collector_db",
@@ -826,6 +880,14 @@ async def run_incremental() -> dict:
             run_id, "incremental", "lexical_nlp", build_timeline_text_features, default={}
         )
         stats["text_features"] = _sum_numeric_stats(text_stats)
+        language_stats = await _run_phase(
+            run_id, "incremental", "language_id", _run_language_id_phase, default={}
+        )
+        stats["language_profiles"] = _sum_numeric_stats(language_stats)
+        translation_stats = await _run_phase(
+            run_id, "incremental", "translation", _run_translation_phase, default={}
+        )
+        stats["translations"] = _sum_numeric_stats(translation_stats)
         sentiment_stats = await _run_phase(
             run_id, "incremental", "sentiment_emotion", enrich_timeline_sentiment, default={}
         )
@@ -989,6 +1051,14 @@ async def run_full_resolution() -> dict:
             run_id, "full_resolution", "lexical_nlp", build_timeline_text_features, default={}
         )
         stats["text_features"] = _sum_numeric_stats(text_stats)
+        language_stats = await _run_phase(
+            run_id, "full_resolution", "language_id", _run_language_id_phase, default={}
+        )
+        stats["language_profiles"] = _sum_numeric_stats(language_stats)
+        translation_stats = await _run_phase(
+            run_id, "full_resolution", "translation", _run_translation_phase, default={}
+        )
+        stats["translations"] = _sum_numeric_stats(translation_stats)
         sentiment_stats = await _run_phase(
             run_id, "full_resolution", "sentiment_emotion", enrich_timeline_sentiment, default={}
         )

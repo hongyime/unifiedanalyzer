@@ -370,9 +370,12 @@ export function ConnectionsPanel({
   const openExplanation = (connection: Connection) => {
     if (!connection.entityId) return
     setExplanation({ connection, path: [], pivots: null, loading: true, error: null })
+    const graphFilters = {
+      confidence_bucket: confidenceFilter === 'all' ? undefined : confidenceFilter,
+    }
     Promise.all([
-      api.getGraphPath(entityId, connection.entityId, includeContextOnly, 3),
-      api.getGraphPivots(entityId, includeContextOnly),
+      api.getGraphPath(entityId, connection.entityId, includeContextOnly, 3, graphFilters),
+      api.getGraphPivots(entityId, includeContextOnly, graphFilters),
     ]).then(([path, pivots]) => {
       setExplanation({ connection, path: path.path, pivots, loading: false, error: null })
     }).catch((error) => {

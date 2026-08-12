@@ -32,7 +32,8 @@ export default function TriagePage() {
   const freshSources = coverage.filter((row) => row.status === 'fresh').length
   const degradedSources = coverage.filter((row) => row.status === 'degraded').length
   const staleSources = coverage.filter((row) => row.status === 'stale').length
-  const evalFailures = evalRuns.filter((run) => run.status !== 'completed').length
+  const evalFailures = evalRuns.filter((run) => run.status !== 'completed' || run.metrics?.gate_status === 'fail').length
+  const evalWarnings = evalRuns.filter((run) => run.metrics?.gate_status === 'warn').length
 
   return (
     <div>
@@ -92,7 +93,7 @@ export default function TriagePage() {
       </div>
 
       <div className="mb-6 grid gap-3 lg:grid-cols-3">
-        <Link to="/alerts" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
+        <Link to="/collector" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
           <div className="mb-2 flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-semibold"><Database className="h-4 w-4" /> Collector coverage</div>
             <span className={staleSources || degradedSources ? 'text-xs text-warning' : 'text-xs text-success'}>
@@ -107,11 +108,11 @@ export default function TriagePage() {
           <div className="mt-2 text-xs text-text-muted">Alert confidence should be discounted when a source is degraded or stale.</div>
         </Link>
 
-        <Link to="/runs" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
+        <Link to="/eval" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
           <div className="mb-2 flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-semibold"><Gauge className="h-4 w-4" /> Evaluation checks</div>
-            <span className={evalFailures ? 'text-xs text-warning' : 'text-xs text-success'}>
-              {evalRuns.length} latest
+            <span className={evalFailures ? 'text-xs text-error' : evalWarnings ? 'text-xs text-warning' : 'text-xs text-success'}>
+              {evalFailures ? `${evalFailures} fail` : evalWarnings ? `${evalWarnings} warn` : `${evalRuns.length} latest`}
             </span>
           </div>
           <div className="flex flex-wrap gap-1">
@@ -119,14 +120,14 @@ export default function TriagePage() {
               <span className="text-xs text-text-muted">No eval runs recorded yet.</span>
             ) : evalRuns.map((run) => (
               <span key={run.id} className="rounded-full bg-hover px-2 py-0.5 text-xs text-text-secondary">
-                {run.task_type}: {run.status}
+                {run.task_type}: {String(run.metrics?.gate_status || run.status)}
               </span>
             ))}
           </div>
           <div className="mt-2 text-xs text-text-muted">Search, sentiment, and alert rules now have machine-readable regression evidence.</div>
         </Link>
 
-        <Link to="/search" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
+        <Link to="/multilingual" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
           <div className="mb-2 flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-semibold"><Languages className="h-4 w-4" /> Multilingual NLP</div>
             <span className={multilingual?.failed_translation_rows ? 'text-xs text-warning' : 'text-xs text-success'}>

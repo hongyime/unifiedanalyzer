@@ -2,7 +2,7 @@ import { NavLink } from 'react-router'
 import { clsx } from '../../lib/cx'
 import {
   ListChecks, GitCompare, Users, Network, Bell, Images, ScanFace, Search,
-  FolderOpen, Play, HelpCircle,
+  FolderOpen, Play, HelpCircle, Database, Languages, Gauge, GitFork,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import type { LiveHealth } from '../../api'
@@ -15,6 +15,7 @@ const groups = [
       { to: '/review', label: 'Review', icon: GitCompare },
       { to: '/entities', label: 'People', icon: Users },
       { to: '/communities', label: 'Communities', icon: Network },
+      { to: '/graph', label: 'Graph', icon: GitFork },
     ],
   },
   {
@@ -24,6 +25,14 @@ const groups = [
       { to: '/search', label: 'Search', icon: Search },
       { to: '/media', label: 'Media', icon: Images },
       { to: '/faces', label: 'Faces', icon: ScanFace },
+    ],
+  },
+  {
+    label: 'Operations',
+    items: [
+      { to: '/collector', label: 'Collector', icon: Database },
+      { to: '/multilingual', label: 'Languages', icon: Languages },
+      { to: '/eval', label: 'Evaluation', icon: Gauge },
     ],
   },
   {

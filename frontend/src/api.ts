@@ -261,6 +261,19 @@ export interface AlertSuppression {
   created_at: string | null
 }
 
+export interface AlertWindow {
+  bucket_type: string
+  bucket_key: string
+  source: string | null
+  window_start: string | null
+  window_end: string | null
+  count: number
+  baseline: number | null
+  detail: Record<string, unknown>
+  created_at: string | null
+  updated_at: string | null
+}
+
 export interface CollectorCoverageRow {
   source: string
   expected_cadence: string | null
@@ -274,6 +287,22 @@ export interface CollectorCoverageRow {
   private_access_failures: number
   stale_targets: number
   created_at: string | null
+}
+
+export interface CollectorCoverageResponse {
+  sources: CollectorCoverageRow[]
+  total: number
+  summary?: {
+    fresh: number
+    degraded: number
+    stale: number
+    unknown: number
+  }
+  snapshot_created_at?: string | null
+  snapshot_age_seconds?: number | null
+  snapshot_stale?: boolean
+  collector_skipped?: boolean
+  error?: string
 }
 
 export interface GraphExplainEdge {
@@ -956,7 +985,7 @@ export const api = {
   getBehavior: (entityId: string) => get<BehaviorProfile>(`/entities/${entityId}/behavior`),
 
   getCollectorHealth: () => get<{ collectors: CollectorInfo[] }>('/collector/health'),
-  getCollectorCoverage: () => get<{ sources: CollectorCoverageRow[]; total: number }>('/collector/coverage'),
+  getCollectorCoverage: () => get<CollectorCoverageResponse>('/collector/coverage'),
 
   getStreamAlertStatus: () => get<StreamAlertStatus>('/alerts/stream/status'),
   getAlertFingerprints: (status = '', alertType = '', limit = 50) => {
@@ -968,6 +997,13 @@ export const api = {
   },
   getAlertSuppressions: (activeOnly = true) =>
     get<{ data: AlertSuppression[]; total: number }>(`/alerts/suppressions?active_only=${activeOnly ? 'true' : 'false'}`),
+  getAlertWindows: (bucketType = '', source = '', limit = 50) => {
+    const q = new URLSearchParams()
+    q.set('limit', String(limit))
+    if (bucketType) q.set('bucket_type', bucketType)
+    if (source) q.set('source', source)
+    return get<{ data: AlertWindow[]; total: number }>(`/alerts/windows?${q.toString()}`)
+  },
   createAlertSuppression: (body: {
     scope?: string
     alert_type?: string | null
@@ -977,6 +1013,9 @@ export const api = {
     starts_at?: string | null
     ends_at?: string | null
   }) => post<AlertSuppression>('/alerts/suppressions', body),
+  updateAlertSuppression: (id: string, body: { reason?: string; ends_at?: string | null; status?: 'active' | 'expired' }) =>
+    patch<AlertSuppression>(`/alerts/suppressions/${id}`, body),
+  expireAlertSuppression: (id: string) => del<{ ok: boolean; suppression: AlertSuppression }>(`/alerts/suppressions/${id}`),
 
   getEvalLatest: () => get<{ data: EvalRun[]; total: number }>('/eval/latest'),
   getEvalRuns: (task = '', limit = 50) => {
@@ -1025,16 +1064,35 @@ export const api = {
   getRelationships: (entityId: string) =>
     get<{ data: Relationship[] }>(`/entities/${entityId}/relationships`),
 
-  getGraphPath: (fromEntityId: string, toEntityId: string, includeContextOnly = false, maxHops = 3) => {
+  getGraphPath: (
+    fromEntityId: string,
+    toEntityId: string,
+    includeContextOnly = false,
+    maxHops = 3,
+    filters: { confidence_bucket?: string; relationship_type?: string; source?: string } = {},
+  ) => {
     const q = new URLSearchParams()
     q.set('from_entity_id', fromEntityId)
     q.set('to_entity_id', toEntityId)
     q.set('max_hops', String(maxHops))
     q.set('include_context_only', includeContextOnly ? 'true' : 'false')
+    if (filters.confidence_bucket) q.set('confidence_bucket', filters.confidence_bucket)
+    if (filters.relationship_type) q.set('relationship_type', filters.relationship_type)
+    if (filters.source) q.set('source', filters.source)
     return get<{ path: GraphExplainEdge[]; hops: number; found: boolean }>(`/graph/path?${q.toString()}`)
   },
-  getGraphPivots: (entityId: string, includeContextOnly = false) =>
-    get<GraphPivots>(`/graph/pivots/${entityId}?include_context_only=${includeContextOnly ? 'true' : 'false'}`),
+  getGraphPivots: (
+    entityId: string,
+    includeContextOnly = false,
+    filters: { confidence_bucket?: string; relationship_type?: string; source?: string } = {},
+  ) => {
+    const q = new URLSearchParams()
+    q.set('include_context_only', includeContextOnly ? 'true' : 'false')
+    if (filters.confidence_bucket) q.set('confidence_bucket', filters.confidence_bucket)
+    if (filters.relationship_type) q.set('relationship_type', filters.relationship_type)
+    if (filters.source) q.set('source', filters.source)
+    return get<GraphPivots>(`/graph/pivots/${entityId}?${q.toString()}`)
+  },
 
   decideRelationship: (body: RelationshipDecisionRequest) =>
     post<{ ok: boolean; action: string }>('/entities/relationship-decision', body),

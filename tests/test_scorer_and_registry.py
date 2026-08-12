@@ -434,15 +434,29 @@ def test_lexical_nlp_resource_class_and_alert_order():
     import src.pipeline.incremental_runner as runner
 
     assert runner._PHASE_RESOURCE_CLASSES["lexical_nlp"] == "cpu"
+    assert runner._PHASE_RESOURCE_CLASSES["language_id"] == "cpu"
+    assert runner._PHASE_RESOURCE_CLASSES["translation"] == "cpu"
     source = inspect.getsource(runner.run_incremental)
     lexical_call = 'run_id, "incremental", "lexical_nlp"'
+    language_call = 'run_id, "incremental", "language_id"'
+    translation_call = 'run_id, "incremental", "translation"'
+    sentiment_call = 'run_id, "incremental", "sentiment_emotion"'
     alert_call = 'run_id, "incremental", "alerts"'
-    assert source.index(lexical_call) < source.index(alert_call)
+    assert source.index(lexical_call) < source.index(language_call)
+    assert source.index(language_call) < source.index(translation_call)
+    assert source.index(translation_call) < source.index(sentiment_call)
+    assert source.index(sentiment_call) < source.index(alert_call)
 
     full_source = inspect.getsource(runner.run_full_resolution)
     full_lexical_call = 'run_id, "full_resolution", "lexical_nlp"'
+    full_language_call = 'run_id, "full_resolution", "language_id"'
+    full_translation_call = 'run_id, "full_resolution", "translation"'
+    full_sentiment_call = 'run_id, "full_resolution", "sentiment_emotion"'
     full_alert_call = 'run_id, "full_resolution", "alerts"'
-    assert full_source.index(full_lexical_call) < full_source.index(full_alert_call)
+    assert full_source.index(full_lexical_call) < full_source.index(full_language_call)
+    assert full_source.index(full_language_call) < full_source.index(full_translation_call)
+    assert full_source.index(full_translation_call) < full_source.index(full_sentiment_call)
+    assert full_source.index(full_sentiment_call) < full_source.index(full_alert_call)
 
 
 def test_pipeline_coverage_run_phase_writes_snapshot(monkeypatch):

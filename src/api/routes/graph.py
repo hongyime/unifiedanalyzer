@@ -118,9 +118,14 @@ async def graph_path(
     to_entity_id: str,
     max_hops: int = Query(3, ge=1, le=4),
     include_context_only: bool = False,
+    confidence_bucket_filter: str | None = Query(None, alias="confidence_bucket"),
+    relationship_type: str | None = None,
+    source: str | None = None,
 ):
     from_entity_id = require_uuid(from_entity_id)
     to_entity_id = require_uuid(to_entity_id)
+    if not isinstance(confidence_bucket_filter, str):
+        confidence_bucket_filter = None
     min_weight = 0 if include_context_only else 2
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
@@ -132,6 +137,8 @@ async def graph_path(
                 WHERE entity_a_id IS NOT NULL
                   AND entity_b_id IS NOT NULL
                   AND ($4::boolean OR weight >= $5)
+                  AND ($6::text IS NULL OR relationship_type = $6)
+                  AND ($7::text IS NULL OR sources::text ILIKE ('%' || $7 || '%'))
                 UNION ALL
                 SELECT id, entity_b_id AS entity_a_id, entity_a_id AS entity_b_id,
                        relationship_type, weight, cross_platform
@@ -139,6 +146,8 @@ async def graph_path(
                 WHERE entity_a_id IS NOT NULL
                   AND entity_b_id IS NOT NULL
                   AND ($4::boolean OR weight >= $5)
+                  AND ($6::text IS NULL OR relationship_type = $6)
+                  AND ($7::text IS NULL OR sources::text ILIKE ('%' || $7 || '%'))
             ),
             paths AS (
                 SELECT ARRAY[e.id] AS edge_ids,
@@ -168,6 +177,8 @@ async def graph_path(
             max_hops,
             include_context_only,
             min_weight,
+            relationship_type,
+            source,
         )
         if not path:
             return {"path": [], "hops": 0, "found": False}
@@ -182,12 +193,22 @@ async def graph_path(
         )
     by_id = {str(row["id"]): _relationship_row(row) for row in rows}
     ordered = [by_id[str(edge_id)] for edge_id in path["edge_ids"] if str(edge_id) in by_id]
+    if confidence_bucket_filter and any(edge["confidence_bucket"] != confidence_bucket_filter for edge in ordered):
+        return {"path": [], "hops": 0, "found": False}
     return {"path": ordered, "hops": len(ordered), "found": bool(ordered)}
 
 
 @router.get("/graph/pivots/{entity_id}")
-async def graph_pivots(entity_id: str, include_context_only: bool = False):
+async def graph_pivots(
+    entity_id: str,
+    include_context_only: bool = False,
+    confidence_bucket_filter: str | None = Query(None, alias="confidence_bucket"),
+    relationship_type: str | None = None,
+    source: str | None = None,
+):
     entity_id = require_uuid(entity_id)
+    if not isinstance(confidence_bucket_filter, str):
+        confidence_bucket_filter = None
     min_weight = 0 if include_context_only else 2
     pool = get_analyzer_pool()
     async with pool.acquire() as conn:
@@ -198,12 +219,16 @@ async def graph_pivots(entity_id: str, include_context_only: bool = False):
             FROM entity_relationships
             WHERE (entity_a_id = $1::uuid OR entity_b_id = $1::uuid)
               AND ($2::boolean OR weight >= $3)
+              AND ($4::text IS NULL OR relationship_type = $4)
+              AND ($5::text IS NULL OR sources::text ILIKE ('%' || $5 || '%'))
             ORDER BY last_seen_at DESC NULLS LAST, weight DESC
             LIMIT 200
             """,
             entity_id,
             include_context_only,
             min_weight,
+            relationship_type,
+            source,
         )
     groups: dict[str, list[dict]] = {
         "shared_chats": [],
@@ -216,6 +241,8 @@ async def graph_pivots(entity_id: str, include_context_only: bool = False):
     }
     for row in rows:
         item = _relationship_row(row)
+        if confidence_bucket_filter and item["confidence_bucket"] != confidence_bucket_filter:
+            continue
         rtype = row["relationship_type"] or ""
         if "chat" in rtype or "group" in rtype:
             groups["shared_chats"].append(item)

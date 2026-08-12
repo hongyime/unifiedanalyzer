@@ -89,6 +89,36 @@ def materialize_seed_items(item_set: dict[str, Any]) -> list[dict[str, Any]]:
     return [*(item_set.get("items") or []), *_factory_items(item_set)]
 
 
+def _prediction_for_row(task: str, row) -> tuple[dict[str, Any], dict[str, Any], bool | None, str | None]:
+    input_json = _json_obj(row["input_json"])
+    expected_json = _json_obj(row["expected_json"])
+    try:
+        if task == "search":
+            expected = expected_json.get("event_ids", [])
+            ranked = input_json.get("ranked_event_ids", [])
+            item_recall = recall_at_k(expected, ranked, 20)
+            item_mrr = mrr_at_k(expected, ranked, 20)
+            return (
+                {"ranked_event_ids": ranked},
+                {"recall_at_20": item_recall, "mrr_at_20": item_mrr},
+                item_recall > 0,
+                None,
+            )
+        prediction_label = str(input_json.get("prediction", ""))
+        expected_label = str(expected_json.get("label", ""))
+        prediction_json = {"label": prediction_label}
+        if task == "alerts":
+            prediction_json["fingerprint"] = str(input_json.get("fingerprint") or row["item_id"])
+        return (
+            prediction_json,
+            {},
+            prediction_label == expected_label if expected_label else None,
+            None,
+        )
+    except Exception as exc:  # noqa: BLE001 - an eval item error should not abort the run.
+        return ({}, {}, None, str(exc)[:500])
+
+
 async def run_eval(conn, *, task: str, model_or_rule_version: str = "manual", dry_run: bool = False) -> dict[str, Any]:
     if task not in SUPPORTED_TASKS:
         raise ValueError(f"unsupported eval task: {task}")
@@ -156,6 +186,31 @@ async def run_eval(conn, *, task: str, model_or_rule_version: str = "manual", dr
             rows[0]["set_id"],
             model_or_rule_version,
             json.dumps(metrics),
+        )
+        prediction_rows = []
+        for row in rows:
+            prediction_json, score_json, correct, error = _prediction_for_row(task, row)
+            prediction_rows.append((
+                run_id,
+                row["item_id"],
+                json.dumps(prediction_json),
+                json.dumps(score_json),
+                correct,
+                error,
+            ))
+        await conn.executemany(
+            """
+            INSERT INTO eval_predictions (
+                run_id, item_id, prediction_json, score_json, correct, error
+            )
+            VALUES ($1::uuid, $2::uuid, $3::jsonb, $4::jsonb, $5, $6)
+            ON CONFLICT (run_id, item_id) DO UPDATE SET
+                prediction_json = EXCLUDED.prediction_json,
+                score_json = EXCLUDED.score_json,
+                correct = EXCLUDED.correct,
+                error = EXCLUDED.error
+            """,
+            prediction_rows,
         )
 
     return {

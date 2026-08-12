@@ -8,11 +8,15 @@ import { LoadingSpinner } from './components/ui/LoadingSpinner'
 const TriagePage = lazy(() => import('./pages/Triage'))
 const CasesPage = lazy(() => import('./pages/Cases'))
 const AlertsPage = lazy(() => import('./pages/Alerts'))
+const CollectorCoveragePage = lazy(() => import('./pages/CollectorCoverage'))
+const MultilingualPage = lazy(() => import('./pages/Multilingual'))
+const EvalPage = lazy(() => import('./pages/Eval'))
 const ReviewPage = lazy(() => import('./pages/Review'))
 const EntitiesPage = lazy(() => import('./pages/Entities'))
 const EntityDetailPage = lazy(() => import('./pages/EntityDetail'))
 const RunsPage = lazy(() => import('./pages/Runs'))
 const CommunitiesPage = lazy(() => import('./pages/Communities'))
+const GraphPage = lazy(() => import('./pages/Graph'))
 const MediaPage = lazy(() => import('./pages/Media'))
 const FacesPage = lazy(() => import('./pages/Faces'))
 const SearchPage = lazy(() => import('./pages/Search'))
@@ -52,9 +56,13 @@ function App() {
           <Route path="/" element={<TriagePage />} />
           <Route path="/review" element={<ReviewPage />} />
           <Route path="/alerts" element={<AlertsPage />} />
+          <Route path="/collector" element={<CollectorCoveragePage />} />
+          <Route path="/multilingual" element={<MultilingualPage />} />
+          <Route path="/eval" element={<EvalPage />} />
           <Route path="/entities" element={<EntitiesPage />} />
           <Route path="/entities/:id" element={<EntityDetailPage />} />
           <Route path="/communities" element={<CommunitiesPage />} />
+          <Route path="/graph" element={<GraphPage />} />
           <Route path="/media" element={<MediaPage />} />
           <Route path="/faces" element={<FacesPage />} />
           <Route path="/search" element={<SearchPage />} />

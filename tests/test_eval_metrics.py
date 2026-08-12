@@ -8,7 +8,7 @@ from src.eval.metrics import (
     mrr_at_k,
     recall_at_k,
 )
-from src.eval.runner import _json_obj, materialize_seed_items, seed_eval_sets
+from src.eval.runner import _json_obj, materialize_seed_items, run_eval, seed_eval_sets
 
 
 def test_classification_metrics_reports_precision_recall_f1():
@@ -82,6 +82,43 @@ def test_seed_eval_sets_inserts_idempotent_items(tmp_path):
 
     assert report["sets"] == 1
     assert report["items"] == 1
+
+
+def test_run_eval_persists_prediction_rows():
+    class Conn:
+        def __init__(self):
+            self.prediction_rows = []
+
+        async def fetch(self, sql, *args):
+            assert args == ("search",)
+            return [
+                {
+                    "item_id": "00000000-0000-0000-0000-000000000011",
+                    "set_id": "00000000-0000-0000-0000-000000000001",
+                    "input_json": {"ranked_event_ids": ["miss", "hit"]},
+                    "expected_json": {"event_ids": ["hit"]},
+                }
+            ]
+
+        async def fetchrow(self, sql, *args):
+            assert args == ("search",)
+            return None
+
+        async def fetchval(self, sql, *args):
+            assert "INSERT INTO eval_runs" in sql
+            return "00000000-0000-0000-0000-000000000099"
+
+        async def executemany(self, sql, rows):
+            assert "INSERT INTO eval_predictions" in sql
+            self.prediction_rows = list(rows)
+
+    conn = Conn()
+    report = asyncio.run(run_eval(conn, task="search"))
+
+    assert report["run_id"] == "00000000-0000-0000-0000-000000000099"
+    assert len(conn.prediction_rows) == 1
+    assert json.loads(conn.prediction_rows[0][3])["recall_at_20"] == 1.0
+    assert conn.prediction_rows[0][4] is True
 
 
 def test_default_seed_factories_cover_core_tasks():

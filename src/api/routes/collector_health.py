@@ -4,7 +4,7 @@ import json
 import os
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter
@@ -318,7 +318,7 @@ async def collector_coverage():
                 """
             )
     except Exception as exc:  # noqa: BLE001 - collector is optional for analyzer uptime
-        return {"collector_db": "unreachable", "sources": [], "error": str(exc)[:300]}
+        return {"collector_db": "unreachable", "sources": [], "total": 0, "summary": {"total": 0, "fresh": 0, "degraded": 0, "stale": 0}, "error": str(exc)[:300]}
     sources = []
     for row in rows:
         sources.append({
@@ -338,8 +338,19 @@ async def collector_coverage():
     fresh = sum(1 for row in sources if row["status"] == "fresh")
     degraded = sum(1 for row in sources if row["status"] == "degraded")
     stale = sum(1 for row in sources if row["status"] == "stale")
+    latest_snapshot = max((row["created_at"] for row in rows if row["created_at"]), default=None)
+    latest_snapshot_iso = latest_snapshot.isoformat() if latest_snapshot else None
+    snapshot_age_seconds = None
+    if latest_snapshot:
+        now = datetime.now(timezone.utc)
+        snapshot_age_seconds = int((now - latest_snapshot.astimezone(timezone.utc)).total_seconds())
+    snapshot_stale_after_seconds = 2 * 60 * 60
     return {
         "collector_db": "connected",
         "sources": sources,
+        "total": len(sources),
         "summary": {"total": len(sources), "fresh": fresh, "degraded": degraded, "stale": stale},
+        "snapshot_created_at": latest_snapshot_iso,
+        "snapshot_age_seconds": snapshot_age_seconds,
+        "snapshot_stale": bool(snapshot_age_seconds is not None and snapshot_age_seconds > snapshot_stale_after_seconds),
     }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { BellOff, Radio, ShieldCheck, X } from 'lucide-react'
-import { api, Alert, AlertFingerprint, AlertSuppression, StreamAlertStatus } from '../api'
+import { api, Alert, AlertFingerprint, AlertSuppression, AlertWindow, StreamAlertStatus } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { LoadingSpinner } from '../components/ui/LoadingSpinner'
@@ -62,6 +62,7 @@ export default function AlertsPage() {
   const [streamStatus, setStreamStatus] = useState<StreamAlertStatus | null>(null)
   const [fingerprints, setFingerprints] = useState<AlertFingerprint[]>([])
   const [suppressions, setSuppressions] = useState<AlertSuppression[]>([])
+  const [windows, setWindows] = useState<AlertWindow[]>([])
   const [streamFilter, setStreamFilter] = useState('pending')
   const [streamTypeFilter, setStreamTypeFilter] = useState('')
   const [streamSourceFilter, setStreamSourceFilter] = useState('')
@@ -83,10 +84,12 @@ export default function AlertsPage() {
       api.getStreamAlertStatus(),
       api.getAlertFingerprints(streamFilter, streamTypeFilter, 100),
       api.getAlertSuppressions(true),
-    ]).then(([status, fp, sup]) => {
+      api.getAlertWindows('', '', 50),
+    ]).then(([status, fp, sup, win]) => {
       setStreamStatus(status)
       setFingerprints(fp.data)
       setSuppressions(sup.data)
+      setWindows(win.data)
     }).catch(() => {})
   }
 
@@ -116,6 +119,33 @@ export default function AlertsPage() {
     })
     setSilence({ alert_type: '', source: '', reason: '', hours: '6' })
     setStreamMsg('Suppression added.')
+    loadStream()
+  }
+
+  const expireSuppression = async (id: string) => {
+    await api.expireAlertSuppression(id)
+    setStreamMsg('Suppression expired.')
+    loadStream()
+  }
+
+  const extendSuppression = async (s: AlertSuppression) => {
+    await api.updateAlertSuppression(s.id, {
+      status: 'active',
+      ends_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+    })
+    setStreamMsg('Suppression extended 6 hours.')
+    loadStream()
+  }
+
+  const editSuppressionReason = async (s: AlertSuppression) => {
+    const reason = window.prompt('Suppression reason', s.reason)
+    if (reason == null) return
+    if (!reason.trim()) {
+      setStreamMsg('Reason cannot be empty.')
+      return
+    }
+    await api.updateAlertSuppression(s.id, { reason })
+    setStreamMsg('Suppression reason updated.')
     loadStream()
   }
 
@@ -273,15 +303,49 @@ export default function AlertsPage() {
           <button onClick={createSilence}>Silence</button>
         </div>
         {streamMsg && <div className="mb-2 text-xs text-text-muted">{streamMsg}</div>}
-        <div className="flex flex-wrap gap-1">
+        <div className="space-y-2">
           {suppressions.length === 0 ? (
             <span className="text-sm text-text-muted">No active suppressions.</span>
           ) : suppressions.map((s) => (
-            <span key={s.id} className="rounded-full border border-border bg-hover px-2 py-0.5 text-xs text-text-secondary">
-              {s.alert_type || 'all'} · {s.source || 'all'} · {s.reason}
-            </span>
+            <div key={s.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-background px-3 py-2">
+              <div className="min-w-0 text-xs text-text-secondary">
+                <div className="font-medium text-text-primary">
+                  {s.alert_type || 'all alerts'} · {s.source || 'all sources'} · {s.scope}
+                </div>
+                <div className="mt-0.5 truncate">{s.reason}</div>
+                <div className="mt-0.5 text-text-muted">
+                  entity {s.entity_id || 'all'} · starts {smallTime(s.starts_at)} · ends {smallTime(s.ends_at)}
+                </div>
+              </div>
+              <div className="flex shrink-0 gap-1">
+                <button type="button" onClick={() => editSuppressionReason(s)} className="text-xs">Edit</button>
+                <button type="button" onClick={() => extendSuppression(s)} className="text-xs">Extend 6h</button>
+                <button type="button" onClick={() => expireSuppression(s.id)} className="text-xs">Expire</button>
+              </div>
+            </div>
           ))}
         </div>
+      </Card>
+
+      <Card className="mb-6">
+        <div className="mb-3 text-sm font-semibold">Rolling windows</div>
+        {windows.length === 0 ? (
+          <div className="text-sm text-text-muted">No rolling alert windows recorded.</div>
+        ) : (
+          <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
+            {windows.map((w) => (
+              <div key={`${w.bucket_type}:${w.bucket_key}:${w.window_end}`} className="rounded-md border border-border bg-background p-2">
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <span className="truncate text-xs font-medium">{w.bucket_type} · {w.bucket_key}</span>
+                  <span className="rounded-full bg-hover px-2 py-0.5 text-[0.65rem] text-text-secondary">{w.count.toLocaleString()}</span>
+                </div>
+                <div className="text-[0.7rem] text-text-muted">
+                  {w.source || 'all sources'} · baseline {w.baseline ?? 'n/a'} · {smallTime(w.window_end)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
 
       {loading ? (
