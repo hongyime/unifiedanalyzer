@@ -217,6 +217,8 @@ def main():
     evs = sub.add_parser("eval-seed", help="Seed built-in evaluation smoke sets")
     evs.add_argument("--seed-path", default=None)
     evs.add_argument("--dry-run", action="store_true")
+    evs.add_argument("--production-limit-per-task", type=int, default=200)
+    evs.add_argument("--no-production-labels", action="store_true")
     evs.add_argument("--json", action="store_true")
     sta = sub.add_parser("stream-alerts", help="Run bounded near-real-time alert polling")
     sta.add_argument("--once", action="store_true", help="Run one polling iteration and exit")
@@ -731,6 +733,8 @@ def main():
                         conn,
                         seed_path=args.seed_path,
                         dry_run=args.dry_run,
+                        include_production_labels=not args.no_production_labels,
+                        production_limit_per_task=args.production_limit_per_task,
                     )
                 if args.json:
                     print(json.dumps(report, indent=2, sort_keys=True, default=str))

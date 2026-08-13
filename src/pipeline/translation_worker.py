@@ -169,6 +169,28 @@ def translation_max_per_run() -> int:
         return 500
 
 
+def translation_runtime_status() -> dict[str, Any]:
+    provider = os.getenv("TRANSLATION_PROVIDER", "noop").strip().lower() or "noop"
+    target_language = os.getenv("TRANSLATION_TARGET_LANGUAGE", DEFAULT_TARGET_LANGUAGE).strip() or DEFAULT_TARGET_LANGUAGE
+    try:
+        max_length = max(1, int(os.getenv("TRANSLATION_MAX_LENGTH", "512")))
+    except (TypeError, ValueError):
+        max_length = 512
+    return {
+        "provider": provider,
+        "target_language": target_language,
+        "translator_version": TRANSLATOR_VERSION,
+        "max_per_run": translation_max_per_run(),
+        "max_length": max_length,
+        "bounded_worker": True,
+        "opus_mt_enabled": provider in {"transformers", "opus", "opus-mt"},
+        "opus_model_prefix": os.getenv("TRANSLATION_OPUS_MODEL_PREFIX", DEFAULT_OPUS_PREFIX),
+        "nllb_enabled": provider in {"nllb", "nllb-200"},
+        "nllb_model": os.getenv("TRANSLATION_NLLB_MODEL", DEFAULT_NLLB_MODEL),
+        "nllb_default_off": provider not in {"nllb", "nllb-200"},
+    }
+
+
 def text_version_hash(text: str, translator_version: str = TRANSLATOR_VERSION) -> str:
     return hashlib.sha1(f"{translator_version}\0{text}".encode("utf-8")).hexdigest()
 

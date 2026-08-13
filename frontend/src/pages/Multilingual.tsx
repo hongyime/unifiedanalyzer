@@ -13,6 +13,14 @@ function pct(value: number | undefined) {
   return `${Number(value ?? 0).toFixed(1)}%`
 }
 
+function text(value: unknown, fallback = '-') {
+  return typeof value === 'string' && value ? value : fallback
+}
+
+function boolText(value: unknown) {
+  return value ? 'on' : 'off'
+}
+
 export default function MultilingualPage() {
   const [status, setStatus] = useState<MultilingualStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -34,6 +42,8 @@ export default function MultilingualPage() {
   if (!status) return <EmptyState title="No multilingual status" description="Language-profile and translation counts are unavailable." />
 
   const translationIssues = status.failed_translation_rows + status.skipped_translation_rows + status.unsupported_rows
+  const detector = status.language_detector ?? {}
+  const worker = status.translation_worker ?? {}
 
   return (
     <div>
@@ -65,9 +75,24 @@ export default function MultilingualPage() {
           </div>
         </Card>
         <Card className="md:col-span-2">
-          <div className="mb-2 text-sm font-semibold">Operational rule</div>
-          <div className="text-sm text-text-secondary">
-            English originals use the existing lexicon sentiment. Non-English text uses translated English only when a bounded local worker has produced it. Without translation, sentiment remains unsupported or low-confidence neutral.
+          <div className="mb-2 text-sm font-semibold">Runtime</div>
+          <div className="grid gap-2 text-sm sm:grid-cols-2">
+            <div className="rounded-md bg-background p-2">
+              <div className="text-xs text-text-muted">Language detector</div>
+              <div className="font-medium">
+                fastText {boolText(detector.fasttext_loaded)} · fallback {boolText(detector.fallback_detector)}
+              </div>
+              <div className="text-xs text-text-muted">{text(detector.fasttext_model_path, 'no model path')}</div>
+            </div>
+            <div className="rounded-md bg-background p-2">
+              <div className="text-xs text-text-muted">Translation worker</div>
+              <div className="font-medium">
+                {text(worker.provider, 'noop')} · {Number(worker.max_per_run ?? 0).toLocaleString()} per run
+              </div>
+              <div className="text-xs text-text-muted">
+                OPUS {boolText(worker.opus_mt_enabled)} · NLLB {boolText(worker.nllb_enabled)}
+              </div>
+            </div>
           </div>
         </Card>
       </div>

@@ -41,3 +41,6 @@ def test_multilingual_status_reports_counts(monkeypatch):
     assert result["translation_coverage_pct"] == 18.8
     assert result["languages"][1]["language"] == "zh"
     assert result["failures"][0]["reason"] == "missing model"
+    assert result["language_detector"]["fallback_detector"] is True
+    assert result["translation_worker"]["bounded_worker"] is True
+    assert result["translation_worker"]["nllb_default_off"] is True

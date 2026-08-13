@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from src.db.connection import get_analyzer_pool
+from src.pipeline.language_id import fasttext_runtime_status
+from src.pipeline.translation_worker import translation_runtime_status
 
 router = APIRouter(tags=["multilingual"])
 
@@ -59,4 +61,6 @@ async def multilingual_status():
         "skipped_translation_rows": int(totals["skipped_translation_rows"] or 0),
         "languages": [dict(row) for row in languages],
         "failures": [dict(row) for row in failures],
+        "language_detector": fasttext_runtime_status(),
+        "translation_worker": translation_runtime_status(),
     }

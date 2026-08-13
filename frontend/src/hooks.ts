@@ -56,6 +56,10 @@ export function useMediaStats() {
   return useQuery({ queryKey: ['media-stats'], queryFn: api.getMediaStats })
 }
 
+export function useMediaCoverage() {
+  return useQuery({ queryKey: ['media-coverage'], queryFn: api.getMediaCoverage })
+}
+
 export function useMediaFilters() {
   return useQuery({ queryKey: ['media-filters'], queryFn: api.getMediaFilters })
 }

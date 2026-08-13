@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from src.api.routes import alerts, collector_health
+from src.api.routes import alerts, collector_health, media
 
 
 class _Acquire:
@@ -138,3 +138,48 @@ def test_collector_coverage_route_returns_summary_total_and_snapshot_age(monkeyp
     assert result["summary"] == {"total": 2, "fresh": 1, "degraded": 0, "stale": 1}
     assert result["snapshot_age_seconds"] >= 0
     assert result["snapshot_stale"] is False
+
+
+def test_media_coverage_route_reports_named_production_surfaces(monkeypatch):
+    class Conn:
+        async def fetchrow(self, _sql, *args):
+            assert not args
+            return {
+                "rows_total": 25,
+                "items_total": 10,
+                "pdf_text_rows": 3,
+                "pdf_text_with_text": 2,
+                "pdf_image_markers": 1,
+                "pdf_image_rows": 4,
+                "ocr_rows": 5,
+                "ocr_with_text": 4,
+                "video_frame_markers": 2,
+                "video_frame_rows": 8,
+                "face_rows": 6,
+                "exif_rows": 7,
+                "exif_with_gps": 1,
+                "phash_rows": 9,
+                "derived_rows": 12,
+            }
+
+        async def fetch(self, _sql, *args):
+            assert args[0] == ["pdf_text", "ocr_text"]
+            return [
+                {"source_column": "pdf_text", "signal_type": "email_match", "n": 2},
+                {"source_column": "ocr_text", "signal_type": "phone_match", "n": 1},
+            ]
+
+    monkeypatch.setattr(media, "get_analyzer_pool", lambda: _Pool(Conn()))
+
+    result = asyncio.run(media.media_coverage(exact=True))
+
+    by_key = {item["key"]: item for item in result["coverage"]}
+    assert result["rows_total"] == 25
+    assert result["derived_rows"] == 12
+    assert by_key["pdf_text"]["count"] == 2
+    assert by_key["pdf_text"]["processed"] == 3
+    assert by_key["pdf_images"]["count"] == 4
+    assert by_key["video_frames"]["count"] == 8
+    assert by_key["exif_gps"]["count"] == 1
+    assert by_key["contact_signals"]["count"] == 3
+    assert result["contact_signals"]["by_source_column"][0]["source_column"] == "pdf_text"

@@ -22,6 +22,7 @@ import io
 import json
 import logging
 from pathlib import Path
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
@@ -115,6 +116,140 @@ async def _estimated_media_totals(conn) -> dict:
         """
     )
     return {k: int(row[k] or 0) for k in row.keys()}
+
+
+async def _estimated_analysis_type_counts(conn, rows_total: int) -> dict[str, int]:
+    row = await conn.fetchrow(
+        """
+        SELECT most_common_vals::text AS vals, most_common_freqs::text AS freqs
+        FROM pg_stats
+        WHERE schemaname = 'public'
+          AND tablename = 'media_analysis'
+          AND attname = 'analysis_type'
+        """
+    )
+    if not row:
+        return {}
+    estimates = _estimated_rollup(rows_total, row["vals"], row["freqs"], "analysis_type")
+    return {str(item["analysis_type"]): int(item["n"] or 0) for item in estimates}
+
+
+def _int_row(row: dict, key: str) -> int:
+    return int(row.get(key) or 0)
+
+
+def _coverage_item(
+    key: str,
+    label: str,
+    count: int,
+    *,
+    processed: int | None = None,
+    basis: str,
+) -> dict:
+    return {
+        "key": key,
+        "label": label,
+        "status": "covered" if count > 0 else "missing",
+        "count": int(count or 0),
+        "processed": int(processed if processed is not None else count or 0),
+        "basis": basis,
+    }
+
+
+async def _media_coverage_counts_exact(conn) -> dict:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            COUNT(*)::bigint AS rows_total,
+            COUNT(DISTINCT media_item_id)::bigint AS items_total,
+            COUNT(*) FILTER (WHERE analysis_type = 'pdf_text')::bigint AS pdf_text_rows,
+            COUNT(*) FILTER (
+                WHERE analysis_type = 'pdf_text'
+                  AND extracted_text IS NOT NULL
+                  AND extracted_text <> ''
+            )::bigint AS pdf_text_with_text,
+            COUNT(*) FILTER (WHERE analysis_type = 'pdf_embedded_image')::bigint AS pdf_image_markers,
+            COUNT(*) FILTER (WHERE analysis_type = 'pdf_image')::bigint AS pdf_image_rows,
+            COUNT(*) FILTER (WHERE analysis_type = 'ocr_text')::bigint AS ocr_rows,
+            COUNT(*) FILTER (
+                WHERE analysis_type = 'ocr_text'
+                  AND extracted_text IS NOT NULL
+                  AND extracted_text <> ''
+            )::bigint AS ocr_with_text,
+            COUNT(*) FILTER (WHERE analysis_type = 'video_frames')::bigint AS video_frame_markers,
+            COUNT(*) FILTER (WHERE analysis_type = 'video_frame')::bigint AS video_frame_rows,
+            COUNT(*) FILTER (WHERE analysis_type = 'face_embedding' OR face_embedding IS NOT NULL)::bigint AS face_rows,
+            COUNT(*) FILTER (WHERE analysis_type = 'exif_gps')::bigint AS exif_rows,
+            COUNT(*) FILTER (
+                WHERE analysis_type = 'exif_gps'
+                  AND gps_lat IS NOT NULL
+                  AND gps_lon IS NOT NULL
+            )::bigint AS exif_with_gps,
+            COUNT(*) FILTER (WHERE analysis_type = 'phash' OR perceptual_hash IS NOT NULL)::bigint AS phash_rows,
+            COUNT(*) FILTER (
+                WHERE parent_media_item_id IS NOT NULL
+                   OR analysis_type IN ('pdf_image', 'video_frame')
+            )::bigint AS derived_rows
+        FROM media_analysis
+        """
+    )
+    return dict(row or {})
+
+
+async def _media_coverage_counts(conn, *, exact: bool = False) -> dict:
+    if exact:
+        return await _media_coverage_counts_exact(conn)
+
+    totals = await _estimated_media_totals(conn)
+    by_type = await _estimated_analysis_type_counts(conn, totals["rows_total"])
+    pdf_text_rows = by_type.get("pdf_text", 0)
+    ocr_rows = by_type.get("ocr_text", 0)
+    exif_rows = by_type.get("exif_gps", 0)
+    face_rows = max(by_type.get("face_embedding", 0), totals["with_face"])
+    return {
+        "rows_total": totals["rows_total"],
+        "items_total": totals["items_total"],
+        "pdf_text_rows": pdf_text_rows,
+        "pdf_text_with_text": pdf_text_rows,
+        "pdf_image_markers": by_type.get("pdf_embedded_image", 0),
+        "pdf_image_rows": by_type.get("pdf_image", 0),
+        "ocr_rows": ocr_rows,
+        "ocr_with_text": ocr_rows,
+        "video_frame_markers": by_type.get("video_frames", 0),
+        "video_frame_rows": by_type.get("video_frame", 0),
+        "face_rows": face_rows,
+        "exif_rows": exif_rows,
+        "exif_with_gps": max(totals["with_gps"], min(exif_rows, totals["with_gps"])),
+        "phash_rows": max(by_type.get("phash", 0), totals["with_phash"]),
+        "derived_rows": totals["derived"],
+    }
+
+
+async def _media_contact_signal_counts(conn) -> tuple[int, list[dict]]:
+    rows = await conn.fetch(
+        """
+        SELECT COALESCE(source_column, 'unknown') AS source_column,
+               signal_type,
+               COUNT(*)::bigint AS n
+        FROM identity_signals
+        WHERE source_table = 'media_items'
+          AND source_column = ANY($1::text[])
+          AND signal_type = ANY($2::text[])
+        GROUP BY source_column, signal_type
+        ORDER BY n DESC, source_column, signal_type
+        """,
+        ["pdf_text", "ocr_text"],
+        ["email_match", "cross_platform_link", "phone_match", "shared_website"],
+    )
+    by_source_column = [
+        {
+            "source_column": r["source_column"],
+            "signal_type": r["signal_type"],
+            "n": int(r["n"] or 0),
+        }
+        for r in rows
+    ]
+    return sum(r["n"] for r in by_source_column), by_source_column
 
 
 def _row_to_dict(r) -> dict:
@@ -433,6 +568,84 @@ async def media_stats():
             by_att.get("content_type", {}).get("freqs"),
             "content_type",
         ),
+    }
+
+
+@router.get("/media/coverage")
+async def media_coverage(exact: bool = Query(False)):
+    """Production coverage for media/PDF analysis surfaces.
+
+    The default path uses planner/index estimates so the dashboard stays
+    responsive while full-resolution media jobs are active. `exact=true` keeps a
+    bounded audit path for maintenance checks.
+    """
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        counts = await _media_coverage_counts(conn, exact=exact)
+        contact_total, contact_breakdown = await _media_contact_signal_counts(conn)
+
+    coverage = [
+        _coverage_item(
+            "pdf_text",
+            "PDF text",
+            _int_row(counts, "pdf_text_with_text"),
+            processed=_int_row(counts, "pdf_text_rows"),
+            basis="media_analysis.analysis_type='pdf_text'",
+        ),
+        _coverage_item(
+            "pdf_images",
+            "PDF embedded images",
+            _int_row(counts, "pdf_image_rows"),
+            processed=_int_row(counts, "pdf_image_markers"),
+            basis="media_analysis.analysis_type IN ('pdf_embedded_image','pdf_image')",
+        ),
+        _coverage_item(
+            "ocr_text",
+            "OCR text",
+            _int_row(counts, "ocr_with_text"),
+            processed=_int_row(counts, "ocr_rows"),
+            basis="media_analysis.analysis_type='ocr_text'",
+        ),
+        _coverage_item(
+            "video_frames",
+            "Video frames",
+            _int_row(counts, "video_frame_rows"),
+            processed=_int_row(counts, "video_frame_markers"),
+            basis="media_analysis.analysis_type IN ('video_frames','video_frame')",
+        ),
+        _coverage_item(
+            "faces",
+            "Faces",
+            _int_row(counts, "face_rows"),
+            basis="media_analysis.face_embedding IS NOT NULL",
+        ),
+        _coverage_item(
+            "exif_gps",
+            "EXIF/GPS",
+            _int_row(counts, "exif_with_gps"),
+            processed=_int_row(counts, "exif_rows"),
+            basis="media_analysis.analysis_type='exif_gps'",
+        ),
+        _coverage_item(
+            "contact_signals",
+            "Contact signals",
+            contact_total,
+            basis="identity_signals.source_table='media_items'",
+        ),
+    ]
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "estimated": not exact,
+        "rows_total": _int_row(counts, "rows_total"),
+        "items_total": _int_row(counts, "items_total"),
+        "derived_rows": _int_row(counts, "derived_rows"),
+        "phash_rows": _int_row(counts, "phash_rows"),
+        "coverage": coverage,
+        "contact_signals": {
+            "total": contact_total,
+            "by_source_column": contact_breakdown,
+        },
     }
 
 

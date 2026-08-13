@@ -8,7 +8,7 @@ from src.eval.metrics import (
     mrr_at_k,
     recall_at_k,
 )
-from src.eval.runner import _json_obj, materialize_seed_items, run_eval, seed_eval_sets
+from src.eval.runner import _json_obj, harvest_production_eval_items, materialize_seed_items, run_eval, seed_eval_sets
 
 
 def test_classification_metrics_reports_precision_recall_f1():
@@ -119,6 +119,51 @@ def test_run_eval_persists_prediction_rows():
     assert len(conn.prediction_rows) == 1
     assert json.loads(conn.prediction_rows[0][3])["recall_at_20"] == 1.0
     assert conn.prediction_rows[0][4] is True
+
+
+def test_harvest_production_eval_items_seeds_real_label_sources():
+    class Conn:
+        def __init__(self):
+            self.sets = []
+            self.items = []
+
+        async def fetchval(self, sql, *args):
+            if "to_regclass" in sql:
+                return args[0] in {"identity_labels", "timeline_text_features"}
+            if "INSERT INTO eval_sets" in sql:
+                self.sets.append(args)
+                return "00000000-0000-0000-0000-000000000001"
+            raise AssertionError(sql)
+
+        async def fetch(self, sql, *args):
+            if "FROM identity_labels" in sql:
+                return [{
+                    "entity_a": "00000000-0000-0000-0000-0000000000a1",
+                    "entity_b": "00000000-0000-0000-0000-0000000000b1",
+                    "label": 1,
+                    "source": "dashboard",
+                    "created_at": None,
+                }]
+            if "FROM timeline_text_features" in sql:
+                return [{
+                    "event_id": "00000000-0000-0000-0000-000000000001",
+                    "sentiment_label": "negative",
+                }]
+            raise AssertionError(sql)
+
+        async def execute(self, sql, *args):
+            assert "INSERT INTO eval_items" in sql
+            self.items.append(args)
+            return "INSERT 0 1"
+
+    conn = Conn()
+    report = asyncio.run(harvest_production_eval_items(conn, limit_per_task=10))
+
+    assert report["sets"] == 2
+    assert report["items"] == 2
+    assert report["by_task"] == {"identity": 1, "sentiment": 1}
+    assert any(args[0] == "production_identity_labels_v1" for args in conn.sets)
+    assert any("production_sentiment" in args[4] for args in conn.items)
 
 
 def test_default_seed_factories_cover_core_tasks():

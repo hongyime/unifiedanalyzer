@@ -220,6 +220,8 @@ export interface MultilingualStatus {
   skipped_translation_rows: number
   languages: { language: string; count: number }[]
   failures: { reason: string; count: number }[]
+  language_detector?: Record<string, unknown>
+  translation_worker?: Record<string, unknown>
 }
 
 export interface StreamAlertStatus {
@@ -309,6 +311,33 @@ export interface CollectorCoverageResponse {
   snapshot_stale?: boolean
   collector_skipped?: boolean
   error?: string
+}
+
+export interface CollectorDashboardSurface {
+  reachable: boolean
+  available: boolean
+  payload: Record<string, unknown> | null
+  error?: string
+}
+
+export interface CollectorProductionSummary {
+  instagram_stuck_stage?: string | null
+  instagram_cooldown_active?: boolean
+  realtime_queue_depth?: number
+  realtime_failed_sources?: { source: string; failed: number; too_large: number; local_fallback: number }[]
+  domain_pacing_sources?: number
+  domain_robots_blocked?: number
+  domain_429?: number
+  quota_snapshots?: number
+  quota_paused?: number
+  optional_rollout_action?: string | null
+  optional_rollout_can_proceed?: boolean | null
+}
+
+export interface CollectorProductionStatus {
+  collector_dashboard: string
+  surfaces: Record<string, CollectorDashboardSurface>
+  summary: CollectorProductionSummary
 }
 
 export interface GraphExplainEdge {
@@ -694,6 +723,28 @@ export interface MediaStats {
   by_content_type: { content_type: string; n: number }[]
 }
 
+export interface MediaCoverageItem {
+  key: string
+  label: string
+  status: string
+  count: number
+  processed: number
+  basis: string
+}
+
+export interface MediaCoverage {
+  generated_at: string
+  rows_total: number
+  items_total: number
+  derived_rows: number
+  phash_rows: number
+  coverage: MediaCoverageItem[]
+  contact_signals: {
+    total: number
+    by_source_column: { source_column: string; signal_type: string; n: number }[]
+  }
+}
+
 export interface MediaFilters {
   analysis_types: string[]
   sources: string[]
@@ -992,6 +1043,7 @@ export const api = {
 
   getCollectorHealth: () => get<{ collectors: CollectorInfo[] }>('/collector/health'),
   getCollectorCoverage: () => get<CollectorCoverageResponse>('/collector/coverage'),
+  getCollectorProductionStatus: () => get<CollectorProductionStatus>('/collector/production-status'),
 
   getStreamAlertStatus: () => get<StreamAlertStatus>('/alerts/stream/status'),
   getAlertFingerprints: (status = '', alertType = '', limit = 50) => {
@@ -1197,6 +1249,7 @@ export const api = {
   getIntelligence: (entityId: string) => get<IntelligenceReport>(`/entities/${entityId}/intelligence`),
 
   getMediaStats: () => get<MediaStats>('/media/stats'),
+  getMediaCoverage: () => get<MediaCoverage>('/media/coverage'),
   getMediaFilters: () => get<MediaFilters>('/media/filters'),
   browseMedia: (params: MediaBrowseParams = {}) => {
     const q = new URLSearchParams()

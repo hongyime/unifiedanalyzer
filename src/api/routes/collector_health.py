@@ -50,6 +50,17 @@ async def _fetch_collector_live() -> dict[str, Any] | None:
         return None
 
 
+async def _fetch_collector_dashboard_endpoint(path: str, *, timeout: float | None = None) -> dict[str, Any]:
+    url = _collector_dashboard_url() + path
+    request_timeout = timeout if timeout is not None else float(os.getenv("COLLECTOR_DASHBOARD_TIMEOUT_SECONDS", "4"))
+    try:
+        payload = await asyncio.to_thread(_fetch_json_sync, url, request_timeout)
+        return {"reachable": True, "available": bool(payload.get("available", True)), "payload": payload}
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        logger.info("collector dashboard endpoint unavailable %s: %s", path, exc.__class__.__name__)
+        return {"reachable": False, "available": False, "error": exc.__class__.__name__, "payload": None}
+
+
 async def _acquire_collector_conn(pool):
     timeout = float(os.getenv("ANALYZER_COLLECTOR_HEALTH_DB_ACQUIRE_TIMEOUT_SECONDS", "3"))
     return await asyncio.wait_for(pool.acquire(), timeout=timeout)
@@ -77,6 +88,21 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
         if isinstance(row, dict):
             return row.get(key, default)
         return default
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _targets_by_source(targets: list[Any]) -> dict[str, list[dict[str, Any]]]:
@@ -215,6 +241,46 @@ async def _fetch_collector_db_snapshot() -> tuple[list[Any], list[Any]]:
             await pool.release(conn)
 
 
+def _collector_production_summary(surfaces: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    instagram = _as_dict(surfaces.get("instagram_health", {}).get("payload"))
+    domain = _as_dict(surfaces.get("domain_pacing", {}).get("payload"))
+    quotas = _as_dict(surfaces.get("api_quotas", {}).get("payload"))
+    realtime = _as_dict(surfaces.get("realtime_feed", {}).get("payload"))
+    rollout = _as_dict(surfaces.get("optional_rollout", {}).get("payload"))
+
+    quota_snapshots = _as_list(quotas.get("snapshots"))
+    paused_quotas = [row for row in quota_snapshots if isinstance(row, dict) and row.get("paused")]
+    source_counters = _as_dict(realtime.get("source_counters"))
+    realtime_failed_sources = []
+    for source, counters in source_counters.items():
+        values = _as_dict(counters)
+        failed = _int_value(values.get("failed"))
+        too_large = _int_value(values.get("too_large"))
+        local_fallback = _int_value(values.get("local_fallback"))
+        if failed or too_large or local_fallback:
+            realtime_failed_sources.append({
+                "source": source,
+                "failed": failed,
+                "too_large": too_large,
+                "local_fallback": local_fallback,
+            })
+
+    domain_sources = [row for row in _as_list(domain.get("sources")) if isinstance(row, dict)]
+    return {
+        "instagram_stuck_stage": instagram.get("stuck_stage"),
+        "instagram_cooldown_active": bool(_as_dict(instagram.get("cooldown")).get("active")),
+        "realtime_queue_depth": _int_value(realtime.get("queue_depth")),
+        "realtime_failed_sources": realtime_failed_sources,
+        "domain_pacing_sources": len(domain_sources),
+        "domain_robots_blocked": sum(_int_value(row.get("robots_blocked")) for row in domain_sources),
+        "domain_429": sum(_int_value(row.get("http_429")) for row in domain_sources),
+        "quota_snapshots": len(quota_snapshots),
+        "quota_paused": len(paused_quotas),
+        "optional_rollout_action": rollout.get("recommended_action"),
+        "optional_rollout_can_proceed": rollout.get("can_proceed"),
+    }
+
+
 @router.get("/collector/health")
 async def collector_health():
     matrix = await _fetch_collector_source_matrix()
@@ -308,6 +374,29 @@ async def collector_health():
         "collector_db": "connected",
         "collector_dashboard": "unreachable",
         "source": "collector_db",
+    }
+
+
+@router.get("/collector/production-status")
+async def collector_production_status():
+    endpoints = {
+        "instagram_health": "/instagram/health",
+        "domain_pacing": "/domain-pacing/status",
+        "api_quotas": "/api-quotas/status",
+        "realtime_feed": "/media/realtime-feed/status",
+        "optional_rollout": "/optional-rollout/status?feature=spiderfoot&stage=dry-run",
+    }
+    timeout = float(os.getenv("COLLECTOR_DASHBOARD_PRODUCTION_TIMEOUT_SECONDS", "15"))
+    fetched = await asyncio.gather(*[
+        _fetch_collector_dashboard_endpoint(path, timeout=timeout)
+        for path in endpoints.values()
+    ])
+    surfaces = dict(zip(endpoints.keys(), fetched))
+    reachable = sum(1 for item in surfaces.values() if item.get("reachable"))
+    return {
+        "collector_dashboard": "ok" if reachable else "unreachable",
+        "surfaces": surfaces,
+        "summary": _collector_production_summary(surfaces),
     }
 
 

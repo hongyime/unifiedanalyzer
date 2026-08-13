@@ -13,6 +13,12 @@ type Overview = Awaited<ReturnType<typeof api.getGraphOverview>>
 type Confidence = 'all' | 'hard' | 'strong' | 'weak' | 'context-only'
 
 const CONFIDENCE: Confidence[] = ['all', 'hard', 'strong', 'weak', 'context-only']
+const DEFAULT_FILTERS = {
+  confidence: 'all' as Confidence,
+  relationshipType: '',
+  source: '',
+  includeContextOnly: false,
+}
 
 function bucketStatus(bucket: string): Parameters<typeof StatusBadge>[0]['status'] {
   if (bucket === 'hard' || bucket === 'strong') return 'success'
@@ -58,14 +64,9 @@ export default function GraphPage() {
   const [error, setError] = useState('')
   const [filters, setFilters] = useState(() => {
     try {
-      return JSON.parse(window.localStorage.getItem('ua:graph:filters') || '{}') as {
-        confidence: Confidence
-        relationshipType: string
-        source: string
-        includeContextOnly: boolean
-      }
+      return { ...DEFAULT_FILTERS, ...JSON.parse(window.localStorage.getItem('ua:graph:filters') || '{}') }
     } catch {
-      return { confidence: 'all', relationshipType: '', source: '', includeContextOnly: false }
+      return DEFAULT_FILTERS
     }
   })
   const [pathForm, setPathForm] = useState({ from: '', to: '', hops: '3' })

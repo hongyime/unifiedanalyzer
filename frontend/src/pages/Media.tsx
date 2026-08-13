@@ -2,8 +2,8 @@ import { useState } from 'react'
 import {
   MapPin, FileText, ScanFace, Layers, X, ImageOff,
 } from 'lucide-react'
-import { useMediaStats, useMediaFilters, useMediaBrowse } from '../hooks'
-import { MediaItem, MediaBrowseParams } from '../api'
+import { useMediaStats, useMediaCoverage, useMediaFilters, useMediaBrowse } from '../hooks'
+import { MediaItem, MediaBrowseParams, MediaCoverageItem } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { LoadingSpinner } from '../components/ui/LoadingSpinner'
@@ -16,6 +16,22 @@ function StatTile({ label, value }: { label: string; value: number | string }) {
     <div className="rounded-lg border border-border bg-card p-4">
       <div className="text-2xl font-semibold">{typeof value === 'number' ? value.toLocaleString() : value}</div>
       <div className="text-xs text-muted">{label}</div>
+    </div>
+  )
+}
+
+function CoverageTile({ item }: { item: MediaCoverageItem }) {
+  const secondary = item.processed !== item.count ? `${item.processed.toLocaleString()} processed` : item.basis
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="truncate text-sm font-medium">{item.label}</div>
+        <span className={item.status === 'covered' ? 'text-xs text-green' : 'text-xs text-muted'}>
+          {item.status}
+        </span>
+      </div>
+      <div className="text-2xl font-semibold">{item.count.toLocaleString()}</div>
+      <div className="truncate text-xs text-muted" title={secondary}>{secondary}</div>
     </div>
   )
 }
@@ -145,6 +161,7 @@ export default function MediaPage() {
   const [selected, setSelected] = useState<MediaItem | null>(null)
 
   const stats = useMediaStats()
+  const coverage = useMediaCoverage()
   const filters = useMediaFilters()
   const browse = useMediaBrowse(params)
 
@@ -171,6 +188,24 @@ export default function MediaPage() {
           <StatTile label="with text" value={totals.with_text} />
           <StatTile label="with face" value={totals.with_face} />
           <StatTile label="derived" value={totals.derived} />
+        </div>
+      )}
+
+      {coverage.data && (
+        <div className="mb-6">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-base font-semibold">Production Coverage</h2>
+            <div className="flex flex-wrap gap-2 text-xs text-muted">
+              <span>{coverage.data.derived_rows.toLocaleString()} derived</span>
+              <span>{coverage.data.phash_rows.toLocaleString()} pHash</span>
+              <span>{coverage.data.contact_signals.total.toLocaleString()} contacts</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+            {coverage.data.coverage.map((item) => (
+              <CoverageTile key={item.key} item={item} />
+            ))}
+          </div>
         </div>
       )}
 

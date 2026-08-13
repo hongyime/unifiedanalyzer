@@ -73,6 +73,23 @@ def _load_fasttext_model():
     return _fasttext_model
 
 
+def fasttext_runtime_status(*, load: bool = False) -> dict[str, Any]:
+    model_path = os.getenv("FASTTEXT_LID_MODEL_PATH", "").strip()
+    loaded = _fasttext_model is not None
+    if load and model_path:
+        loaded = _load_fasttext_model() is not None
+    return {
+        "detector_version": LANGUAGE_ID_VERSION,
+        "fasttext_configured": bool(model_path),
+        "fasttext_model_path": model_path or None,
+        "fasttext_load_attempted": bool(_fasttext_load_attempted),
+        "fasttext_loaded": loaded,
+        "fallback_detector": True,
+        "min_confidence": _env_float("LANGUAGE_ID_MIN_CONFIDENCE", 0.6),
+        "code_mix_secondary_confidence": _env_float("LANGUAGE_ID_CODE_MIX_SECONDARY_CONFIDENCE", 0.2),
+    }
+
+
 def _detect_fasttext(text: str) -> LanguageProfile | None:
     model = _load_fasttext_model()
     if model is None:

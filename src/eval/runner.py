@@ -15,6 +15,7 @@ from src.eval.metrics import (
 
 SUPPORTED_TASKS = {"search", "identity", "sentiment", "face", "location", "alerts"}
 DEFAULT_SEED_PATH = Path(__file__).with_name("seed_sets.json")
+DEFAULT_PRODUCTION_LABEL_LIMIT = 200
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -87,6 +88,243 @@ def _factory_items(item_set: dict[str, Any]) -> list[dict[str, Any]]:
 
 def materialize_seed_items(item_set: dict[str, Any]) -> list[dict[str, Any]]:
     return [*(item_set.get("items") or []), *_factory_items(item_set)]
+
+
+async def _table_exists(conn, table: str) -> bool:
+    try:
+        return bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table))
+    except Exception:
+        return False
+
+
+async def _ensure_eval_set(conn, *, name: str, task_type: str, description: str, dry_run: bool) -> str | None:
+    if dry_run:
+        return None
+    return await conn.fetchval(
+        """
+        INSERT INTO eval_sets (name, task_type, description)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (name) DO UPDATE SET
+            task_type = EXCLUDED.task_type,
+            description = EXCLUDED.description
+        RETURNING id
+        """,
+        name,
+        task_type,
+        description,
+    )
+
+
+async def _insert_eval_items(conn, set_id: str | None, items: list[dict[str, Any]], *, dry_run: bool) -> int:
+    if dry_run:
+        return len(items)
+    inserted = 0
+    for eval_item in items:
+        result = await conn.execute(
+            """
+            INSERT INTO eval_items (
+                set_id, input_json, expected_json, source_ref, label_source
+            )
+            SELECT $1::uuid, $2::jsonb, $3::jsonb, $4, $5
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM eval_items
+                WHERE set_id = $1::uuid
+                  AND COALESCE(source_ref, '') = COALESCE($4, '')
+            )
+            """,
+            set_id,
+            json.dumps(eval_item["input_json"]),
+            json.dumps(eval_item["expected_json"]),
+            eval_item.get("source_ref"),
+            eval_item.get("label_source"),
+        )
+        if result == "INSERT 0 1":
+            inserted += 1
+    return inserted
+
+
+async def harvest_production_eval_items(
+    conn,
+    *,
+    limit_per_task: int = DEFAULT_PRODUCTION_LABEL_LIMIT,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Seed bounded eval sets from real Analyzer labels when those tables exist."""
+    limit = max(1, min(int(limit_per_task or DEFAULT_PRODUCTION_LABEL_LIMIT), 1000))
+    sets = 0
+    items = 0
+    by_task: dict[str, int] = {}
+
+    async def seed(name: str, task_type: str, description: str, rows: list[dict[str, Any]]) -> None:
+        nonlocal sets, items
+        if not rows:
+            return
+        set_id = await _ensure_eval_set(conn, name=name, task_type=task_type, description=description, dry_run=dry_run)
+        written = await _insert_eval_items(conn, set_id, rows, dry_run=dry_run)
+        sets += 1
+        items += written
+        by_task[task_type] = by_task.get(task_type, 0) + written
+
+    if await _table_exists(conn, "timeline_translation_search"):
+        rows = await conn.fetch(
+            """
+            SELECT event_id::text, canonical_text, source
+            FROM timeline_translation_search
+            WHERE canonical_text IS NOT NULL
+              AND canonical_text <> ''
+            ORDER BY occurred_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+        await seed(
+            "production_search_labels_v1",
+            "search",
+            "Search labels harvested from timeline text rows.",
+            [
+                {
+                    "input_json": {"query": str(row["canonical_text"])[:120], "ranked_event_ids": [row["event_id"]]},
+                    "expected_json": {"event_ids": [row["event_id"]]},
+                    "source_ref": f"timeline_translation_search:{row['event_id']}",
+                    "label_source": "production_search_timeline",
+                }
+                for row in rows
+            ],
+        )
+
+    if await _table_exists(conn, "identity_labels"):
+        rows = await conn.fetch(
+            """
+            SELECT entity_a::text, entity_b::text, label, source, created_at
+            FROM identity_labels
+            ORDER BY created_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+        await seed(
+            "production_identity_labels_v1",
+            "identity",
+            "Identity eval labels harvested from dashboard/replay identity_labels.",
+            [
+                {
+                    "input_json": {"prediction": "same" if int(row["label"] or 0) == 1 else "different"},
+                    "expected_json": {"label": "same" if int(row["label"] or 0) == 1 else "different"},
+                    "source_ref": f"identity_labels:{row['entity_a']}:{row['entity_b']}",
+                    "label_source": f"production_identity:{row['source'] or 'unknown'}",
+                }
+                for row in rows
+            ],
+        )
+
+    if await _table_exists(conn, "timeline_text_features"):
+        rows = await conn.fetch(
+            """
+            SELECT event_id::text, sentiment_label
+            FROM timeline_text_features
+            WHERE sentiment_label IS NOT NULL
+              AND sentiment_label <> ''
+            ORDER BY processed_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+        await seed(
+            "production_sentiment_labels_v1",
+            "sentiment",
+            "Sentiment eval labels harvested from processed timeline text features.",
+            [
+                {
+                    "input_json": {"prediction": row["sentiment_label"]},
+                    "expected_json": {"label": row["sentiment_label"]},
+                    "source_ref": f"timeline_text_features:{row['event_id']}",
+                    "label_source": "production_sentiment_pipeline",
+                }
+                for row in rows
+            ],
+        )
+
+    if await _table_exists(conn, "entity_faces"):
+        rows = await conn.fetch(
+            """
+            SELECT face_id, entity_id::text, media_item_id, created_at
+            FROM entity_faces
+            ORDER BY created_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+        await seed(
+            "production_face_labels_v1",
+            "face",
+            "Face eval labels harvested from accepted entity_faces links.",
+            [
+                {
+                    "input_json": {"prediction": "match", "face_id": row["face_id"]},
+                    "expected_json": {"label": "match"},
+                    "source_ref": f"entity_faces:{row['entity_id']}:{row['face_id']}",
+                    "label_source": "production_face_entity_links",
+                }
+                for row in rows
+            ],
+        )
+
+    if await _table_exists(conn, "location_evidence"):
+        rows = await conn.fetch(
+            """
+            SELECT entity_id::text, evidence_key, status, source, updated_at
+            FROM location_evidence
+            WHERE status IN ('confirmed', 'rejected')
+            ORDER BY updated_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+        await seed(
+            "production_location_labels_v1",
+            "location",
+            "Location eval labels harvested from confirmed/rejected location evidence.",
+            [
+                {
+                    "input_json": {"prediction": "confirmed" if row["status"] == "confirmed" else "rejected"},
+                    "expected_json": {"label": "confirmed" if row["status"] == "confirmed" else "rejected"},
+                    "source_ref": f"location_evidence:{row['entity_id']}:{row['evidence_key']}",
+                    "label_source": f"production_location:{row['source'] or 'unknown'}",
+                }
+                for row in rows
+            ],
+        )
+
+    if await _table_exists(conn, "alert_fingerprints"):
+        rows = await conn.fetch(
+            """
+            SELECT fingerprint, status, alert_type, updated_at
+            FROM alert_fingerprints
+            ORDER BY updated_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+        await seed(
+            "production_alert_fixtures_v1",
+            "alerts",
+            "Alert eval fixtures harvested from stream alert fingerprints.",
+            [
+                {
+                    "input_json": {
+                        "fingerprint": row["fingerprint"],
+                        "prediction": "suppressed" if row["status"] == "suppressed" else "fired",
+                    },
+                    "expected_json": {"label": "suppressed" if row["status"] == "suppressed" else "fired"},
+                    "source_ref": f"alert_fingerprints:{row['fingerprint']}",
+                    "label_source": f"production_alert:{row['alert_type'] or 'unknown'}",
+                }
+                for row in rows
+            ],
+        )
+
+    return {"sets": sets, "items": items, "by_task": by_task, "dry_run": dry_run}
 
 
 def _prediction_for_row(task: str, row) -> tuple[dict[str, Any], dict[str, Any], bool | None, str | None]:
@@ -225,7 +463,14 @@ async def run_eval(conn, *, task: str, model_or_rule_version: str = "manual", dr
     }
 
 
-async def seed_eval_sets(conn, *, seed_path: str | Path | None = None, dry_run: bool = False) -> dict[str, Any]:
+async def seed_eval_sets(
+    conn,
+    *,
+    seed_path: str | Path | None = None,
+    dry_run: bool = False,
+    include_production_labels: bool = True,
+    production_limit_per_task: int = DEFAULT_PRODUCTION_LABEL_LIMIT,
+) -> dict[str, Any]:
     path = Path(seed_path) if seed_path else DEFAULT_SEED_PATH
     payload = json.loads(path.read_text(encoding="utf-8"))
     sets = payload if isinstance(payload, list) else payload.get("sets", [])
@@ -237,45 +482,29 @@ async def seed_eval_sets(conn, *, seed_path: str | Path | None = None, dry_run: 
             inserted_sets += 1
             inserted_items += len(items)
             continue
-        set_id = await conn.fetchval(
-            """
-            INSERT INTO eval_sets (name, task_type, description)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (name) DO UPDATE SET
-                task_type = EXCLUDED.task_type,
-                description = EXCLUDED.description
-            RETURNING id
-            """,
-            item_set["name"],
-            item_set["task_type"],
-            item_set.get("description"),
+        set_id = await _ensure_eval_set(
+            conn,
+            name=item_set["name"],
+            task_type=item_set["task_type"],
+            description=item_set.get("description"),
+            dry_run=False,
         )
         inserted_sets += 1
-        for eval_item in items:
-            result = await conn.execute(
-                """
-                INSERT INTO eval_items (
-                    set_id, input_json, expected_json, source_ref, label_source
-                )
-                SELECT $1::uuid, $2::jsonb, $3::jsonb, $4, $5
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM eval_items
-                    WHERE set_id = $1::uuid
-                      AND COALESCE(source_ref, '') = COALESCE($4, '')
-                )
-                """,
-                set_id,
-                json.dumps(eval_item["input_json"]),
-                json.dumps(eval_item["expected_json"]),
-                eval_item.get("source_ref"),
-                eval_item.get("label_source"),
-            )
-            if result == "INSERT 0 1":
-                inserted_items += 1
+        inserted_items += await _insert_eval_items(conn, set_id, items, dry_run=False)
+
+    production = {"sets": 0, "items": 0, "by_task": {}, "dry_run": dry_run}
+    if include_production_labels:
+        production = await harvest_production_eval_items(
+            conn,
+            limit_per_task=production_limit_per_task,
+            dry_run=dry_run,
+        )
     return {
         "seed_path": str(path),
         "dry_run": dry_run,
         "sets": inserted_sets,
         "items": inserted_items,
+        "production_sets": production["sets"],
+        "production_items": production["items"],
+        "production_by_task": production["by_task"],
     }
