@@ -63,8 +63,27 @@ export default function CollectorCoveragePage() {
       rateLimits24h: acc.rateLimits24h + Number(row.rate_limits_24h || 0),
       privateFailures: acc.privateFailures + Number(row.private_access_failures || 0),
       staleTargets: acc.staleTargets + Number(row.stale_targets || 0),
+      seenTargets: acc.seenTargets + Number(row.seen_targets_total || 0),
+      backfilledTargets: acc.backfilledTargets + Number(row.seen_targets_backfilled || 0),
+      pendingTargets: acc.pendingTargets + Number(row.seen_targets_pending || 0),
+      freshTargets: acc.freshTargets + Number(row.seen_targets_fresh || 0),
+      staleSeenTargets: acc.staleSeenTargets + Number(row.seen_targets_stale || 0),
+      newTargets: acc.newTargets + Number(row.seen_targets_newly_discovered || 0),
     }),
-    { rows24h: 0, media24h: 0, errors24h: 0, rateLimits24h: 0, privateFailures: 0, staleTargets: 0 },
+    {
+      rows24h: 0,
+      media24h: 0,
+      errors24h: 0,
+      rateLimits24h: 0,
+      privateFailures: 0,
+      staleTargets: 0,
+      seenTargets: 0,
+      backfilledTargets: 0,
+      pendingTargets: 0,
+      freshTargets: 0,
+      staleSeenTargets: 0,
+      newTargets: 0,
+    },
   )
 
   if (loading) return <LoadingSpinner label="Loading collector coverage..." />
@@ -111,6 +130,15 @@ export default function CollectorCoveragePage() {
         </Card>
       </div>
 
+      <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-6">
+        <MetricCard label="Seen targets" value={totals.seenTargets} />
+        <MetricCard label="Backfilled" value={totals.backfilledTargets} status="success" />
+        <MetricCard label="Pending" value={totals.pendingTargets} status={totals.pendingTargets ? 'warning' : 'success'} />
+        <MetricCard label="Fresh targets" value={totals.freshTargets} status="success" />
+        <MetricCard label="Stale targets" value={totals.staleSeenTargets} status={totals.staleSeenTargets ? 'error' : 'success'} />
+        <MetricCard label="New targets" value={totals.newTargets} />
+      </div>
+
       {rows.length === 0 ? (
         <EmptyState title="No coverage rows" description="Collector coverage snapshots have not been written yet." />
       ) : (
@@ -134,7 +162,9 @@ export default function CollectorCoveragePage() {
                   <th>Errors</th>
                   <th>Rate limits</th>
                   <th>Private fails</th>
-                  <th>Targets</th>
+                  <th>Seen</th>
+                  <th>Pending</th>
+                  <th>Fresh/Stale</th>
                 </tr>
               </thead>
               <tbody>
@@ -159,7 +189,11 @@ export default function CollectorCoveragePage() {
                       <td>{row.errors_24h.toLocaleString()}</td>
                       <td>{row.rate_limits_24h.toLocaleString()}</td>
                       <td>{row.private_access_failures.toLocaleString()}</td>
-                      <td>{row.stale_targets.toLocaleString()}</td>
+                      <td>{Number(row.seen_targets_total || 0).toLocaleString()}</td>
+                      <td>{Number(row.seen_targets_pending || 0).toLocaleString()}</td>
+                      <td>
+                        {Number(row.seen_targets_fresh || 0).toLocaleString()} / {Number(row.seen_targets_stale || 0).toLocaleString()}
+                      </td>
                     </tr>
                   )
                 })}

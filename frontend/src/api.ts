@@ -286,6 +286,12 @@ export interface CollectorCoverageRow {
   rate_limits_24h: number
   private_access_failures: number
   stale_targets: number
+  seen_targets_total?: number
+  seen_targets_backfilled?: number
+  seen_targets_pending?: number
+  seen_targets_fresh?: number
+  seen_targets_stale?: number
+  seen_targets_newly_discovered?: number
   created_at: string | null
 }
 

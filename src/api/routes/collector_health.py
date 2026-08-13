@@ -70,6 +70,15 @@ def _latest_iso(*values: Any) -> str | None:
     return max(parsed, key=lambda item: item[0])[1]
 
 
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (KeyError, TypeError):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return default
+
+
 def _targets_by_source(targets: list[Any]) -> dict[str, list[dict[str, Any]]]:
     out: dict[str, list[dict[str, Any]]] = {}
     for t in targets:
@@ -310,9 +319,7 @@ async def collector_coverage():
             rows = await conn.fetch(
                 """
                 SELECT DISTINCT ON (source)
-                       source, expected_cadence::text, latest_data_at, latest_run_at,
-                       status, rows_24h, media_24h, errors_24h, rate_limits_24h,
-                       private_access_failures, stale_targets, created_at
+                       *, expected_cadence::text AS expected_cadence_text
                 FROM collection_coverage_snapshots
                 ORDER BY source, created_at DESC
                 """
@@ -323,7 +330,7 @@ async def collector_coverage():
     for row in rows:
         sources.append({
             "source": row["source"],
-            "expected_cadence": row["expected_cadence"],
+            "expected_cadence": _row_get(row, "expected_cadence_text", row["expected_cadence"]),
             "latest_data_at": row["latest_data_at"].isoformat() if row["latest_data_at"] else None,
             "latest_run_at": row["latest_run_at"].isoformat() if row["latest_run_at"] else None,
             "status": row["status"],
@@ -333,6 +340,12 @@ async def collector_coverage():
             "rate_limits_24h": row["rate_limits_24h"],
             "private_access_failures": row["private_access_failures"],
             "stale_targets": row["stale_targets"],
+            "seen_targets_total": int(_row_get(row, "seen_targets_total", 0) or 0),
+            "seen_targets_backfilled": int(_row_get(row, "seen_targets_backfilled", 0) or 0),
+            "seen_targets_pending": int(_row_get(row, "seen_targets_pending", 0) or 0),
+            "seen_targets_fresh": int(_row_get(row, "seen_targets_fresh", 0) or 0),
+            "seen_targets_stale": int(_row_get(row, "seen_targets_stale", 0) or 0),
+            "seen_targets_newly_discovered": int(_row_get(row, "seen_targets_newly_discovered", 0) or 0),
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         })
     fresh = sum(1 for row in sources if row["status"] == "fresh")
