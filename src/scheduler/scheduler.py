@@ -15,6 +15,7 @@ from src.pipeline.incremental_runner import (
 from src.pipeline.collector_priority_hints import export_collector_priority_hints
 from src.pipeline.identity_truth import promote_spiderfoot_truth
 from src.pipeline.indicator_export import (
+    export_pending_supabase_indicators,
     extract_indicators_from_text,
     resolve_domain_to_ips,
     upsert_normalized_indicators,
@@ -201,6 +202,12 @@ async def _stage_identity_truth_and_indicators(run_type: str, stats: dict | None
                     "dns_domains_checked": min(len(set(domain_values)), dns_cap),
                     "dns_ipv4_written": dns_written,
                 }
+                supabase_mode = os.getenv("SUPABASE_INDICATOR_EXPORT_MODE", "disabled").strip().lower()
+                if supabase_mode not in {"", "disabled", "off", "0", "false"}:
+                    summary["supabase_export"] = await export_pending_supabase_indicators(
+                        conn,
+                        limit=_env_int("ANALYZER_SUPABASE_EXPORT_BATCH_SIZE", 100, minimum=1, maximum=1000),
+                    )
     except Exception as exc:
         logger.warning("%s identity truth/indicator staging failed: %s", run_type, exc, exc_info=True)
         return {"error": str(exc)[:300]}

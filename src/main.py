@@ -139,6 +139,19 @@ def main():
         help="Upsert hints into the analyzer collector_priority_hints table",
     )
     priority_hints.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    supabase_export = sub.add_parser(
+        "supabase-export",
+        help="Export pending normalized indicators to Supabase",
+    )
+    supabase_export.add_argument("--limit", type=int, default=100, help="Maximum rows to export")
+    supabase_export.add_argument("--dry-run", action="store_true", help="Preview pending export rows")
+    supabase_export.add_argument("--write", action="store_true", help="Write even when env mode is disabled")
+    supabase_export.add_argument(
+        "--no-ensure-schema",
+        action="store_true",
+        help="Skip CREATE TABLE IF NOT EXISTS on the remote Supabase database",
+    )
+    supabase_export.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     hard_reset = sub.add_parser(
         "hard-reset-entities",
         help="DESTRUCTIVE: wipe all entities+links (CASCADE wipes faces/signals) then rebuild",
@@ -472,6 +485,38 @@ def main():
                     print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
                 else:
                     print(report.to_text())
+            finally:
+                await close_pools()
+
+        asyncio.run(_run())
+
+    elif args.command == "supabase-export":
+        from src.db.connection import init_pools, close_pools, get_analyzer_pool
+        from src.pipeline.indicator_export import export_pending_supabase_indicators
+
+        async def _run():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                pool = get_analyzer_pool()
+                async with pool.acquire() as conn:
+                    report = await export_pending_supabase_indicators(
+                        conn,
+                        limit=args.limit,
+                        dry_run=args.dry_run,
+                        mode="postgres_direct" if args.write else None,
+                        ensure_schema=not args.no_ensure_schema,
+                        ensure_schema_when_empty=args.write and not args.no_ensure_schema,
+                    )
+                if args.json:
+                    print(json.dumps(report, indent=2, sort_keys=True, default=str))
+                else:
+                    print(
+                        "Supabase indicator export: "
+                        f"{report['status']} selected={report['selected']} "
+                        f"exported={report['exported']} method={report['write_method']}"
+                    )
+                if report.get("status") == "error":
+                    sys.exit(2)
             finally:
                 await close_pools()
 

@@ -6,8 +6,11 @@ import json
 import os
 import re
 import socket
+import uuid
 from dataclasses import dataclass
 from typing import Any, Iterable
+
+import asyncpg
 
 
 EMAIL_RE = re.compile(r"(?<![\w.+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?![\w.-])")
@@ -16,6 +19,62 @@ IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 PHONE_RE = re.compile(r"(?<!\d)(\+?\d[\d\s().-]{6,}\d)(?!\d)")
 USERNAME_RE = re.compile(r"(?<![\w@])@([A-Za-z0-9._-]{2,80})")
 QUOTED_FULL_NAME_RE = re.compile(r'"([A-Z][A-Za-z\' -]{1,80}\s+[A-Z][A-Za-z\' -]{1,80})"')
+SUPABASE_REMOTE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS normalized_indicators (
+    id UUID PRIMARY KEY,
+    indicator_type VARCHAR(30) NOT NULL,
+    normalized_value TEXT NOT NULL,
+    display_value TEXT,
+    source_families TEXT[] NOT NULL DEFAULT '{}',
+    evidence_count INT NOT NULL DEFAULT 0,
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    first_seen_at TIMESTAMP WITH TIME ZONE,
+    last_seen_at TIMESTAMP WITH TIME ZONE,
+    metadata JSONB NOT NULL DEFAULT '{}',
+    exported_from TEXT NOT NULL DEFAULT 'unifiedanalyzer',
+    local_created_at TIMESTAMP WITH TIME ZONE,
+    local_updated_at TIMESTAMP WITH TIME ZONE,
+    exported_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(indicator_type, normalized_value)
+);
+CREATE INDEX IF NOT EXISTS idx_normalized_indicators_type_last_seen
+    ON normalized_indicators(indicator_type, last_seen_at DESC);
+ALTER TABLE normalized_indicators ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE normalized_indicators FROM anon, authenticated;
+"""
+
+SUPABASE_REMOTE_UPSERT_SQL = """
+INSERT INTO normalized_indicators (
+    id, indicator_type, normalized_value, display_value, source_families,
+    evidence_count, confidence, first_seen_at, last_seen_at, metadata,
+    exported_from, local_created_at, local_updated_at, exported_at
+)
+VALUES (
+    $1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10::jsonb,
+    'unifiedanalyzer', $11, $12, NOW()
+)
+ON CONFLICT (indicator_type, normalized_value) DO UPDATE SET
+    display_value = COALESCE(EXCLUDED.display_value, normalized_indicators.display_value),
+    source_families = (
+        SELECT ARRAY(
+            SELECT DISTINCT unnest(normalized_indicators.source_families || EXCLUDED.source_families)
+            ORDER BY 1
+        )
+    ),
+    evidence_count = GREATEST(normalized_indicators.evidence_count, EXCLUDED.evidence_count),
+    confidence = GREATEST(normalized_indicators.confidence, EXCLUDED.confidence),
+    first_seen_at = LEAST(
+        COALESCE(normalized_indicators.first_seen_at, EXCLUDED.first_seen_at),
+        COALESCE(EXCLUDED.first_seen_at, normalized_indicators.first_seen_at)
+    ),
+    last_seen_at = GREATEST(
+        COALESCE(normalized_indicators.last_seen_at, EXCLUDED.last_seen_at),
+        COALESCE(EXCLUDED.last_seen_at, normalized_indicators.last_seen_at)
+    ),
+    metadata = normalized_indicators.metadata || EXCLUDED.metadata,
+    local_updated_at = EXCLUDED.local_updated_at,
+    exported_at = NOW()
+"""
 
 
 @dataclass(frozen=True)
@@ -222,10 +281,10 @@ def supabase_export_config() -> dict[str, Any]:
     secret_key_configured = bool(os.getenv("SUPABASE_SECRET_KEY"))
     database_url_configured = bool(os.getenv("SUPABASE_DATABASE_URL") or os.getenv("SUPABASE_DB_URL"))
     publishable_configured = bool(os.getenv("SUPABASE_PUBLISHABLE_KEY") or os.getenv("SUPABASE_ANON_KEY"))
-    if service_role_configured or secret_key_configured:
-        write_method = "data_api_secret"
-    elif database_url_configured:
+    if database_url_configured:
         write_method = "postgres_direct"
+    elif service_role_configured or secret_key_configured:
+        write_method = "data_api_secret"
     else:
         write_method = "not_configured"
     return {
@@ -241,3 +300,146 @@ def supabase_export_config() -> dict[str, Any]:
         "free_tier_db_budget_mb": 500,
         "payload": "normalized_indicators_only",
     }
+
+
+def _supabase_mode(mode: str | None = None) -> str:
+    return (mode or os.getenv("SUPABASE_INDICATOR_EXPORT_MODE", "disabled")).strip().lower()
+
+
+def _supabase_database_url(database_url: str | None = None) -> str | None:
+    return database_url or os.getenv("SUPABASE_DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+
+
+def _export_params(row: Any) -> tuple:
+    return (
+        uuid.UUID(str(row["id"])),
+        row["indicator_type"],
+        row["normalized_value"],
+        row["display_value"],
+        list(row["source_families"] or []),
+        int(row["evidence_count"] or 0),
+        float(row["confidence"] or 0),
+        row["first_seen_at"],
+        row["last_seen_at"],
+        json.dumps(row["metadata"] or {}, default=str),
+        row["created_at"],
+        row["updated_at"],
+    )
+
+
+async def _mark_exported(conn, ids: list[uuid.UUID], *, write_method: str) -> None:
+    if not ids:
+        return
+    await conn.execute(
+        """
+        UPDATE normalized_indicators
+        SET export_status = 'exported',
+            exported_at = NOW(),
+            updated_at = NOW(),
+            metadata = metadata || jsonb_build_object(
+                'supabase_export',
+                jsonb_build_object('write_method', $2::text, 'exported_at', NOW())
+            )
+        WHERE id = ANY($1::uuid[])
+        """,
+        ids,
+        write_method,
+    )
+
+
+async def _mark_export_retry(conn, ids: list[uuid.UUID], error: str) -> None:
+    if not ids:
+        return
+    await conn.execute(
+        """
+        UPDATE normalized_indicators
+        SET export_status = 'retry',
+            updated_at = NOW(),
+            metadata = metadata || jsonb_build_object(
+                'supabase_export_error',
+                jsonb_build_object('message', LEFT($2::text, 500), 'at', NOW())
+            )
+        WHERE id = ANY($1::uuid[])
+        """,
+        ids,
+        error,
+    )
+
+
+async def export_pending_supabase_indicators(
+    conn,
+    *,
+    limit: int = 100,
+    dry_run: bool = False,
+    mode: str | None = None,
+    ensure_schema: bool = True,
+    ensure_schema_when_empty: bool = False,
+    database_url: str | None = None,
+    remote_conn=None,
+) -> dict[str, Any]:
+    """Export compact normalized indicators to Supabase via direct Postgres."""
+    mode_value = _supabase_mode(mode)
+    capped = max(1, min(int(limit or 100), 1000))
+    rows = await conn.fetch(
+        """
+        SELECT id::text, indicator_type, normalized_value, display_value,
+               source_families, evidence_count, confidence,
+               first_seen_at, last_seen_at, metadata, created_at, updated_at
+        FROM normalized_indicators
+        WHERE supabase_exportable = TRUE
+          AND export_status IN ('pending', 'retry')
+        ORDER BY updated_at ASC
+        LIMIT $1
+        """,
+        capped,
+    )
+    ids = [uuid.UUID(str(row["id"])) for row in rows]
+    result: dict[str, Any] = {
+        "status": "dry_run" if dry_run else "ok",
+        "mode": mode_value,
+        "write_method": "postgres_direct",
+        "selected": len(rows),
+        "exported": 0,
+        "raw_mirror": False,
+        "payload": "normalized_indicators_only",
+    }
+    if dry_run or mode_value in {"dry-run", "dry_run", "preview"}:
+        result["status"] = "dry_run"
+        return result
+    if mode_value in {"", "disabled", "off", "0", "false"}:
+        result["status"] = "skipped"
+        result["reason"] = "mode_disabled"
+        return result
+    if mode_value not in {"postgres_direct", "direct", "enabled", "write", "on", "1", "true"}:
+        result["status"] = "skipped"
+        result["reason"] = f"unsupported_mode:{mode_value}"
+        return result
+    if not rows and not (ensure_schema and ensure_schema_when_empty):
+        return result
+
+    dsn = _supabase_database_url(database_url)
+    owns_remote = remote_conn is None
+    remote = remote_conn
+    try:
+        if remote is None:
+            if not dsn:
+                raise RuntimeError("SUPABASE_DATABASE_URL is not configured")
+            remote = await asyncpg.connect(dsn, timeout=float(os.getenv("SUPABASE_CONNECT_TIMEOUT_SECONDS", "15")))
+        if ensure_schema:
+            await remote.execute(SUPABASE_REMOTE_TABLE_SQL)
+            result["schema_ensured"] = True
+        if not rows:
+            return result
+        await remote.executemany(SUPABASE_REMOTE_UPSERT_SQL, [_export_params(row) for row in rows])
+        await _mark_exported(conn, ids, write_method="postgres_direct")
+    except Exception as exc:  # noqa: BLE001 - exporter must report and leave retry state
+        await _mark_export_retry(conn, ids, str(exc))
+        result["status"] = "error"
+        result["error"] = str(exc)[:500]
+        return result
+    finally:
+        if owns_remote and remote is not None:
+            await remote.close()
+
+    result["exported"] = len(rows)
+    return result

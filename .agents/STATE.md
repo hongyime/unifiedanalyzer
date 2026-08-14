@@ -1,27 +1,24 @@
 # UnifiedAnalyzer Agent State
 
-Updated: 2026-08-14 02:28 UTC / 2026-08-14 10:28 SGT
+Updated: 2026-08-14 10:02 UTC / 2026-08-14 18:02 SGT
 
-Current task status: Analyzer production-completion slice implemented, schema applied in Docker, focused tests passed, live API routes verified, and changes committed/pushed to `main` as `b596a0e`. Follow-up Supabase local env config was added in ignored `.env`; status now recognizes direct Postgres credentials as `postgres_direct`.
+Current task status: Supabase direct-Postgres compact indicator export is implemented and verified against the remote project. Focused source checks passed. Container recreate/live endpoint readback is still pending because Docker Desktop API calls and localhost service HTTP checks are currently hanging or resetting.
 
 Implemented in this slice:
-- Added `identity_truth_assertions` schema for Analyzer-owned `auto_truth` assertions with evidence signal IDs and corroboration summaries.
-- Added `normalized_indicators` schema for compact Supabase-ready exports of domains, IPv4s, emails, E.164 phones, usernames, and quoted full names.
-- Added `src.pipeline.identity_truth`: SpiderFoot/recon evidence is weak lead only and can promote to `auto_truth` only after an independent hard signal corroborates the same entity/value.
-- Added `src.pipeline.indicator_export`: bounded extraction/normalization for indicators plus optional domain-to-IPv4 DNS expansion.
-- Added export/status routes: `/api/identity/truth/status`, `/api/indicators/export/supabase/status`, and `/api/indicators/export/supabase/preview`; previews hash values and do not return raw private text.
-- Wired bounded identity-truth and indicator staging into the scheduler after successful incremental/full-resolution runs.
+- Added `python -m src.main supabase-export` with `--dry-run`, `--write`, schema ensure control, and JSON output.
+- Added `export_pending_supabase_indicators` for pending/retry `normalized_indicators`: direct Postgres upsert, idempotent remote conflict handling, local exported/retry marking, and bounded batch size.
+- Wired scheduler export when `SUPABASE_INDICATOR_EXPORT_MODE` is enabled.
+- Updated Supabase config detection to prefer direct Postgres credentials when present.
+- Added non-secret `.env.example` placeholders. Local ignored `.env` now uses `SUPABASE_INDICATOR_EXPORT_MODE=postgres_direct` and `ANALYZER_SUPABASE_EXPORT_BATCH_SIZE=100`.
 
 Verification completed:
-- Passed focused Analyzer tests for identity truth, indicator extraction, schema declarations, scorer/registry compatibility, entity routes, operational routes, and Collector priority hints.
-- Passed Python compile checks for touched Analyzer modules.
-- Passed `docker compose -f docker\docker-compose.yml config --quiet` with only existing unset SMB environment warnings.
-- Applied schema in the Analyzer container using `python -m src.main schema`.
-- Recreated Analyzer `analyzer` and `scheduler` containers; both reported running.
-- Verified live `/api/health`, `/api/identity/truth/status`, and `/api/indicators/export/supabase/status` on port `8002`.
+- `python -m pytest tests\test_identity_truth_and_indicators.py -q` passed 12 tests.
+- `python -m compileall src\pipeline\indicator_export.py src\scheduler\scheduler.py src\main.py tests\test_identity_truth_and_indicators.py` passed.
+- `docker compose -f docker\docker-compose.yml config --quiet` passed with only existing unset SMB environment warnings.
+- `python -m src.main supabase-export --write --json` succeeded with `schema_ensured=true`, `selected=0`, and `exported=0`.
+- Remote Supabase readback confirmed `public.normalized_indicators` exists, RLS is enabled, `anon` and `authenticated` have no SELECT privilege, and row count is 0.
 
 Operational notes:
-- Supabase export is compact normalized rows only; no raw Collector DB mirror and no raw private chat bodies.
-- Domain-to-IPv4 expansion is Analyzer-owned and bounded by `ANALYZER_INDICATOR_DNS_RESOLVE_LIMIT`.
-- SpiderFoot-derived identity truth remains weak-lead-only until corroborated by an independent hard signal.
-- Supabase API publishable key and direct database URL are present in local ignored env; service-role/secret API key is not present. Export mode remains disabled until the actual writer/table deployment step is implemented.
+- Supabase export remains compact normalized indicator rows only; no raw Collector DB mirror and no raw private chat bodies.
+- Do not write Supabase credentials into `.agents/`, docs, commits, or logs.
+- Next runtime step after Docker Desktop recovers: recreate Analyzer `analyzer` and `scheduler`, then verify `/api/health` and `/api/indicators/export/supabase/status` on port `8002`.

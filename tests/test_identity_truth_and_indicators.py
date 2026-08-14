@@ -1,8 +1,14 @@
+import asyncio
+from datetime import datetime, timezone
+import uuid
+
 from src.pipeline.identity_truth import build_truth_assertion, corroborated_auto_truth
 from src.pipeline.indicator_export import (
+    export_pending_supabase_indicators,
     extract_indicators_from_text,
     normalize_indicator,
     resolve_domain_to_ips,
+    SUPABASE_REMOTE_TABLE_SQL,
     supabase_export_config,
 )
 
@@ -103,3 +109,139 @@ def test_supabase_config_accepts_direct_database_url(monkeypatch):
     assert config["publishable_configured"] is True
     assert config["database_url_configured"] is True
     assert config["write_method"] == "postgres_direct"
+
+
+def test_supabase_config_prefers_direct_database_over_service_role(monkeypatch):
+    monkeypatch.setenv("SUPABASE_PROJECT_ID", "exampleproject")
+    monkeypatch.setenv("SUPABASE_URL", "https://exampleproject.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-example")
+    monkeypatch.setenv("SUPABASE_DATABASE_URL", "postgresql://postgres:secret@example.supabase.co/postgres")
+
+    config = supabase_export_config()
+
+    assert config["service_role_configured"] is True
+    assert config["database_url_configured"] is True
+    assert config["write_method"] == "postgres_direct"
+
+
+def test_supabase_remote_schema_is_compact_indicator_table():
+    assert "CREATE TABLE IF NOT EXISTS normalized_indicators" in SUPABASE_REMOTE_TABLE_SQL
+    assert "normalized_value TEXT NOT NULL" in SUPABASE_REMOTE_TABLE_SQL
+    assert "ALTER TABLE normalized_indicators ENABLE ROW LEVEL SECURITY" in SUPABASE_REMOTE_TABLE_SQL
+    assert "REVOKE ALL ON TABLE normalized_indicators FROM anon, authenticated" in SUPABASE_REMOTE_TABLE_SQL
+    assert "timeline_events" not in SUPABASE_REMOTE_TABLE_SQL
+    assert "identity_signals" not in SUPABASE_REMOTE_TABLE_SQL
+
+
+class _FakeLocalConn:
+    def __init__(self, rows):
+        self.rows = rows
+        self.fetch_limit = None
+        self.executed = []
+
+    async def fetch(self, _sql, limit):
+        self.fetch_limit = limit
+        return self.rows
+
+    async def execute(self, sql, *args):
+        self.executed.append((sql, args))
+
+
+class _FakeRemoteConn:
+    def __init__(self):
+        self.executed = []
+        self.many = []
+        self.closed = False
+
+    async def execute(self, sql, *args):
+        self.executed.append((sql, args))
+
+    async def executemany(self, sql, rows):
+        self.many.append((sql, rows))
+
+    async def close(self):
+        self.closed = True
+
+
+def _indicator_row(**overrides):
+    now = datetime(2026, 8, 14, tzinfo=timezone.utc)
+    row = {
+        "id": str(uuid.uuid4()),
+        "indicator_type": "domain",
+        "normalized_value": "example.com",
+        "display_value": "example.com",
+        "source_families": ["website"],
+        "evidence_count": 2,
+        "confidence": 0.9,
+        "first_seen_at": now,
+        "last_seen_at": now,
+        "metadata": {"source": "test"},
+        "created_at": now,
+        "updated_at": now,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_supabase_export_dry_run_does_not_touch_remote():
+    local = _FakeLocalConn([_indicator_row()])
+    remote = _FakeRemoteConn()
+
+    result = asyncio.run(
+        export_pending_supabase_indicators(
+            local,
+            dry_run=True,
+            mode="postgres_direct",
+            remote_conn=remote,
+        )
+    )
+
+    assert result["status"] == "dry_run"
+    assert result["selected"] == 1
+    assert result["exported"] == 0
+    assert remote.executed == []
+    assert remote.many == []
+    assert local.executed == []
+
+
+def test_supabase_export_upserts_remote_and_marks_local_exported():
+    local = _FakeLocalConn([_indicator_row()])
+    remote = _FakeRemoteConn()
+
+    result = asyncio.run(
+        export_pending_supabase_indicators(
+            local,
+            mode="postgres_direct",
+            remote_conn=remote,
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["selected"] == 1
+    assert result["exported"] == 1
+    assert "CREATE TABLE IF NOT EXISTS normalized_indicators" in remote.executed[0][0]
+    assert len(remote.many) == 1
+    assert "ON CONFLICT (indicator_type, normalized_value)" in remote.many[0][0]
+    assert "export_status = 'exported'" in local.executed[0][0]
+
+
+def test_supabase_export_can_ensure_schema_with_empty_batch():
+    local = _FakeLocalConn([])
+    remote = _FakeRemoteConn()
+
+    result = asyncio.run(
+        export_pending_supabase_indicators(
+            local,
+            mode="postgres_direct",
+            remote_conn=remote,
+            ensure_schema_when_empty=True,
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["selected"] == 0
+    assert result["exported"] == 0
+    assert result["schema_ensured"] is True
+    assert "CREATE TABLE IF NOT EXISTS normalized_indicators" in remote.executed[0][0]
+    assert remote.many == []
+    assert local.executed == []
