@@ -241,11 +241,16 @@ node_modules/
 frontend/dist/
 frontend/node_modules/
 
+
 # AI / editor dot directories (managed via sourcerepo)
 .*
-!.agents/
-!.agents/**
 !.github/
+!.agents/
+.agents/*
+!.agents/STATE.md
+!.agents/JOURNAL.md
+!.agents/handoffs/
+!.agents/handoffs/**
 !.gitignore
 !.gitattributes
 !.gitmodules
@@ -270,11 +275,5 @@ frontend/node_modules/
 !.deepsource.toml
 skills/
 skills-lock.json
-# NOTE: docs/ used to be gitignored here (added by the sourcerepo sync
-# workflow, 1e4814f). Removed because analyzer docs are project-specific
-# tracked content, not sync-mirrored templates. See docs/README.md.
-templates/
-.env.*
-.venv/
-.next/
-coverage/
+docs/
+# End AI / editor dot directories (managed via sourcerepo)
