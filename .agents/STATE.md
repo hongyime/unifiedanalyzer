@@ -1,8 +1,8 @@
 # UnifiedAnalyzer Agent State
 
-Updated: 2026-08-14 10:02 UTC / 2026-08-14 18:02 SGT
+Updated: 2026-08-14 10:21 UTC / 2026-08-14 18:21 SGT
 
-Current task status: Supabase direct-Postgres compact indicator export is implemented and verified against the remote project. Focused source checks passed. Container recreate/live endpoint readback is still pending because Docker Desktop API calls and localhost service HTTP checks are currently hanging or resetting.
+Current task status: Supabase direct-Postgres compact indicator export is implemented, pushed, remote-DB verified, and live-API verified after recreating Analyzer `analyzer` and `scheduler`.
 
 Implemented in this slice:
 - Added `python -m src.main supabase-export` with `--dry-run`, `--write`, schema ensure control, and JSON output.
@@ -17,8 +17,11 @@ Verification completed:
 - `docker compose -f docker\docker-compose.yml config --quiet` passed with only existing unset SMB environment warnings.
 - `python -m src.main supabase-export --write --json` succeeded with `schema_ensured=true`, `selected=0`, and `exported=0`.
 - Remote Supabase readback confirmed `public.normalized_indicators` exists, RLS is enabled, `anon` and `authenticated` have no SELECT privilege, and row count is 0.
+- Recreated Analyzer `analyzer` and `scheduler` with `--no-build --force-recreate`; both containers now read `SUPABASE_INDICATOR_EXPORT_MODE=postgres_direct` and `ANALYZER_SUPABASE_EXPORT_BATCH_SIZE=100`.
+- Host `/api/health` and `/api/indicators/export/supabase/status` on port `8002` returned 200; status reports `write_method=postgres_direct`, `mode=postgres_direct`, and `ready_to_export=0`.
+- Container `python -m src.main supabase-export --dry-run --json` returned `selected=0`, `exported=0`, and `status=dry_run`.
 
 Operational notes:
 - Supabase export remains compact normalized indicator rows only; no raw Collector DB mirror and no raw private chat bodies.
 - Do not write Supabase credentials into `.agents/`, docs, commits, or logs.
-- Next runtime step after Docker Desktop recovers: recreate Analyzer `analyzer` and `scheduler`, then verify `/api/health` and `/api/indicators/export/supabase/status` on port `8002`.
+- No Supabase login is needed for this direct-Postgres export path while the local ignored env has the DB URL.

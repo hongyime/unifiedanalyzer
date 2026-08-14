@@ -13,3 +13,4 @@
 2026-08-14 02:28 UTC - Added Analyzer-owned identity truth assertions and normalized indicator staging/export status; SpiderFoot remains weak lead only and Supabase export is compact normalized rows only.
 2026-08-14 04:03 UTC - Configured local ignored Supabase env and updated non-secret status handling so direct Postgres credentials count as a backend export path; no service-role or secret API key was added.
 - 2026-08-14 18:02 SGT: Implemented direct Postgres compact Supabase writer with RLS and no anon/auth table grants; live remote schema is ensured with zero pending rows, while container restart/readback waits on Docker Desktop recovery.
+- 2026-08-14 18:21 SGT: Recreated Analyzer API/scheduler with Supabase export mode enabled; live API status and container CLI dry-run both report direct Postgres export ready with zero pending rows.
