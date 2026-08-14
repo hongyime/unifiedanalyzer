@@ -1,5 +1,10 @@
 from src.pipeline.identity_truth import build_truth_assertion, corroborated_auto_truth
-from src.pipeline.indicator_export import extract_indicators_from_text, normalize_indicator, resolve_domain_to_ips
+from src.pipeline.indicator_export import (
+    extract_indicators_from_text,
+    normalize_indicator,
+    resolve_domain_to_ips,
+    supabase_export_config,
+)
 
 
 def _signal(**overrides):
@@ -82,3 +87,19 @@ def test_export_router_exposes_identity_and_indicator_status_routes():
     assert "/identity/truth/status" in paths
     assert "/indicators/export/supabase/status" in paths
     assert "/indicators/export/supabase/preview" in paths
+
+
+def test_supabase_config_accepts_direct_database_url(monkeypatch):
+    monkeypatch.setenv("SUPABASE_PROJECT_ID", "exampleproject")
+    monkeypatch.setenv("SUPABASE_URL", "https://exampleproject.supabase.co")
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", "sb_publishable_example")
+    monkeypatch.setenv("SUPABASE_DATABASE_URL", "postgresql://postgres:secret@example.supabase.co/postgres")
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SECRET_KEY", raising=False)
+
+    config = supabase_export_config()
+
+    assert config["configured"] is True
+    assert config["publishable_configured"] is True
+    assert config["database_url_configured"] is True
+    assert config["write_method"] == "postgres_direct"

@@ -2,7 +2,7 @@
 
 Updated: 2026-08-14 02:28 UTC / 2026-08-14 10:28 SGT
 
-Current task status: Analyzer production-completion slice implemented, schema applied in Docker, focused tests passed, live API routes verified, and changes committed/pushed to `main` as `b596a0e`.
+Current task status: Analyzer production-completion slice implemented, schema applied in Docker, focused tests passed, live API routes verified, and changes committed/pushed to `main` as `b596a0e`. Follow-up Supabase local env config was added in ignored `.env`; status now recognizes direct Postgres credentials as `postgres_direct`.
 
 Implemented in this slice:
 - Added `identity_truth_assertions` schema for Analyzer-owned `auto_truth` assertions with evidence signal IDs and corroboration summaries.
@@ -24,3 +24,4 @@ Operational notes:
 - Supabase export is compact normalized rows only; no raw Collector DB mirror and no raw private chat bodies.
 - Domain-to-IPv4 expansion is Analyzer-owned and bounded by `ANALYZER_INDICATOR_DNS_RESOLVE_LIMIT`.
 - SpiderFoot-derived identity truth remains weak-lead-only until corroborated by an independent hard signal.
+- Supabase API publishable key and direct database URL are present in local ignored env; service-role/secret API key is not present. Export mode remains disabled until the actual writer/table deployment step is implemented.

@@ -217,10 +217,26 @@ async def upsert_normalized_indicators(
 
 
 def supabase_export_config() -> dict[str, Any]:
+    url_configured = bool(os.getenv("SUPABASE_URL"))
+    service_role_configured = bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+    secret_key_configured = bool(os.getenv("SUPABASE_SECRET_KEY"))
+    database_url_configured = bool(os.getenv("SUPABASE_DATABASE_URL") or os.getenv("SUPABASE_DB_URL"))
+    publishable_configured = bool(os.getenv("SUPABASE_PUBLISHABLE_KEY") or os.getenv("SUPABASE_ANON_KEY"))
+    if service_role_configured or secret_key_configured:
+        write_method = "data_api_secret"
+    elif database_url_configured:
+        write_method = "postgres_direct"
+    else:
+        write_method = "not_configured"
     return {
-        "configured": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
-        "url_configured": bool(os.getenv("SUPABASE_URL")),
-        "service_role_configured": bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
+        "configured": url_configured and write_method != "not_configured",
+        "url_configured": url_configured,
+        "project_id_configured": bool(os.getenv("SUPABASE_PROJECT_ID")),
+        "publishable_configured": publishable_configured,
+        "service_role_configured": service_role_configured,
+        "secret_key_configured": secret_key_configured,
+        "database_url_configured": database_url_configured,
+        "write_method": write_method,
         "mode": os.getenv("SUPABASE_INDICATOR_EXPORT_MODE", "disabled"),
         "free_tier_db_budget_mb": 500,
         "payload": "normalized_indicators_only",

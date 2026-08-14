@@ -11,3 +11,4 @@
 - 2026-08-14 00:24 SGT: Analyzer production verification uses live HTTP plus desktop/mobile screenshots; media coverage defaults to estimated count-only queries so the dashboard remains responsive during full-resolution media workload.
 - 2026-08-14 10:12 SGT: Analyzer owns identity truth and Supabase export staging; SpiderFoot/recon rows remain weak leads until an independent hard signal corroborates them, and Supabase gets compact normalized indicators rather than raw private text.
 2026-08-14 02:28 UTC - Added Analyzer-owned identity truth assertions and normalized indicator staging/export status; SpiderFoot remains weak lead only and Supabase export is compact normalized rows only.
+2026-08-14 04:03 UTC - Configured local ignored Supabase env and updated non-secret status handling so direct Postgres credentials count as a backend export path; no service-role or secret API key was added.
