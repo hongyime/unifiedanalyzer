@@ -1,10 +1,22 @@
 import json
+import hashlib
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
 from src.db.connection import get_analyzer_pool
+from src.pipeline.indicator_export import supabase_export_config
 
 router = APIRouter(tags=["export"])
+
+
+async def _table_exists(conn, table: str) -> bool:
+    return bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table))
+
+
+def _hash_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
 
 
 @router.get("/entities/{entity_id}/export")
@@ -95,3 +107,147 @@ async def export_entity(entity_id: str, format: str = "json"):
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="{name}_export.json"'},
     )
+
+
+@router.get("/identity/truth/status")
+async def identity_truth_status():
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        if not await _table_exists(conn, "identity_truth_assertions"):
+            return {"status": "schema_pending", "total": 0, "by_state": [], "recent": []}
+        total = await conn.fetchval("SELECT count(*) FROM identity_truth_assertions")
+        by_state = await conn.fetch(
+            """
+            SELECT truth_state, count(*)::bigint AS count,
+                   round(avg(confidence)::numeric, 3) AS avg_confidence
+            FROM identity_truth_assertions
+            GROUP BY truth_state
+            ORDER BY count DESC
+            """
+        )
+        recent = await conn.fetch(
+            """
+            SELECT assertion_type, entity_id::text, value, truth_state,
+                   confidence, evidence_count, source_platform, updated_at
+            FROM identity_truth_assertions
+            ORDER BY updated_at DESC
+            LIMIT 20
+            """
+        )
+    return {
+        "status": "ok",
+        "total": int(total or 0),
+        "by_state": [
+            {
+                "truth_state": row["truth_state"],
+                "count": int(row["count"] or 0),
+                "avg_confidence": float(row["avg_confidence"] or 0),
+            }
+            for row in by_state
+        ],
+        "policy": {
+            "spiderfoot_truth": "weak_lead_only",
+            "auto_truth_requires": "independent_hard_signal_corroboration",
+        },
+        "recent": [
+            {
+                "assertion_type": row["assertion_type"],
+                "entity_id": row["entity_id"],
+                "value_hash": _hash_value(row["value"]),
+                "truth_state": row["truth_state"],
+                "confidence": float(row["confidence"] or 0),
+                "evidence_count": int(row["evidence_count"] or 0),
+                "source_platform": row["source_platform"],
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            }
+            for row in recent
+        ],
+    }
+
+
+@router.get("/indicators/export/supabase/status")
+async def supabase_indicator_export_status():
+    pool = get_analyzer_pool()
+    config = supabase_export_config()
+    async with pool.acquire() as conn:
+        if not await _table_exists(conn, "normalized_indicators"):
+            return {
+                "status": "schema_pending",
+                "config": config,
+                "counts": [],
+                "ready_to_export": 0,
+                "raw_mirror": False,
+            }
+        counts = await conn.fetch(
+            """
+            SELECT indicator_type, export_status, supabase_exportable,
+                   count(*)::bigint AS count
+            FROM normalized_indicators
+            GROUP BY indicator_type, export_status, supabase_exportable
+            ORDER BY indicator_type, export_status, supabase_exportable DESC
+            """
+        )
+        ready = await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM normalized_indicators
+            WHERE supabase_exportable = TRUE
+              AND export_status IN ('pending', 'retry')
+            """
+        )
+    return {
+        "status": "ok",
+        "config": config,
+        "counts": [
+            {
+                "indicator_type": row["indicator_type"],
+                "export_status": row["export_status"],
+                "supabase_exportable": bool(row["supabase_exportable"]),
+                "count": int(row["count"] or 0),
+            }
+            for row in counts
+        ],
+        "ready_to_export": int(ready or 0),
+        "raw_mirror": False,
+        "supabase_free_tier_guard": {
+            "db_budget_mb": 500,
+            "storage_budget_gb": 1,
+            "strategy": "compact_normalized_rows_only",
+            "raw_private_text_exported": False,
+        },
+    }
+
+
+@router.get("/indicators/export/supabase/preview")
+async def supabase_indicator_export_preview(limit: int = 25):
+    pool = get_analyzer_pool()
+    capped = max(1, min(int(limit or 25), 100))
+    async with pool.acquire() as conn:
+        if not await _table_exists(conn, "normalized_indicators"):
+            return {"status": "schema_pending", "items": []}
+        rows = await conn.fetch(
+            """
+            SELECT indicator_type, normalized_value, source_families,
+                   evidence_count, confidence, export_status, updated_at
+            FROM normalized_indicators
+            WHERE supabase_exportable = TRUE
+            ORDER BY updated_at DESC
+            LIMIT $1
+            """,
+            capped,
+        )
+    return {
+        "status": "ok",
+        "items": [
+            {
+                "indicator_type": row["indicator_type"],
+                "value_hash": _hash_value(row["normalized_value"]),
+                "source_families": list(row["source_families"] or []),
+                "evidence_count": int(row["evidence_count"] or 0),
+                "confidence": float(row["confidence"] or 0),
+                "export_status": row["export_status"],
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            }
+            for row in rows
+        ],
+    }

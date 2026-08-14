@@ -1,32 +1,26 @@
 # UnifiedAnalyzer Agent State
 
-Updated: 2026-08-13 16:24 UTC / 2026-08-14 00:24 SGT
+Updated: 2026-08-14 02:28 UTC / 2026-08-14 10:28 SGT
 
-Current task status: Analyzer production-completion implementation is complete and live-verified. The remaining items below are operational/source conditions, not missing Analyzer code.
+Current task status: Analyzer production-completion slice implemented, schema applied in Docker, focused tests passed, and live API routes verified. Changes are ready to commit.
 
 Implemented in this slice:
-- Added `/api/collector/production-status`, aggregating Collector dashboard slices for Instagram health, realtime media feed counters, website/search domain pacing, GitHub/YouTube quotas, and optional rollout guard state.
-- Extended the Collector Coverage page with compact production panels for Instagram stuck-stage, Telegram media counters, domain pacing, quotas, and optional rollout.
-- Extended `/api/multilingual/status` with fastText language detector runtime status and bounded translation worker status; OPUS-MT is reported when configured and NLLB remains optional/off by default.
-- Extended `eval-seed` so real production-labeled sources can be harvested into bounded eval sets for search, identity, sentiment, location, face, and alert fixtures when those tables exist.
-- Added `/api/media/coverage` and Media-page coverage tiles for PDF text, PDF embedded images, OCR text, video frames, faces, EXIF/GPS, pHash, derived artifacts, and media-origin contact signals. The default route uses planner/index estimates to stay responsive and returns counts only, not extracted text.
-- Fixed Graph page filter initialization so an empty localStorage value cannot blank the route.
-- Raised Analyzer-to-Collector production-status timeout to match the slow live Collector quota/Instagram health endpoints.
+- Added `identity_truth_assertions` schema for Analyzer-owned `auto_truth` assertions with evidence signal IDs and corroboration summaries.
+- Added `normalized_indicators` schema for compact Supabase-ready exports of domains, IPv4s, emails, E.164 phones, usernames, and quoted full names.
+- Added `src.pipeline.identity_truth`: SpiderFoot/recon evidence is weak lead only and can promote to `auto_truth` only after an independent hard signal corroborates the same entity/value.
+- Added `src.pipeline.indicator_export`: bounded extraction/normalization for indicators plus optional domain-to-IPv4 DNS expansion.
+- Added export/status routes: `/api/identity/truth/status`, `/api/indicators/export/supabase/status`, and `/api/indicators/export/supabase/preview`; previews hash values and do not return raw private text.
+- Wired bounded identity-truth and indicator staging into the scheduler after successful incremental/full-resolution runs.
 
 Verification completed:
-- Syntax passed for the touched Python API/pipeline/eval modules.
-- Focused Analyzer route/eval/language/translation tests passed; the latest combined Python slice was 26 passed before the final Graph-only frontend fix, and the final focused route regression was 2 passed.
-- `npm run build` in `frontend` passed after the Graph fix.
-- `docker compose -f docker\docker-compose.yml config --quiet` passed.
-- Analyzer API was recreated and is live on `http://127.0.0.1:8002`; `/api/health` returns ok with analyzer and collector DB connected.
-- `/api/collector/production-status` returns Collector dashboard ok with summary: Instagram stuck_stage `cooldown`, realtime_queue_depth 0, domain_pacing_sources 1, quota_snapshots 4, quota_paused 0, optional_rollout_action `dry_run`, optional_rollout_can_proceed false.
-- `/api/media/coverage` returns in about 2 seconds with estimated counts: 639272 rows, 377061 items, and coverage present for PDF text, PDF embedded images, OCR text, video frames, faces, and EXIF/GPS.
-- `/api/multilingual/status` reports fallback language detector active, fastText not configured/loaded, translation provider `noop`, and NLLB default off.
-- `/api/eval/latest` reports 6 latest tasks: alerts, face, identity, location, search, and sentiment.
-- `/api/graph/overview` reports 259022 relationships, 7782 graph entities, and 20 top connections.
-- Desktop and mobile screenshots passed for Triage, Collector Coverage, Alerts, Multilingual, Evaluation, Graph, and Media with no console errors or blank pages. Files are under `tmp/analyzer_screenshots/`.
+- Passed focused Analyzer tests for identity truth, indicator extraction, schema declarations, scorer/registry compatibility, entity routes, operational routes, and Collector priority hints.
+- Passed Python compile checks for touched Analyzer modules.
+- Passed `docker compose -f docker\docker-compose.yml config --quiet` with only existing unset SMB environment warnings.
+- Applied schema in the Analyzer container using `python -m src.main schema`.
+- Recreated Analyzer `analyzer` and `scheduler` containers; both reported running.
+- Verified live `/api/health`, `/api/identity/truth/status`, and `/api/indicators/export/supabase/status` on port `8002`.
 
-Operational notes for the next agent:
-- The Docker image rebuild for `analyzer` previously hung and was stopped; live verification was done by recreating the service from the mounted source/frontend dist state.
-- The host port `8002` had briefly been held by an old stream-alert worker container. It was stopped and recreated under the `stream-alerts` profile with no published host port, and Analyzer now owns the published `8002` mapping.
-- Instagram remains in Collector quota cooldown and optional SpiderFoot rollout remains dry-run blocked by stop criteria.
+Operational notes:
+- Supabase export is compact normalized rows only; no raw Collector DB mirror and no raw private chat bodies.
+- Domain-to-IPv4 expansion is Analyzer-owned and bounded by `ANALYZER_INDICATOR_DNS_RESOLVE_LIMIT`.
+- SpiderFoot-derived identity truth remains weak-lead-only until corroborated by an independent hard signal.

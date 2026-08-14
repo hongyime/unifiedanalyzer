@@ -9,3 +9,5 @@
 - 2026-08-13 21:10 SGT: Pushed Analyzer seen-target coverage wiring and verified live `/api/collector/coverage` after container restart so dashboard state reflects Collector registry counters.
 - 2026-08-13 22:18 SGT: Analyzer production surfaces stay count-only for Collector trust and media/PDF coverage; multilingual status exposes fastText/OPUS readiness while keeping NLLB optional and off by default.
 - 2026-08-14 00:24 SGT: Analyzer production verification uses live HTTP plus desktop/mobile screenshots; media coverage defaults to estimated count-only queries so the dashboard remains responsive during full-resolution media workload.
+- 2026-08-14 10:12 SGT: Analyzer owns identity truth and Supabase export staging; SpiderFoot/recon rows remain weak leads until an independent hard signal corroborates them, and Supabase gets compact normalized indicators rather than raw private text.
+2026-08-14 02:28 UTC - Added Analyzer-owned identity truth assertions and normalized indicator staging/export status; SpiderFoot remains weak lead only and Supabase export is compact normalized rows only.

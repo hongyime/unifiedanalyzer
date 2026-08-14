@@ -1,5 +1,6 @@
 import os
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,13 @@ from src.pipeline.incremental_runner import (
     clear_orphaned_run_locks,
 )
 from src.pipeline.collector_priority_hints import export_collector_priority_hints
+from src.pipeline.identity_truth import promote_spiderfoot_truth
+from src.pipeline.indicator_export import (
+    extract_indicators_from_text,
+    resolve_domain_to_ips,
+    upsert_normalized_indicators,
+    normalize_indicator,
+)
 from src.pipeline.run_reporting import production_run_types, probe_phase_names
 from src.notifications.alerts import (
     notify_collector_health, notify_daily_digest, notify_merge_candidate,
@@ -108,6 +116,95 @@ async def _stage_collector_priority_hints(run_type: str, stats: dict | None) -> 
         report.written,
         report.skipped,
     )
+    return summary
+
+
+async def _stage_identity_truth_and_indicators(run_type: str, stats: dict | None) -> dict:
+    if stats and stats.get("skipped"):
+        return {"skipped": "run_skipped"}
+    summary: dict[str, object] = {}
+    try:
+        pool = get_analyzer_pool()
+        async with pool.acquire() as conn:
+            if _env_flag("ANALYZER_IDENTITY_TRUTH_ENABLED", "1"):
+                summary["truth"] = await promote_spiderfoot_truth(
+                    conn,
+                    write=True,
+                    min_confidence=float(os.getenv("ANALYZER_IDENTITY_TRUTH_MIN_CONFIDENCE", "0.85")),
+                    limit=_env_int("ANALYZER_IDENTITY_TRUTH_SCAN_LIMIT", 5000, minimum=100, maximum=50000),
+                )
+            if _env_flag("ANALYZER_INDICATOR_EXPORT_STAGING_ENABLED", "1"):
+                limit = _env_int("ANALYZER_INDICATOR_EXPORT_SCAN_LIMIT", 500, minimum=50, maximum=5000)
+                default_region = os.getenv("ANALYZER_DEFAULT_PHONE_REGION", "US")
+                written = 0
+                domain_values: list[str] = []
+                signal_rows = await conn.fetch(
+                    """
+                    SELECT id::text, source_platform AS source, value
+                    FROM identity_signals
+                    WHERE value IS NOT NULL AND value <> ''
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    """,
+                    limit,
+                )
+                for row in signal_rows:
+                    indicators = extract_indicators_from_text(row["value"], default_region=default_region)
+                    domain_values.extend(item.normalized_value for item in indicators if item.indicator_type == "domain")
+                    written += await upsert_normalized_indicators(
+                        conn,
+                        indicators,
+                        source_family=str(row["source"] or "identity_signals"),
+                        evidence_ref={"table": "identity_signals", "id": row["id"]},
+                    )
+
+                event_rows = await conn.fetch(
+                    """
+                    SELECT id::text, source, title, detail
+                    FROM timeline_events
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    """,
+                    limit,
+                )
+                for row in event_rows:
+                    text = " ".join(part for part in (row["title"], row["detail"]) if part)
+                    indicators = extract_indicators_from_text(text, default_region=default_region)
+                    domain_values.extend(item.normalized_value for item in indicators if item.indicator_type == "domain")
+                    written += await upsert_normalized_indicators(
+                        conn,
+                        indicators,
+                        source_family=str(row["source"] or "timeline_events"),
+                        evidence_ref={"table": "timeline_events", "id": row["id"], "source": row["source"]},
+                    )
+
+                dns_cap = _env_int("ANALYZER_INDICATOR_DNS_RESOLVE_LIMIT", 25, minimum=0, maximum=250)
+                dns_written = 0
+                for domain in sorted(set(domain_values))[:dns_cap]:
+                    ips = await asyncio.to_thread(resolve_domain_to_ips, domain)
+                    indicators = [
+                        item for ip in ips
+                        if (item := normalize_indicator("ipv4", ip)) is not None
+                    ]
+                    dns_written += await upsert_normalized_indicators(
+                        conn,
+                        indicators,
+                        source_family="dns",
+                        evidence_ref={
+                            "table": "normalized_indicators",
+                            "domain_hash": hashlib.sha256(domain.encode("utf-8")).hexdigest()[:16],
+                        },
+                    )
+                summary["indicators"] = {
+                    "rows_scanned": len(signal_rows) + len(event_rows),
+                    "written": written,
+                    "dns_domains_checked": min(len(set(domain_values)), dns_cap),
+                    "dns_ipv4_written": dns_written,
+                }
+    except Exception as exc:
+        logger.warning("%s identity truth/indicator staging failed: %s", run_type, exc, exc_info=True)
+        return {"error": str(exc)[:300]}
+    logger.info("%s identity truth/indicator staging: %s", run_type, summary)
     return summary
 
 
@@ -592,6 +689,7 @@ async def start_scheduler() -> None:
             try:
                 stats = await run_full_resolution()
                 await _stage_collector_priority_hints("full_resolution", stats)
+                await _stage_identity_truth_and_indicators("full_resolution", stats)
             except Exception:
                 logger.exception("Full resolution failed")
         else:
@@ -599,6 +697,7 @@ async def start_scheduler() -> None:
             try:
                 stats = await run_incremental()
                 await _stage_collector_priority_hints("incremental", stats)
+                await _stage_identity_truth_and_indicators("incremental", stats)
             except Exception:
                 logger.exception("Incremental run failed")
 

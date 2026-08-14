@@ -63,6 +63,51 @@ CREATE INDEX IF NOT EXISTS idx_signals_type ON identity_signals(signal_type);
 -- every pre-existing signal row valid.
 ALTER TABLE identity_signals ADD COLUMN IF NOT EXISTS metadata JSONB;
 
+CREATE TABLE IF NOT EXISTS identity_truth_assertions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    assertion_type VARCHAR(50) NOT NULL DEFAULT 'same_person',
+    entity_id UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    value TEXT NOT NULL,
+    truth_state VARCHAR(30) NOT NULL DEFAULT 'auto_truth',
+    confidence FLOAT NOT NULL DEFAULT 0.0,
+    evidence_count INT NOT NULL DEFAULT 0,
+    evidence_signal_ids UUID[] NOT NULL DEFAULT '{}',
+    evidence_summary JSONB NOT NULL DEFAULT '{}',
+    source_platform VARCHAR(30) NOT NULL DEFAULT 'analyzer',
+    source_table VARCHAR(100),
+    source_record_id VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(assertion_type, entity_id, value, truth_state)
+);
+CREATE INDEX IF NOT EXISTS idx_identity_truth_entity
+    ON identity_truth_assertions(entity_id, truth_state, confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_identity_truth_value
+    ON identity_truth_assertions(value);
+
+CREATE TABLE IF NOT EXISTS normalized_indicators (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    indicator_type VARCHAR(30) NOT NULL,
+    normalized_value TEXT NOT NULL,
+    display_value TEXT,
+    source_families TEXT[] NOT NULL DEFAULT '{}',
+    evidence_count INT NOT NULL DEFAULT 0,
+    confidence FLOAT NOT NULL DEFAULT 0.0,
+    first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_seen_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    metadata JSONB NOT NULL DEFAULT '{}',
+    supabase_exportable BOOLEAN NOT NULL DEFAULT FALSE,
+    export_status VARCHAR(30) NOT NULL DEFAULT 'pending',
+    exported_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(indicator_type, normalized_value)
+);
+CREATE INDEX IF NOT EXISTS idx_normalized_indicators_type_status
+    ON normalized_indicators(indicator_type, export_status, supabase_exportable);
+CREATE INDEX IF NOT EXISTS idx_normalized_indicators_last_seen
+    ON normalized_indicators(last_seen_at DESC);
+
 -- Track-C: hash-chained tamper-evident audit log for human decisions. Every
 -- entity merge/dismiss/split writes one row whose sha256 covers (prev_sha256,
 -- action, actor, entity_ids, payload, created_at). A gap or hash mismatch is

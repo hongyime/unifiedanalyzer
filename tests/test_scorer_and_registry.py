@@ -658,6 +658,16 @@ def test_schema_declares_notification_audit():
     assert "idx_notification_audit_type_created" in schema
 
 
+def test_schema_declares_identity_truth_and_normalized_indicators():
+    schema = (_REPO_ROOT / "src" / "db" / "schema.sql").read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS identity_truth_assertions" in schema
+    assert "evidence_signal_ids UUID[]" in schema
+    assert "CREATE TABLE IF NOT EXISTS normalized_indicators" in schema
+    assert "supabase_exportable BOOLEAN" in schema
+    assert "idx_normalized_indicators_type_status" in schema
+
+
 def test_skipped_alert_metadata_does_not_break_alert_count():
     """Skipped alert phases return metadata strings, not only numeric counters."""
     from src.pipeline.incremental_runner import _sum_numeric_stats
