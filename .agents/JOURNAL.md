@@ -14,3 +14,4 @@
 2026-08-14 04:03 UTC - Configured local ignored Supabase env and updated non-secret status handling so direct Postgres credentials count as a backend export path; no service-role or secret API key was added.
 - 2026-08-14 18:02 SGT: Implemented direct Postgres compact Supabase writer with RLS and no anon/auth table grants; live remote schema is ensured with zero pending rows, while container restart/readback waits on Docker Desktop recovery.
 - 2026-08-14 18:21 SGT: Recreated Analyzer API/scheduler with Supabase export mode enabled; live API status and container CLI dry-run both report direct Postgres export ready with zero pending rows.
+- 2026-08-20 15:49 SGT: Switched local ignored Supabase DB URL to the IPv4-compatible Supavisor session pooler after Docker could reach IPv4 internet but Supabase direct DB resolved IPv6-only; live export wrote 100 compact normalized indicator rows.
