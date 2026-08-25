@@ -95,6 +95,59 @@ def test_export_router_exposes_identity_and_indicator_status_routes():
     assert "/indicators/export/supabase/preview" in paths
 
 
+def test_supabase_remote_readback_reports_missing_dsn(monkeypatch):
+    from src.api.routes.export import _supabase_remote_readback
+
+    monkeypatch.delenv("SUPABASE_DATABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+
+    result = asyncio.run(_supabase_remote_readback({"write_method": "postgres_direct"}))
+
+    assert result == {
+        "configured": False,
+        "reachable": False,
+        "reason": "database_url_missing",
+    }
+
+
+def test_supabase_remote_readback_reports_remote_count(monkeypatch):
+    from src.api.routes import export as export_route
+
+    class FakeRemote:
+        def __init__(self):
+            self.closed = False
+
+        async def fetchval(self, _sql):
+            return True
+
+        async def fetchrow(self, _sql):
+            return {
+                "row_count": 42,
+                "latest_exported_at": datetime(2026, 8, 20, tzinfo=timezone.utc),
+            }
+
+        async def close(self):
+            self.closed = True
+
+    remote = FakeRemote()
+
+    async def fake_connect(_dsn, timeout):
+        assert timeout == 45.0
+        return remote
+
+    monkeypatch.setenv("SUPABASE_DATABASE_URL", "postgresql://example")
+    monkeypatch.delenv("SUPABASE_STATUS_READBACK_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr(export_route.asyncpg, "connect", fake_connect)
+
+    result = asyncio.run(export_route._supabase_remote_readback({"write_method": "postgres_direct"}))
+
+    assert result["reachable"] is True
+    assert result["table_exists"] is True
+    assert result["row_count"] == 42
+    assert result["latest_exported_at"] == "2026-08-20T00:00:00+00:00"
+    assert remote.closed is True
+
+
 def test_supabase_config_accepts_direct_database_url(monkeypatch):
     monkeypatch.setenv("SUPABASE_PROJECT_ID", "exampleproject")
     monkeypatch.setenv("SUPABASE_URL", "https://exampleproject.supabase.co")
@@ -223,6 +276,32 @@ def test_supabase_export_upserts_remote_and_marks_local_exported():
     assert len(remote.many) == 1
     assert "ON CONFLICT (indicator_type, normalized_value)" in remote.many[0][0]
     assert "export_status = 'exported'" in local.executed[0][0]
+
+
+def test_indicator_upsert_requeues_exported_rows_when_evidence_changes():
+    from src.pipeline.indicator_export import NormalizedIndicator, upsert_normalized_indicators
+
+    class _Conn:
+        def __init__(self):
+            self.many = []
+
+        async def executemany(self, sql, rows):
+            self.many.append((sql, rows))
+
+    conn = _Conn()
+
+    asyncio.run(
+        upsert_normalized_indicators(
+            conn,
+            [NormalizedIndicator("domain", "example.com", "example.com", 0.9)],
+            source_family="whatsapp",
+            evidence_ref={"table": "identity_signals", "id": "signal-1"},
+        )
+    )
+
+    assert conn.many
+    assert "export_status = CASE" in conn.many[0][0]
+    assert "THEN 'pending'" in conn.many[0][0]
 
 
 def test_supabase_export_can_ensure_schema_with_empty_batch():

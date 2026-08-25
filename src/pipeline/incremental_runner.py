@@ -11,6 +11,7 @@ from asyncpg import UniqueViolationError
 from src.db.connection import get_analyzer_pool, is_collector_unavailable_error
 from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.beeper_bridge import bridge_beeper
+from src.pipeline.facebook_author_resolver import resolve_facebook_author_entities
 from src.pipeline.ig_geo_resolver import resolve_ig_geo_entities
 from src.pipeline.strava_athlete_resolver import resolve_strava_athlete_entities
 from src.pipeline.cross_source_signals import emit_cross_source_signals
@@ -198,6 +199,7 @@ _PHASE_RESOURCE_CLASSES = {
     "resolve_entities": "db",
     "beeper_bridge": "collector_db",
     "ig_geo_entities": "collector_db",
+    "facebook_author_entities": "collector_db",
     "strava_athlete_entities": "collector_db",
     "cross_source_signals": "collector_db",
     "timeline": "collector_db",
@@ -845,6 +847,11 @@ async def run_incremental() -> dict:
         )
         stats["ig_geo_links"] = ig_geo_stats.get("links_created", 0)
 
+        facebook_stats = await _run_phase(
+            run_id, "incremental", "facebook_author_entities", resolve_facebook_author_entities, default={}
+        )
+        stats["facebook_links"] = facebook_stats.get("links_created", 0)
+
         # gap-round-2: mint entities for every Strava athlete with collected
         # activities (unblocks T5.2 shared-route-origin). Same "create-entity-if-
         # content" pattern as ig_geo; runs BEFORE build_timeline so Strava blocks
@@ -1004,6 +1011,11 @@ async def run_full_resolution() -> dict:
             run_id, "full_resolution", "ig_geo_entities", resolve_ig_geo_entities, default={}
         )
         stats["ig_geo_links"] = ig_geo_stats.get("links_created", 0)
+
+        facebook_stats = await _run_phase(
+            run_id, "full_resolution", "facebook_author_entities", resolve_facebook_author_entities, default={}
+        )
+        stats["facebook_links"] = facebook_stats.get("links_created", 0)
 
         # gap-round-2: mint entities for every Strava athlete with collected
         # activities (unblocks T5.2 shared-route-origin). Same "create-entity-if-

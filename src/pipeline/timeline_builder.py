@@ -17,9 +17,18 @@ SOURCE_QUERY_TIMEOUT_SECONDS = 1800
 # default). Deterministic, so it never removes a legit event.
 TIMELINE_MIN_DATE = datetime(2005, 1, 1, tzinfo=timezone.utc)
 # Future ceiling: an event can't legitimately be more than a small clock-skew
-# margin into the future. Records dated years ahead (seen up to 2042) are clock
-# errors — drop them too rather than seed far-future partition noise.
-TIMELINE_MAX_FUTURE = timedelta(days=366)
+# margin into the future. Records dated months ahead have appeared from bad
+# source clocks and make the data-quality ledger treat a source as clock-skewed.
+TIMELINE_MAX_FUTURE = timedelta(days=1)
+
+
+def _valid_timeline_time(occurred_at: datetime | None, *, now: datetime | None = None) -> bool:
+    if occurred_at is None:
+        return False
+    if not occurred_at.tzinfo:
+        occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return TIMELINE_MIN_DATE <= occurred_at <= now + TIMELINE_MAX_FUTURE
 
 PLATFORM_QUERIES = [
     {
@@ -239,6 +248,29 @@ PLATFORM_QUERIES = [
                    COALESCE(p.platform_created_at, p.collected_at) AS occurred_at,
                    LEFT(p.caption, 200) AS title, p.author_username AS entity_ref
             FROM threads_posts p
+            WHERE COALESCE(p.platform_created_at, p.collected_at) IS NOT NULL {where_clause}
+            ORDER BY COALESCE(p.platform_created_at, p.collected_at) DESC
+        """,
+        "time_col": "COALESCE(p.platform_created_at, p.collected_at)",
+    },
+    {
+        "source": "facebook",
+        "event_type": "CONTENT_PUBLISHED",
+        "query": """
+            SELECT p.platform_post_id AS record_id,
+                   COALESCE(p.platform_created_at, p.collected_at) AS occurred_at,
+                   LEFT(p.caption, 200) AS title,
+                   pr.platform_user_id::text AS entity_ref,
+                   COALESCE(pr.username, p.author_username) AS entity_ref2,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'author_username', p.author_username,
+                       'media_type', p.media_type,
+                       'likes_count', p.likes_count,
+                       'comments_count', p.comments_count,
+                       'shares_count', p.shares_count
+                   )) AS metadata
+            FROM facebook_posts p
+            LEFT JOIN facebook_profiles pr ON lower(pr.username) = lower(p.author_username)
             WHERE COALESCE(p.platform_created_at, p.collected_at) IS NOT NULL {where_clause}
             ORDER BY COALESCE(p.platform_created_at, p.collected_at) DESC
         """,
@@ -753,10 +785,7 @@ async def build_timeline(
                             occurred_at = occurred_at.replace(tzinfo=timezone.utc)
                         # Skip null/bogus timestamps so they don't regenerate as
                         # 1970/198x (or far-future) timeline noise.
-                        if not occurred_at or occurred_at < TIMELINE_MIN_DATE:
-                            invalid_time_count += 1
-                            continue
-                        if occurred_at > datetime.now(timezone.utc) + TIMELINE_MAX_FUTURE:
+                        if not _valid_timeline_time(occurred_at):
                             invalid_time_count += 1
                             continue
 
