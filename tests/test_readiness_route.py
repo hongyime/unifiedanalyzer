@@ -395,6 +395,57 @@ async def test_production_readiness_bounds_slow_health_status(monkeypatch):
     assert databases["evidence"]["error_component"] == "analyzer_health"
     assert databases["evidence"]["timeout_seconds"] == 0.01
 
+@pytest.mark.asyncio
+async def test_production_readiness_respects_global_deadline_when_health_recovery_stalls(monkeypatch):
+    """Total readiness wall time stays bounded even when recovery chains stall.
+
+    The isolated health retry can default to a 90s budget and the fast fallback
+    another 35s; sequential recovery after a slow primary probe previously let
+    the route exceed any client timeout. A global deadline must cap every stage,
+    including recovery, and yield an honest degraded report instead of a hang.
+    """
+    async def slow_health():
+        await asyncio.sleep(999)
+
+    async def fake_collector():
+        return _healthy_collector()
+
+    async def fake_supabase():
+        return {
+            "configured": True,
+            "reachable": True,
+            "table_exists": True,
+            "row_count": 2368,
+        }
+
+    async def stalled_retry(original_error, timeout_seconds):
+        await asyncio.sleep(30)
+        return None
+
+    async def deadline_exhausted_fallback(original_error, timeout_seconds):
+        base = _healthy_health()
+        base["analyzer_db"] = "unknown"
+        base["collector_db"] = "unknown"
+        base["fallback"] = "fast_health"
+        return base
+
+    monkeypatch.setenv("ANALYZER_READINESS_HEALTH_TIMEOUT_SECONDS", "0.2")
+    monkeypatch.setenv("ANALYZER_READINESS_TOTAL_BUDGET_SECONDS", "1.5")
+    monkeypatch.setattr(readiness, "_health_status", slow_health)
+    monkeypatch.setattr(readiness, "_health_status_retry_after_timeout", stalled_retry)
+    monkeypatch.setattr(readiness, "_health_status_fast_fallback", deadline_exhausted_fallback)
+    monkeypatch.setattr(readiness, "_collector_status", fake_collector)
+    monkeypatch.setattr(readiness, "_supabase_remote_readback_status", fake_supabase)
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    report = await readiness._production_readiness()
+    elapsed = loop.time() - started
+
+    assert elapsed < 8.0, f"readiness took {elapsed:.2f}s, global deadline not enforced"
+    databases = next(item for item in report["checks"] if item["id"] == "databases_connected")
+    assert databases["ok"] is False
+    assert report["status"] == "degraded"
 
 @pytest.mark.asyncio
 async def test_production_readiness_uses_isolated_health_retry_after_primary_timeout(monkeypatch):
