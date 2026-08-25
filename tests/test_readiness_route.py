@@ -1435,3 +1435,18 @@ async def test_production_readiness_bounds_slow_supabase_readback(monkeypatch):
     assert supabase["ok"] is False
     assert supabase["evidence"]["remote_readback"]["reachable"] is False
     assert "TimeoutError" in supabase["evidence"]["remote_readback"]["error"]
+
+def test_collector_surfaces_ok_when_maintenance_sleeps_after_nonzero_pass():
+    """A stale terminal-degraded maintenance pass with all-current green evidence
+    (dashboard ok, ingest active, zero hard issues, vault ok) must not fail the
+    critical collector_production_surfaces check."""
+    collector = _healthy_collector()
+    summary = collector["summary"]
+    summary["browser_maintenance_state"] = "degraded"
+    summary["browser_maintenance_last_terminal_state"] = "degraded"
+    summary["browser_maintenance_detail"] = "maintenance loop sleeping after nonzero pass"
+
+    report = readiness.build_readiness_report(_healthy_health(), collector, _healthy_data_quality())
+
+    check = next(item for item in report["checks"] if item["id"] == "collector_production_surfaces")
+    assert check["ok"] is True, check["evidence"]

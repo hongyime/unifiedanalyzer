@@ -782,6 +782,16 @@ def _collector_summary_ok(collector_status: dict[str, Any]) -> bool:
     }:
         return False
     maintenance_state = str(summary.get("browser_maintenance_state") or "")
+    # A past terminal-degraded pass whose detail says the loop is merely
+    # sleeping after a nonzero exit must not fail critical readiness when
+    # every current signal (dashboard, ingest, hard issues, vault) is green.
+    maintenance_sleeping_after_nonzero = (
+        maintenance_state == "degraded"
+        and "sleeping after nonzero pass" in str(summary.get("browser_maintenance_detail") or "").lower()
+        and int(summary.get("hard_source_issues") or 0) == 0
+        and int(summary.get("browser_extension_issues") or 0) == 0
+        and str(summary.get("dashboard_health_effective_status", summary.get("dashboard_health_status"))) == "ok"
+    )
     maintenance_ok = (
         summary.get("browser_maintenance_state") == "ok"
         or (
@@ -791,6 +801,7 @@ def _collector_summary_ok(collector_status: dict[str, Any]) -> bool:
         or (
             fallback_yield_collecting
         )
+        or maintenance_sleeping_after_nonzero
     )
     dashboard_current_ok = (
         summary.get("dashboard_health_effective_status", summary.get("dashboard_health_status")) == "ok"
