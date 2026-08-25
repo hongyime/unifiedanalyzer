@@ -62,3 +62,5 @@
 2026-08-21 23:46 UTC - Browser-content stale/page-shell rows with warning severity and restorable cookie-vault proof are operator warnings, not critical production failures; readiness remains critical-green after Collector Postgres recovery, while X try-again and Instagram/Meta page churn remain real warning-level browser work.
 - 2026-08-25 12:29:26 +08:00 [PRAWN-L390/claude/stop] branch=main head=6aa3068 dirty=34
 - 2026-08-25 12:43:22 +08:00 [PRAWN-L390/claude/stop] branch=main head=6aa3068 dirty=34
+- 2026-08-25 21:59:29 +08:00 [PRAWN-L390/claude/stop] branch=main head=c879d5e dirty=1
+- 2026-08-26 01:35 SGT: Warning-severity extension issues must not block maintenance-state softening when samples prove they are warnings-only; summary counters count all severities while ok-logic must sample severities like existing soft-issue classification does.

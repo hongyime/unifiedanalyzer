@@ -355,12 +355,23 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-08-25 12:43:22 +08:00
+- Updated: 2026-08-25 21:59:29 +08:00
 - Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 6aa3068
-- Dirty files: 34
+- HEAD: c879d5e
+- Dirty files: 1
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
+
+Updated: 2026-08-26 01:35 SGT
+
+Current live update:
+- Executed the full green-light run: A2 audit trio re-run inline (background agents blocked by harness 15-min stale timeouts; zero partials), A3 browser hardening, B competitive teardown, and the final no-regression gate.
+- A3 shipped in Collector commit `3bab003a`: /domain-pacing/status and /instagram/health degrade gracefully instead of HTTP 500 under DB-load TimeoutErrors; instagram http_429 reload cooldown guard (UC_TAB_RELOAD_429_COOLDOWN_MINUTES default 75) driven by plan-history timestamps; X failedScript crash-recovery URLs now non-canonical so tabs repair to x.com/home; repeated X shell churn escalates into plan evidence; action-queue sync responses carry covered_warning_notes explaining suppressed stalled-warnings.
+- Analyzer commit `fff9601`: stale terminal-degraded maintenance pass ("sleeping after nonzero pass") with all-current green dashboard/ingest/hard-issue/vault evidence and only warning-severity extension issues no longer fails critical collector_production_surfaces.
+- Live repairs executed via tools/browser_tab_reload.py: threads hung renderer hard-reopened to canonical /following, X confirmed on x.com/home, IG explore refreshed.
+- Scrape proof after repairs (rolling 60m stored): facebook 176 (stall cleared), instagram 288 (legit cooldown warning only), threads 127, x 12; open action queue count=0.
+- Final gate: clean isolation readiness status=ok critical_failed=0 degraded=1 (warning-only data_quality_ledger surfacing real export-gap families: telegram/whatsapp/exposure non-exportable indicators + website derived-evidence gap - ticketed, not a regression); Supabase drained ready_to_export=0 remote 6284 rows; zero Tracebacks/500s across analyzer/scheduler/dashboard/watchdog logs in the post-change window; scheduler heartbeat fresh (15s).
+- Competitive teardown delivered at .agents/handoffs/20260826-gods-eye-view-teardown.md (docs/ is gitignored): GEV = client-only realtime globe (1.4k stars, 4 commits, zero persistence); UA moat = authenticated collection + identity resolution + history. P0 upgrade: globe/timeline layer over existing geo-inference data; P1 freshness badges from readiness/DQ + NL query over entity APIs.

@@ -1450,3 +1450,21 @@ def test_collector_surfaces_ok_when_maintenance_sleeps_after_nonzero_pass():
 
     check = next(item for item in report["checks"] if item["id"] == "collector_production_surfaces")
     assert check["ok"] is True, check["evidence"]
+
+def test_collector_surfaces_ok_when_maintenance_sleeps_with_only_warning_ext_issues():
+    """Warning-severity extension issues (e.g. IG 429 page shell) counted in the
+    Collector summary must not block the maintenance-sleeping softening."""
+    collector = _healthy_collector()
+    summary = collector["summary"]
+    summary["browser_maintenance_state"] = "degraded"
+    summary["browser_maintenance_last_terminal_state"] = "degraded"
+    summary["browser_maintenance_detail"] = "maintenance loop sleeping after nonzero pass"
+    summary["browser_extension_issues"] = 1
+    summary["browser_extension_issue_samples"] = [
+        {"platform": "instagram", "kind": "browser_page_error", "severity": "warning"}
+    ]
+
+    report = readiness.build_readiness_report(_healthy_health(), collector, _healthy_data_quality())
+
+    check = next(item for item in report["checks"] if item["id"] == "collector_production_surfaces")
+    assert check["ok"] is True, check["evidence"]
