@@ -174,18 +174,39 @@ async def fetch_unprocessed_media(
         for source, content_type in source_content_pairs:
             if limit and len(result) >= limit:
                 break
+            remaining = max(limit - len(result), 1) if limit else None
+            # Fetch a bounded candidate window when the caller gave a batch
+            # limit. Without this, busy production DBs scan/sort entire media
+            # classes before Python filters already-analyzed rows.
+            query_limit = max(remaining * 20, remaining + 100) if remaining else None
             if source:
-                rows = await conn.fetch("""
-                    SELECT id::text, source, entity_id, entity_name, content_type, file_path
-                    FROM media_items WHERE source = $1 AND content_type = $2
-                    ORDER BY collected_at DESC
-                """, source, content_type)
+                if query_limit:
+                    rows = await conn.fetch("""
+                        SELECT id::text, source, entity_id, entity_name, content_type, file_path
+                        FROM media_items WHERE source = $1 AND content_type = $2
+                        ORDER BY collected_at DESC
+                        LIMIT $3
+                    """, source, content_type, query_limit)
+                else:
+                    rows = await conn.fetch("""
+                        SELECT id::text, source, entity_id, entity_name, content_type, file_path
+                        FROM media_items WHERE source = $1 AND content_type = $2
+                        ORDER BY collected_at DESC
+                    """, source, content_type)
             else:
-                rows = await conn.fetch("""
-                    SELECT id::text, source, entity_id, entity_name, content_type, file_path
-                    FROM media_items WHERE content_type = $1
-                    ORDER BY collected_at DESC
-                """, content_type)
+                if query_limit:
+                    rows = await conn.fetch("""
+                        SELECT id::text, source, entity_id, entity_name, content_type, file_path
+                        FROM media_items WHERE content_type = $1
+                        ORDER BY collected_at DESC
+                        LIMIT $2
+                    """, content_type, query_limit)
+                else:
+                    rows = await conn.fetch("""
+                        SELECT id::text, source, entity_id, entity_name, content_type, file_path
+                        FROM media_items WHERE content_type = $1
+                        ORDER BY collected_at DESC
+                    """, content_type)
             for r in rows:
                 if r["id"] in done_ids:
                     continue

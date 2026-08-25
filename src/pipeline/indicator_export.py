@@ -256,6 +256,13 @@ async def upsert_normalized_indicators(
             confidence = GREATEST(normalized_indicators.confidence, EXCLUDED.confidence),
             metadata = normalized_indicators.metadata || EXCLUDED.metadata,
             supabase_exportable = normalized_indicators.supabase_exportable OR EXCLUDED.supabase_exportable,
+            export_status = CASE
+                WHEN normalized_indicators.export_status = 'exported'
+                     AND (normalized_indicators.metadata IS DISTINCT FROM normalized_indicators.metadata || EXCLUDED.metadata
+                          OR NOT normalized_indicators.source_families @> EXCLUDED.source_families)
+                    THEN 'pending'
+                ELSE normalized_indicators.export_status
+            END,
             updated_at = NOW(),
             last_seen_at = NOW()
         """,

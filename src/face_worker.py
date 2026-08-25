@@ -217,15 +217,23 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
         }
         entity_lookup = _build_entity_lookup(aconn)
 
-    # Candidate collector media.
+    try:
+        scan_window = max(limit, int(os.getenv("FACE_COLLECTOR_MEDIA_SCAN_WINDOW", str(max(limit * 20, 1000)))))
+    except (TypeError, ValueError):
+        scan_window = max(limit * 20, 1000)
+
+    # Candidate collector media. Keep this query bounded; on production
+    # Collector DBs the full image/profile-photo set is large enough to starve
+    # API startup and scheduler heartbeats under concurrent Analyzer workers.
     with collector_engine.connect() as cconn:
         rows = cconn.execute(
             text(
                 "SELECT id::text AS id, source, entity_id, content_type, file_path "
                 "FROM media_items WHERE content_type = ANY(:cts) AND file_path IS NOT NULL "
-                "ORDER BY collected_at DESC"
+                "ORDER BY collected_at DESC "
+                "LIMIT :scan_window"
             ),
-            {"cts": list(_FACE_CONTENT_TYPES)},
+            {"cts": list(_FACE_CONTENT_TYPES), "scan_window": scan_window},
         ).fetchall()
 
     # tracked_only: drop candidates whose owner doesn't resolve to an analyzer

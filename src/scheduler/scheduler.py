@@ -21,6 +21,7 @@ from src.pipeline.indicator_export import (
     upsert_normalized_indicators,
     normalize_indicator,
 )
+from src.pipeline.exposure_indicators import stage_exposure_findings_as_indicators
 from src.pipeline.run_reporting import production_run_types, probe_phase_names
 from src.notifications.alerts import (
     notify_collector_health, notify_daily_digest, notify_merge_candidate,
@@ -51,6 +52,10 @@ def _env_int(name: str, default: int, *, minimum: int | None = None, maximum: in
     if maximum is not None:
         value = min(maximum, value)
     return value
+
+
+def _run_skipped_due_lock(stats) -> bool:
+    return isinstance(stats, dict) and stats.get("skipped") is True
 
 
 def _backup_window_open(now: datetime, backup_hour_utc: int) -> bool:
@@ -202,17 +207,89 @@ async def _stage_identity_truth_and_indicators(run_type: str, stats: dict | None
                     "dns_domains_checked": min(len(set(domain_values)), dns_cap),
                     "dns_ipv4_written": dns_written,
                 }
+                if _env_flag("ANALYZER_EXPOSURE_INDICATOR_STAGING_ENABLED", "1"):
+                    try:
+                        collector_pool = get_collector_pool()
+                        async with collector_pool.acquire() as collector_conn:
+                            summary["exposure_indicators"] = await stage_exposure_findings_as_indicators(
+                                conn,
+                                collector_conn,
+                                limit=_env_int(
+                                    "ANALYZER_EXPOSURE_INDICATOR_SCAN_LIMIT",
+                                    1000,
+                                    minimum=1,
+                                    maximum=10000,
+                                ),
+                                default_region=default_region,
+                            )
+                    except Exception as exc:
+                        logger.warning("Exposure indicator staging failed: %s", exc, exc_info=True)
+                        summary["exposure_indicators"] = {"error": str(exc)[:300]}
                 supabase_mode = os.getenv("SUPABASE_INDICATOR_EXPORT_MODE", "disabled").strip().lower()
                 if supabase_mode not in {"", "disabled", "off", "0", "false"}:
-                    summary["supabase_export"] = await export_pending_supabase_indicators(
-                        conn,
-                        limit=_env_int("ANALYZER_SUPABASE_EXPORT_BATCH_SIZE", 100, minimum=1, maximum=1000),
-                    )
+                    summary["supabase_export"] = await _export_supabase_indicators_until_drained(conn)
     except Exception as exc:
         logger.warning("%s identity truth/indicator staging failed: %s", run_type, exc, exc_info=True)
         return {"error": str(exc)[:300]}
     logger.info("%s identity truth/indicator staging: %s", run_type, summary)
     return summary
+
+
+async def _export_supabase_indicators_until_drained(conn) -> dict:
+    """Drain compact Supabase indicator exports in bounded batches.
+
+    A single scheduled pass can stage hundreds of indicators. Exporting only one
+    batch leaves Supabase visibly stale until several later scheduler cycles or a
+    manual CLI loop. Keep the operation bounded, but drain normal bursts in one
+    self-healing pass.
+    """
+    batch_size = _env_int("ANALYZER_SUPABASE_EXPORT_BATCH_SIZE", 100, minimum=1, maximum=1000)
+    max_batches = _env_int("ANALYZER_SUPABASE_EXPORT_MAX_BATCHES_PER_PASS", 10, minimum=1, maximum=100)
+    total_selected = 0
+    total_exported = 0
+    batches = 0
+    last_result: dict | None = None
+    drained = False
+
+    for batch_index in range(max_batches):
+        result = await export_pending_supabase_indicators(
+            conn,
+            limit=batch_size,
+            ensure_schema=batch_index == 0,
+            ensure_schema_when_empty=batch_index == 0,
+        )
+        batches += 1
+        last_result = result
+        selected = int(result.get("selected") or 0)
+        exported = int(result.get("exported") or 0)
+        total_selected += selected
+        total_exported += exported
+
+        if result.get("status") != "ok":
+            break
+        if selected == 0:
+            drained = True
+            break
+        if exported < selected:
+            break
+        if selected < batch_size:
+            drained = True
+            break
+
+    return {
+        "status": (last_result or {}).get("status", "ok"),
+        "mode": (last_result or {}).get("mode"),
+        "write_method": (last_result or {}).get("write_method"),
+        "payload": (last_result or {}).get("payload", "normalized_indicators_only"),
+        "raw_mirror": False,
+        "batch_size": batch_size,
+        "max_batches": max_batches,
+        "batches": batches,
+        "selected": total_selected,
+        "exported": total_exported,
+        "drained": drained,
+        "last_batch": last_result or {},
+    }
 
 
 async def _run_decision_outbox_check() -> dict:
@@ -617,6 +694,12 @@ async def start_scheduler() -> None:
         900,
         minimum=60,
     )
+    lock_retry_seconds = _env_int(
+        "ANALYZER_SCHEDULER_LOCK_RETRY_SECONDS",
+        300,
+        minimum=30,
+        maximum=interval,
+    )
 
     logger.info("Scheduler started: incremental every %d min, full resolution every %s, "
                 "digest at %02d:00 UTC, status heartbeat every %dh, DB backups %s, "
@@ -633,6 +716,7 @@ async def start_scheduler() -> None:
     was_offline = False
 
     while _running:
+        sleep_seconds = interval
         if not await check_db_connectivity():
             if not was_offline:
                 logger.warning("Database unreachable — scheduler pausing until connectivity returns")
@@ -695,6 +779,12 @@ async def start_scheduler() -> None:
             logger.info("Starting full resolution (last run: %s)", last_full_run)
             try:
                 stats = await run_full_resolution()
+                if _run_skipped_due_lock(stats):
+                    sleep_seconds = lock_retry_seconds
+                    logger.warning(
+                        "Full resolution skipped due active run lock; retrying in %ds",
+                        sleep_seconds,
+                    )
                 await _stage_collector_priority_hints("full_resolution", stats)
                 await _stage_identity_truth_and_indicators("full_resolution", stats)
             except Exception:
@@ -703,6 +793,12 @@ async def start_scheduler() -> None:
             logger.info("Starting incremental run")
             try:
                 stats = await run_incremental()
+                if _run_skipped_due_lock(stats):
+                    sleep_seconds = lock_retry_seconds
+                    logger.warning(
+                        "Incremental run skipped due active run lock; retrying in %ds",
+                        sleep_seconds,
+                    )
                 await _stage_collector_priority_hints("incremental", stats)
                 await _stage_identity_truth_and_indicators("incremental", stats)
             except Exception:
@@ -714,7 +810,7 @@ async def start_scheduler() -> None:
         except Exception:
             logger.debug("Merge candidate check failed", exc_info=True)
 
-        await asyncio.sleep(interval)
+        await asyncio.sleep(sleep_seconds)
 
 
 def stop_scheduler() -> None:

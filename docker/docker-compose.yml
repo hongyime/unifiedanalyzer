@@ -79,6 +79,7 @@ services:
   scheduler:
     container_name: unifiedanalyzer_scheduler
     image: unifiedanalyzer:latest
+    init: true
     depends_on:
       - analyzer
     command: ["python", "-m", "src.main", "scheduler"]
@@ -149,6 +150,7 @@ services:
   face_worker:
     container_name: unifiedanalyzer_face_worker
     image: unifiedanalyzer:latest
+    init: true
     depends_on:
       - analyzer
     # nice the worker so the collectors (Telegram/WA/IG + RabbitMQ/Postgres) win
