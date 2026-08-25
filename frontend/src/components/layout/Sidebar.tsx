@@ -3,6 +3,7 @@ import { clsx } from '../../lib/cx'
 import {
   ListChecks, GitCompare, Users, Network, Bell, Images, ScanFace, Search,
   FolderOpen, Play, HelpCircle, Database, Languages, Gauge, GitFork,
+  ShieldCheck,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import type { LiveHealth } from '../../api'
@@ -30,6 +31,7 @@ const groups = [
   {
     label: 'Operations',
     items: [
+      { to: '/production', label: 'Production', icon: ShieldCheck },
       { to: '/collector', label: 'Collector', icon: Database },
       { to: '/multilingual', label: 'Languages', icon: Languages },
       { to: '/eval', label: 'Evaluation', icon: Gauge },

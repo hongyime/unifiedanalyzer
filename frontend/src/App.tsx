@@ -9,6 +9,7 @@ const TriagePage = lazy(() => import('./pages/Triage'))
 const CasesPage = lazy(() => import('./pages/Cases'))
 const AlertsPage = lazy(() => import('./pages/Alerts'))
 const CollectorCoveragePage = lazy(() => import('./pages/CollectorCoverage'))
+const ProductionReadinessPage = lazy(() => import('./pages/ProductionReadiness'))
 const MultilingualPage = lazy(() => import('./pages/Multilingual'))
 const EvalPage = lazy(() => import('./pages/Eval'))
 const ReviewPage = lazy(() => import('./pages/Review'))
@@ -57,6 +58,7 @@ function App() {
           <Route path="/review" element={<ReviewPage />} />
           <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/collector" element={<CollectorCoveragePage />} />
+          <Route path="/production" element={<ProductionReadinessPage />} />
           <Route path="/multilingual" element={<MultilingualPage />} />
           <Route path="/eval" element={<EvalPage />} />
           <Route path="/entities" element={<EntitiesPage />} />

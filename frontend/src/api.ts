@@ -340,6 +340,37 @@ export interface CollectorProductionStatus {
   summary: CollectorProductionSummary
 }
 
+export interface ProductionReadinessStory {
+  actor: 'operator' | 'analyst' | string
+  story: string
+  value: string
+  proves: string
+}
+
+export interface ProductionReadinessCheck {
+  id: string
+  title: string
+  ok: boolean
+  status: 'ok' | 'degraded' | string
+  severity: 'critical' | 'warning' | string
+  user_story: ProductionReadinessStory
+  detail: string
+  evidence: Record<string, unknown>
+}
+
+export interface ProductionReadinessReport {
+  status: 'ok' | 'degraded' | string
+  ok: boolean
+  user_stories: Record<string, ProductionReadinessStory>
+  checks: ProductionReadinessCheck[]
+  summary: {
+    total: number
+    ok: number
+    degraded: number
+    critical_failed: number
+  }
+}
+
 export interface GraphExplainEdge {
   id: string
   from_entity_id: string | null
@@ -1044,6 +1075,7 @@ export const api = {
   getCollectorHealth: () => get<{ collectors: CollectorInfo[] }>('/collector/health'),
   getCollectorCoverage: () => get<CollectorCoverageResponse>('/collector/coverage'),
   getCollectorProductionStatus: () => get<CollectorProductionStatus>('/collector/production-status'),
+  getProductionReadiness: () => get<ProductionReadinessReport>('/production/readiness'),
 
   getStreamAlertStatus: () => get<StreamAlertStatus>('/alerts/stream/status'),
   getAlertFingerprints: (status = '', alertType = '', limit = 50) => {
