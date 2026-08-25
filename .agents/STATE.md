@@ -1,5 +1,15 @@
 # UnifiedAnalyzer Agent State
 
+
+Updated: 2026-08-25 14:20 UTC / 22:20 SGT
+
+Current live update:
+- Resumed cross-repo work after the Codex usage-limit stop. Rebased live truth first: `/api/health` degraded only by a real Supabase export backlog (`ready_to_export=17`, `exported_count=6267`); Collector action queue `count=0`; baseline readiness measured 55.6s wall with three warning degradations before any change.
+- Committed the previously uncommitted multi-session working tree as five atomic commits: production readiness/data-quality gates, exposure staging + Facebook attribution, bounded media scans + scheduler export drains, `/production` frontend page, and agent docs. Secret scan clean.
+- Fixed the readiness load-timeout blocker: sequential recovery chains after the parallel gather (health isolated retry up to 90s plus fast fallback 35s; collector retry 90s plus fallback 45s) could exceed any client timeout. Added `ANALYZER_READINESS_TOTAL_BUDGET_SECONDS` (default 40) capping every stage including recovery; stages skipped by the deadline are recorded as `deadline_skipped_stages` evidence instead of hanging the route. RED→GREEN regression test pins a stalled-retry scenario returning bounded degraded evidence (commit `4a59b9c`).
+- Live proof after container recreate: cold probe 41.4s bounded, warm probe 25.7s vs the 55.6s baseline. Remaining degraded checks are genuine signals, not deadline artifacts: `supabase_populated` backlog=17 (real), Collector maintenance terminal-degraded state (real Collector-side signal for follow-up), `data_quality_ledger` timeout under concurrent load with cache fallback active.
+- Verification: `python -m pytest tests\test_readiness_route.py tests\test_collector_health_route.py tests\test_data_quality_ledger.py -q` passed 63; frontend `npm run build` passed pre-commit; live curl artifacts captured at 41.4s/25.7s.
+- Remaining known work: re-run of the three Codex sidecar audits that died on the usage limit (reviewer/auditor/researcher), X `try_again_empty_state` page shell, Instagram removed-post/429 churn, FB/Threads/X stale browser-content suppression reasons, Supabase backlog drain watch.
 Updated: 2026-08-21 23:46 UTC / 2026-08-22 07:46 SGT
 
 Current live update:

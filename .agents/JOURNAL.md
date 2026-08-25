@@ -1,5 +1,6 @@
 # UnifiedAnalyzer Agent Journal
 
+- 2026-08-25 14:20 UTC: Production readiness must obey one global wall-clock budget across ALL stages including isolated retries and fallbacks; per-stage budgets alone summed past any client timeout (55.6s live). ANALYZER_READINESS_TOTAL_BUDGET_SECONDS now caps every stage and records deadline_skipped_stages instead of hanging.
 - 2026-08-21 21:38 UTC: Treat visible Chrome logout/page-shell reports as profile-specific until CDP/vault/browser-ingest proof says otherwise; current Collector CDP auth is intact after canonical tab repair, while Analyzer readiness degradation is timeout/load-derived and separate from browser cookies.
 - 2026-08-21 16:25 UTC: Supabase compact indicator export remained healthy after Collector hardening, but production readiness is currently degraded under load and by two real Collector browser/content actions; do not claim production-ready until those gates revalidate cleanly.
 - 2026-08-21 14:15 UTC: Future-dated analyzer evidence must degrade the data-quality ledger as `clock_skew`; clamping negative age to zero let bad synthetic GitHub rows look fresh. Corrected the two live future GitHub timeline rows with metadata rather than deleting them.
