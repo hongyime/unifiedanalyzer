@@ -1,10 +1,12 @@
 import json
 import hashlib
+import os
+import asyncpg
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
 from src.db.connection import get_analyzer_pool
-from src.pipeline.indicator_export import supabase_export_config
+from src.pipeline.indicator_export import _supabase_database_url, supabase_export_config
 
 router = APIRouter(tags=["export"])
 
@@ -17,6 +19,44 @@ def _hash_value(value: str | None) -> str | None:
     if not value:
         return None
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+
+
+async def _supabase_remote_readback(config: dict) -> dict:
+    """Return compact proof that the remote Supabase table is reachable/populated."""
+    dsn = _supabase_database_url()
+    if not dsn:
+        return {"configured": False, "reachable": False, "reason": "database_url_missing"}
+    timeout = float(os.getenv("SUPABASE_STATUS_READBACK_TIMEOUT_SECONDS", "45"))
+    conn = None
+    try:
+        conn = await asyncpg.connect(dsn, timeout=timeout)
+        exists = await conn.fetchval("SELECT to_regclass('public.normalized_indicators') IS NOT NULL")
+        if not exists:
+            return {"configured": True, "reachable": True, "table_exists": False}
+        row = await conn.fetchrow(
+            """
+            SELECT count(*)::bigint AS row_count,
+                   max(exported_at) AS latest_exported_at
+            FROM public.normalized_indicators
+            """
+        )
+        return {
+            "configured": True,
+            "reachable": True,
+            "table_exists": True,
+            "row_count": int(row["row_count"] or 0),
+            "latest_exported_at": row["latest_exported_at"].isoformat() if row["latest_exported_at"] else None,
+            "write_method": config.get("write_method"),
+        }
+    except Exception as exc:  # noqa: BLE001 - status endpoint must report drift, not fail
+        return {
+            "configured": True,
+            "reachable": False,
+            "error": exc.__class__.__name__,
+        }
+    finally:
+        if conn is not None:
+            await conn.close()
 
 
 @router.get("/entities/{entity_id}/export")
@@ -169,6 +209,7 @@ async def identity_truth_status():
 async def supabase_indicator_export_status():
     pool = get_analyzer_pool()
     config = supabase_export_config()
+    remote_readback = await _supabase_remote_readback(config)
     async with pool.acquire() as conn:
         if not await _table_exists(conn, "normalized_indicators"):
             return {
@@ -177,6 +218,7 @@ async def supabase_indicator_export_status():
                 "counts": [],
                 "ready_to_export": 0,
                 "raw_mirror": False,
+                "remote_readback": remote_readback,
             }
         counts = await conn.fetch(
             """
@@ -209,6 +251,7 @@ async def supabase_indicator_export_status():
         ],
         "ready_to_export": int(ready or 0),
         "raw_mirror": False,
+        "remote_readback": remote_readback,
         "supabase_free_tier_guard": {
             "db_budget_mb": 500,
             "storage_budget_gb": 1,

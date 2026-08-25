@@ -4,7 +4,6 @@ from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
 
 from src.db.connection import get_analyzer_pool
-from src.pipeline.incremental_runner import run_incremental
 from src.pipeline.stream_alerts import stream_alert_status
 
 router = APIRouter(tags=["alerts"])
@@ -517,6 +516,8 @@ async def list_notification_audit(
 
 @router.post("/runs/trigger")
 async def trigger_run():
+    from src.pipeline.incremental_runner import run_incremental
+
     try:
         stats = await run_incremental()
         return {"ok": True, "stats": stats}

@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import contextlib
+import importlib
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,27 +11,6 @@ from pathlib import Path
 
 from src.db.connection import init_pools, close_pools
 from src.notifications.alerts import notify_startup, notify_shutdown
-from src.api.routes.entities import router as entities_router
-from src.api.routes.timeline import router as timeline_router
-from src.api.routes.alerts import router as alerts_router
-from src.api.routes.health import router as health_router
-from src.api.routes.entity_actions import router as entity_actions_router
-from src.api.routes.behavior import router as behavior_router
-from src.api.routes.export import router as export_router
-from src.api.routes.collector_health import router as collector_health_router
-from src.api.routes.graph import router as graph_router
-from src.api.routes.intelligence import router as intelligence_router
-from src.api.routes.metrics import router as metrics_router
-from src.api.routes.media import router as media_router
-from src.api.routes.triage import router as triage_router
-from src.api.routes.cases import router as cases_router
-from src.api.routes.changelog import router as changelog_router
-from src.api.routes.search import router as search_router
-from src.api.routes.intersections import router as intersections_router
-from src.api.routes.face_search import router as face_search_router
-from src.api.routes.eval import router as eval_router
-from src.api.routes.multilingual import router as multilingual_router
-from src.api.websocket import router as websocket_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,36 +34,61 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(entities_router, prefix="/api")
-app.include_router(timeline_router, prefix="/api")
-app.include_router(alerts_router, prefix="/api")
-app.include_router(health_router, prefix="/api")
-app.include_router(entity_actions_router, prefix="/api")
-app.include_router(behavior_router, prefix="/api")
-app.include_router(export_router, prefix="/api")
-app.include_router(collector_health_router, prefix="/api")
-app.include_router(graph_router, prefix="/api")
-app.include_router(intelligence_router, prefix="/api")
-app.include_router(metrics_router, prefix="/api")
-app.include_router(media_router, prefix="/api")
-app.include_router(triage_router, prefix="/api")
-app.include_router(cases_router, prefix="/api")
-app.include_router(changelog_router, prefix="/api")
-app.include_router(intersections_router, prefix="/api")
-app.include_router(face_search_router, prefix="/api")
-app.include_router(eval_router, prefix="/api")
-app.include_router(multilingual_router, prefix="/api")
-# Axis-1 MVP: semantic timeline search. Router carries its own /api/search
-# prefix, so mount without a further prefix here.
-app.include_router(search_router)
-# Websocket router mounted at root so the path is exactly /ws/health.
-app.include_router(websocket_router)
+def _include_router(module_path: str, *, prefix: str | None = "/api") -> str:
+    router = _load_router(module_path)
+    if prefix is None:
+        app.include_router(router)
+    else:
+        app.include_router(router, prefix=prefix)
+    return module_path
 
-# Face engine API (merge Stage 4 — docs/facetracker_merge_plan.md §7): mount the
-# vendored facetracker routes under /api/face. Guarded so a face-side failure
-# never blocks analyzer startup. Returns empty until faces are indexed (B1/R6).
-from src.api.face_mount import mount_face_api
-mount_face_api(app)
+
+def _load_router(module_path: str):
+    module = importlib.import_module(module_path)
+    return getattr(module, "router")
+
+
+_CORE_ROUTE_MODULES: tuple[tuple[str, str | None], ...] = (
+    ("src.api.routes.health", "/api"),
+    ("src.api.routes.export", "/api"),
+    ("src.api.routes.collector_health", "/api"),
+    ("src.api.routes.data_quality", "/api"),
+    ("src.api.routes.readiness", "/api"),
+    # Analyst workflow routes must be mounted before the SPA fallback. These are
+    # core production UX surfaces and are light enough to import during startup.
+    ("src.api.routes.entities", "/api"),
+    ("src.api.routes.triage", "/api"),
+    ("src.api.routes.cases", "/api"),
+    ("src.api.routes.entity_actions", "/api"),
+)
+
+_DEFERRED_ROUTE_MODULES: tuple[tuple[str, str | None], ...] = (
+    ("src.api.routes.timeline", "/api"),
+    ("src.api.routes.alerts", "/api"),
+    ("src.api.routes.behavior", "/api"),
+    ("src.api.routes.graph", "/api"),
+    ("src.api.routes.intelligence", "/api"),
+    ("src.api.routes.metrics", "/api"),
+    ("src.api.routes.media", "/api"),
+    ("src.api.routes.changelog", "/api"),
+    ("src.api.routes.intersections", "/api"),
+    ("src.api.routes.face_search", "/api"),
+    ("src.api.routes.eval", "/api"),
+    ("src.api.routes.multilingual", "/api"),
+    ("src.api.routes.search", None),
+    ("src.api.websocket", None),
+)
+
+for module_path, prefix in _CORE_ROUTE_MODULES:
+    _include_router(module_path, prefix=prefix)
+
+# Face engine API (merge Stage 4 — docs/facetracker_merge_plan.md §7) is mounted
+# after core startup. Face route imports load FAISS/OpenCV and can take tens of
+# seconds on this host, so core health/readiness must not wait on them.
+_face_api_mount_task: asyncio.Task | None = None
+_face_api_mounted: list[str] = []
+_deferred_routes_task: asyncio.Task | None = None
+_deferred_routes_mounted: list[str] = []
 
 _scheduler_task: asyncio.Task | None = None
 _stop_scheduler = None
@@ -90,9 +96,11 @@ _stop_scheduler = None
 
 @app.on_event("startup")
 async def startup():
-    global _scheduler_task, _stop_scheduler
+    global _scheduler_task, _stop_scheduler, _face_api_mount_task, _deferred_routes_task
     apply_schema = os.getenv("ANALYZER_APPLY_SCHEMA_ON_STARTUP", "1") != "0"
+    print("UnifiedAnalyzer startup: initializing DB pools", flush=True)
     await init_pools(apply_schema_ddl=apply_schema)
+    print("UnifiedAnalyzer startup: DB pools initialized", flush=True)
     # The scheduler runs the heavy Phase-6 pipeline (cv2 / ffmpeg / pypdf) whose
     # blocking C calls would freeze this uvicorn event loop for the whole run,
     # making the dashboard unresponsive. So it now runs as a SEPARATE process
@@ -105,12 +113,53 @@ async def startup():
         logging.getLogger(__name__).info("UnifiedAnalyzer started (scheduler in-process)")
     else:
         logging.getLogger(__name__).info("UnifiedAnalyzer started (API only; scheduler is a separate process)")
-    asyncio.create_task(notify_startup())
+    print("UnifiedAnalyzer startup: scheduling startup notification", flush=True)
+
+    async def _notify_startup_fail_open() -> None:
+        try:
+            await asyncio.wait_for(notify_startup(), timeout=float(os.getenv("ANALYZER_STARTUP_NOTIFY_TIMEOUT_SECONDS", "10")))
+        except Exception:
+            logging.getLogger(__name__).warning("startup notification failed or timed out", exc_info=True)
+
+    asyncio.create_task(_notify_startup_fail_open())
+    if _deferred_routes_task is None:
+        async def _mount_deferred_routes_fail_open() -> None:
+            mounted: list[str] = []
+            for module_path, prefix in _DEFERRED_ROUTE_MODULES:
+                try:
+                    router = await asyncio.to_thread(_load_router, module_path)
+                    if prefix is None:
+                        app.include_router(router)
+                    else:
+                        app.include_router(router, prefix=prefix)
+                    mounted.append(module_path)
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "deferred API route failed to mount: %s",
+                        module_path,
+                        exc_info=True,
+                    )
+            _deferred_routes_mounted[:] = mounted
+
+        _deferred_routes_task = asyncio.create_task(_mount_deferred_routes_fail_open())
+    if _face_api_mount_task is None:
+        async def _mount_face_api_fail_open() -> None:
+            try:
+                from src.api.face_mount import mount_face_api
+
+                mounted = await asyncio.to_thread(mount_face_api, app)
+                _face_api_mounted[:] = mounted
+            except Exception:
+                logging.getLogger(__name__).warning("face API mount failed or timed out", exc_info=True)
+
+        _face_api_mount_task = asyncio.create_task(_mount_face_api_fail_open())
+    print("UnifiedAnalyzer startup: complete", flush=True)
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    await notify_shutdown()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(notify_shutdown(), timeout=float(os.getenv("ANALYZER_SHUTDOWN_NOTIFY_TIMEOUT_SECONDS", "10")))
     if _stop_scheduler:
         _stop_scheduler()
     if _scheduler_task:
