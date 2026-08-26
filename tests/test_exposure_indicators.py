@@ -172,3 +172,48 @@ async def test_stage_exposure_requeues_exported_indicators_for_supabase():
     assert analyzer.upserts
     assert "export_status = CASE" in analyzer.upserts[0][0]
     assert "THEN 'pending'" in analyzer.upserts[0][0]
+from src.pipeline.exposure_indicators import _collapse_indicators as collapse_indicators
+from src.pipeline.timeline_builder import PLATFORM_QUERIES, _format_platform_query
+
+
+def _entry(itype, value, confidence):
+    class _I:
+        pass
+    i = _I()
+    i.indicator_type = itype
+    i.normalized_value = value
+    i.display_value = value
+    i.confidence = confidence
+    i.metadata = {}
+    return i
+
+
+def test_low_confidence_email_is_redacted_and_exportable():
+    rows = collapse_indicators([_entry("email", "john.smith@example.com", 0.4)])
+    assert rows[0][6] is True
+    assert "john.smith" not in rows[0][1]
+    assert rows[0][1].endswith("@example.com")
+
+
+def test_low_confidence_ipv4_is_truncated_to_slash24():
+    rows = collapse_indicators([_entry("ipv4", "203.0.113.57", 0.4)])
+    assert rows[0][6] is True
+    assert rows[0][1] == "203.0.113.0/24"
+
+
+def test_domain_passes_through_redaction_unchanged():
+    rows = collapse_indicators([_entry("domain", "example.edu.sg", 0.4)])
+    assert rows[0][6] is True and rows[0][1] == "example.edu.sg"
+
+
+def test_website_content_published_query_registered():
+    spec = next(s for s in PLATFORM_QUERIES if s["source"] == "website" and s["event_type"] == "CONTENT_PUBLISHED")
+    assert "FROM website_pages p" in spec["query"]
+
+
+def test_website_content_published_supports_incremental_filter():
+    from datetime import datetime, timezone
+    spec = next(s for s in PLATFORM_QUERIES if s["source"] == "website")
+    query, params = _format_platform_query(spec, datetime(2026, 8, 26, tzinfo=timezone.utc))
+    assert "p.collected_at > $1" in query
+

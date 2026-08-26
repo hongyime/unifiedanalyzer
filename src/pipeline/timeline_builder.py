@@ -277,6 +277,21 @@ PLATFORM_QUERIES = [
         "time_col": "COALESCE(p.platform_created_at, p.collected_at)",
     },
     {
+        "source": "website",
+        "event_type": "CONTENT_PUBLISHED",
+        "query": """
+            SELECT p.url_hash AS record_id,
+                   p.collected_at AS occurred_at,
+                   LEFT(COALESCE(p.title, p.url), 200) AS title,
+                   NULL AS entity_ref,
+                   jsonb_strip_nulls(jsonb_build_object('url', p.url, 'status_code', p.status_code)) AS metadata
+            FROM website_pages p
+            WHERE p.collected_at IS NOT NULL {where_clause}
+            ORDER BY p.collected_at DESC
+        """,
+        "time_col": "p.collected_at",
+    },
+    {
         "source": "x",
         "event_type": "CONTENT_PUBLISHED",
         "query": """

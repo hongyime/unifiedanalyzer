@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -150,6 +151,33 @@ def _collapse_indicators(indicators: list[NormalizedIndicator]) -> list[tuple[An
         entry["confidence"] = max(float(entry["confidence"] or 0), float(item.confidence or 0))
         entry["supabase_exportable"] = bool(entry["supabase_exportable"]) or item.confidence >= 0.75
         entry["metadata"] = {**entry["metadata"], **(item.metadata or {})}
+
+    # Ticket T12 (operator decision 2026-08-26, "redact + export"): low-confidence
+    # exposure indicators become exportable once reduced to a non-identifying
+    # form: emails -> hashed local part, IPv4 -> /24 network, phones -> hashed
+    # subscriber suffix. Domains are already low-PII and pass through as-is.
+    if os.getenv("ANALYZER_EXPOSURE_REDACTED_EXPORT", "1").strip().lower() not in {"0", "false", "no"}:
+        for entry in collapsed.values():
+            if entry["supabase_exportable"]:
+                continue
+            itype = str(entry["indicator_type"] or "").lower()
+            value = str(entry["normalized_value"] or "")
+            try:
+                if itype == "email" and "@" in value:
+                    local_part, _, domain = value.partition("@")
+                    value = hashlib.sha256(local_part.encode()).hexdigest()[:12] + "@" + domain
+                elif itype in {"ipv4", "ip"} and value.count(".") == 3:
+                    a, b, c, _d = value.split(".")
+                    value = f"{a}.{b}.{c}.0/24"
+                elif itype == "phone" and len(value) >= 8:
+                    value = value[:3] + "-h" + hashlib.sha256(value.encode()).hexdigest()[:8]
+                elif itype != "domain":
+                    continue
+                entry["normalized_value"] = value
+                entry["display_value"] = value
+                entry["supabase_exportable"] = True
+            except Exception:
+                continue
 
     return [
         (
