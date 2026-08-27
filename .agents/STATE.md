@@ -391,3 +391,20 @@ Updated: 2026-08-26 02:40 SGT — T14 DONE, rotator design found
 - T14 supabase-reconcile CLI: DONE, committed d86cfbf. Live reconcile+clean removed 294 orphans; remote now equals local (8090). `python -m src.main supabase-reconcile [--clean] [--json]`.
 - ROTATOR MECHANISM FOUND (unblocks G3): table `collection_schedules(source, interval_hours, enabled, last_run, next_run)` is the existing control plane the collector scheduler already reads (src/scheduler/__init__.py ~1029; base_collector cycle gate). Rotator = scheduled UPDATE of enabled/next_run for BROWSER sources round-robin at width N; MSG sources (telegram/beeper/whatsapp/instagram_dm) pinned enabled=t low-interval for realtime. instagram currently enabled=f. NO new pause primitive or container stop/start needed.
 - REMAINING (large, multi-session): TM live concurrency experiments; G1 groups + G3 rotator over collection_schedules; S2 watchdog pause-awareness; S3 drain hook; SC1 analyzer image rebuild for office docs; SC2 full infosec-dorks import throttled; CTI1 IOC feed ingest + enrichment + alerts; X1 hygiene; FINAL soak. Each is a discrete build; continue sequentially next session per this order.
+
+Updated: 2026-08-26 03:05 SGT — ROTATOR GAP FOUND, honest checkpoint
+
+DONE + committed this arc:
+- T14 supabase-reconcile CLI (d86cfbf) — live reconcile+clean removed 294 orphans, remote==local 8090.
+- G3 rotator CORE (b0192edd): src/core/browser_rotator.py + tests. Stateless time-slot round-robin over collection_schedules; pinned msg/backend never touched. NOT YET WIRED into scheduler _tick.
+
+BLOCKING DESIGN GAP (must resolve before G3 can truly work):
+- collection_schedules rows exist ONLY for: beeper, instagram, lemon8, search, strava, telegram, tiktok, website, youtube.
+- MISSING: x, facebook, threads — these are pure browser-EXTENSION-tab-driven (content scripts on open tabs), NOT gated by collection_schedules. Rotator UPDATE on them = no-op.
+- So collection_schedules rotation covers instagram/lemon8/strava/tiktok only. To rotate x/facebook/threads need a TAB-LAYER control: either (a) per-platform enable flag the extension (extension/platforms.js + background.js) reads and honors, or (b) tab open/close orchestration via browser_tab_reload/CDP, or (c) insert collection_schedules rows for them AND add a gate the tab-scrape path checks. DECISION NEEDED.
+
+TIME-BOUND tasks that CANNOT complete in an autonomous run (need real wall-clock observation):
+- TM test matrix (6 browser combos, measure RAM/DB-timeout/tab-health over time)
+- X1 7-day soak; FINAL end-to-end green with soak/one-full-rotation-cycle verification
+
+REMAINING BUILD tasks (multi-session): rotator gap fix + wire into _tick (self-gated, try/except); G2 verify msg realtime; S2 watchdog pause-awareness; S3 drain hook; SC1 analyzer image rebuild for office docs (python-docx/openpyxl/python-pptx); SC2 full infosec-dorks import throttled; CTI1 IOC feed ingest + enrichment + malicious-match alerts (new pipeline phase).
