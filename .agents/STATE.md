@@ -355,12 +355,12 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-08-26 01:42:25 +08:00
+- Updated: 2026-08-27 01:27:17 +08:00
 - Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: d480fa5
+- HEAD: e994b2e
 - Dirty files: 1
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
@@ -375,3 +375,13 @@ Current live update:
 - Scrape proof after repairs (rolling 60m stored): facebook 176 (stall cleared), instagram 288 (legit cooldown warning only), threads 127, x 12; open action queue count=0.
 - Final gate: clean isolation readiness status=ok critical_failed=0 degraded=1 (warning-only data_quality_ledger surfacing real export-gap families: telegram/whatsapp/exposure non-exportable indicators + website derived-evidence gap - ticketed, not a regression); Supabase drained ready_to_export=0 remote 6284 rows; zero Tracebacks/500s across analyzer/scheduler/dashboard/watchdog logs in the post-change window; scheduler heartbeat fresh (15s).
 - Competitive teardown delivered at .agents/handoffs/20260826-gods-eye-view-teardown.md (docs/ is gitignored): GEV = client-only realtime globe (1.4k stars, 4 commits, zero persistence); UA moat = authenticated collection + identity resolution + history. P0 upgrade: globe/timeline layer over existing geo-inference data; P1 freshness badges from readiness/DQ + NL query over entity APIs.
+
+Updated: 2026-08-26 02:10 SGT — GOAL APPROVED, decisions locked
+
+Operator approved plan v2 (https://8oxlsfmfepyh.postplan.dev) FULLY. Goal: complete ALL remaining tasks, verify end-to-end, report only when done. Sequential only (subagents non-functional in harness). Locked decisions:
+- ROUND-ROBIN = in-system activity rotator (containers stay up, pause/resume per-platform scrape activity on schedule; messaging wa/telegram/beeper stay 24/7 realtime). NOT container stop/start.
+- SC1 = YES rebuild analyzer image for office-doc parsing (python-docx/openpyxl/python-pptx).
+- CTI1 = enrichment + ALERTS: pull free IOC feeds (URLhaus, Feodo, OpenPhish, abuse.ch) read-only, tag matched entities/indicators, raise alerts on malicious matches.
+- SC2 = FULL infosec-dorks set, throttled/backoff to survive DDG rate limits.
+- DONE BAR = full end-to-end green: readiness ok/critical_failed=0, all collector groups producing, analyzer fresh, supabase drained, zero Tracebacks/500s, all task tests green.
+Task order: TM test-matrix -> G1-G3 groups+rotator -> S2 watchdog pause-aware -> S3 drain hook -> T14 reconcile CLI -> SC1/SC2 scope -> CTI1 -> X1 hygiene.

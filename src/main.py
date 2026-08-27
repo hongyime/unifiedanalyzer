@@ -152,6 +152,12 @@ def main():
         help="Skip CREATE TABLE IF NOT EXISTS on the remote Supabase database",
     )
     supabase_export.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    supabase_reconcile = sub.add_parser(
+        "supabase-reconcile",
+        help="Reconcile remote Supabase mirror against local exported truth",
+    )
+    supabase_reconcile.add_argument("--clean", action="store_true", help="Delete remote rows with no local exported match")
+    supabase_reconcile.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     hard_reset = sub.add_parser(
         "hard-reset-entities",
         help="DESTRUCTIVE: wipe all entities+links (CASCADE wipes faces/signals) then rebuild",
@@ -521,6 +527,32 @@ def main():
                 await close_pools()
 
         asyncio.run(_run())
+
+    elif args.command == "supabase-reconcile":
+        from src.db.connection import init_pools, close_pools, get_analyzer_pool
+        from src.pipeline.indicator_export import reconcile_supabase_indicators
+
+        async def _run_reconcile():
+            await init_pools(apply_schema_ddl=False)
+            try:
+                pool = get_analyzer_pool()
+                async with pool.acquire() as conn:
+                    report = await reconcile_supabase_indicators(conn, clean=args.clean)
+                if args.json:
+                    print(json.dumps(report, indent=2, sort_keys=True, default=str))
+                else:
+                    print(
+                        "Supabase reconcile: "
+                        f"{report['status']} local={report['local_exported']} "
+                        f"remote={report['remote_rows']} orphans={report['orphans']} "
+                        f"deleted={report['deleted']}"
+                    )
+                if report.get("status") == "error":
+                    sys.exit(2)
+            finally:
+                await close_pools()
+
+        asyncio.run(_run_reconcile())
 
     elif args.command == "hard-reset-entities":
         if not args.yes:

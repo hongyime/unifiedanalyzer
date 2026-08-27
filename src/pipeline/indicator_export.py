@@ -450,3 +450,89 @@ async def export_pending_supabase_indicators(
 
     result["exported"] = len(rows)
     return result
+
+
+async def reconcile_supabase_indicators(
+    conn,
+    *,
+    clean: bool = False,
+    mode: str | None = None,
+    database_url: str | None = None,
+    remote_conn=None,
+) -> dict[str, Any]:
+    """Reconcile the remote Supabase mirror against local exported truth.
+
+    Ticket T14 (operator decision: reconcile+clean). Reports remote rows that
+    have no matching locally-exported (indicator_type, normalized_value); with
+    clean=True, deletes those orphans so Supabase provably mirrors local truth.
+    """
+    mode_value = _supabase_mode(mode)
+    result: dict[str, Any] = {
+        "status": "ok",
+        "mode": mode_value,
+        "clean": bool(clean),
+        "local_exported": 0,
+        "remote_rows": 0,
+        "orphans": 0,
+        "deleted": 0,
+    }
+    if mode_value not in {"postgres_direct", "direct", "enabled", "write", "on", "1", "true"}:
+        result["status"] = "skipped"
+        result["reason"] = f"unsupported_mode:{mode_value}"
+        return result
+    dsn = _supabase_database_url(database_url)
+    owns_remote = remote_conn is None
+    remote = remote_conn
+    try:
+        if remote is None:
+            if not dsn:
+                raise RuntimeError("SUPABASE_DATABASE_URL is not configured")
+            remote = await asyncpg.connect(dsn, timeout=float(os.getenv("SUPABASE_CONNECT_TIMEOUT_SECONDS", "15")))
+        local_rows = await conn.fetch(
+            """
+            SELECT indicator_type, normalized_value
+            FROM normalized_indicators
+            WHERE export_status = 'exported'
+            """
+        )
+        local_set = {(r["indicator_type"], r["normalized_value"]) for r in local_rows}
+        remote_rows = await remote.fetch(
+            "SELECT indicator_type, normalized_value FROM normalized_indicators"
+        )
+        remote_set = {(r["indicator_type"], r["normalized_value"]) for r in remote_rows}
+        result["local_exported"] = len(local_set)
+        result["remote_rows"] = len(remote_set)
+        orphans = sorted(remote_set - local_set)
+        result["orphans"] = len(orphans)
+        result["orphan_samples"] = [
+            {"indicator_type": t, "normalized_value": v} for t, v in orphans[:20]
+        ]
+        if clean and orphans:
+            deleted = 0
+            for i in range(0, len(orphans), 500):
+                chunk = orphans[i:i + 500]
+                types = [t for t, _ in chunk]
+                values = [v for _, v in chunk]
+                res = await remote.execute(
+                    """
+                    DELETE FROM normalized_indicators ni
+                    USING unnest($1::text[], $2::text[]) AS o(indicator_type, normalized_value)
+                    WHERE ni.indicator_type = o.indicator_type
+                      AND ni.normalized_value = o.normalized_value
+                    """,
+                    types,
+                    values,
+                )
+                try:
+                    deleted += int(res.split()[-1])
+                except (IndexError, ValueError):
+                    pass
+            result["deleted"] = deleted
+    except Exception as exc:  # noqa: BLE001 - reconcile must report, not crash
+        result["status"] = "error"
+        result["error"] = str(exc)[:500]
+        return result
+    finally:
+        if owns_remote and remote is not None:
+            await remote.close()
+    return result
