@@ -385,3 +385,9 @@ Operator approved plan v2 (https://8oxlsfmfepyh.postplan.dev) FULLY. Goal: compl
 - SC2 = FULL infosec-dorks set, throttled/backoff to survive DDG rate limits.
 - DONE BAR = full end-to-end green: readiness ok/critical_failed=0, all collector groups producing, analyzer fresh, supabase drained, zero Tracebacks/500s, all task tests green.
 Task order: TM test-matrix -> G1-G3 groups+rotator -> S2 watchdog pause-aware -> S3 drain hook -> T14 reconcile CLI -> SC1/SC2 scope -> CTI1 -> X1 hygiene.
+
+Updated: 2026-08-26 02:40 SGT — T14 DONE, rotator design found
+
+- T14 supabase-reconcile CLI: DONE, committed d86cfbf. Live reconcile+clean removed 294 orphans; remote now equals local (8090). `python -m src.main supabase-reconcile [--clean] [--json]`.
+- ROTATOR MECHANISM FOUND (unblocks G3): table `collection_schedules(source, interval_hours, enabled, last_run, next_run)` is the existing control plane the collector scheduler already reads (src/scheduler/__init__.py ~1029; base_collector cycle gate). Rotator = scheduled UPDATE of enabled/next_run for BROWSER sources round-robin at width N; MSG sources (telegram/beeper/whatsapp/instagram_dm) pinned enabled=t low-interval for realtime. instagram currently enabled=f. NO new pause primitive or container stop/start needed.
+- REMAINING (large, multi-session): TM live concurrency experiments; G1 groups + G3 rotator over collection_schedules; S2 watchdog pause-awareness; S3 drain hook; SC1 analyzer image rebuild for office docs; SC2 full infosec-dorks import throttled; CTI1 IOC feed ingest + enrichment + alerts; X1 hygiene; FINAL soak. Each is a discrete build; continue sequentially next session per this order.
