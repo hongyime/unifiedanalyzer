@@ -355,12 +355,12 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-08-28 11:33:01 +08:00
+- Updated: 2026-08-28 12:06:57 +08:00
 - Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 2f8e2e4
+- HEAD: 0011cdb
 - Dirty files: 1
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
@@ -468,3 +468,19 @@ REMAINING = ONLY operator-present deploys + time-bound soaks (cannot autorun):
   - TM matrix C1-C6, X1 7-day soak, FINAL soak: physically time-bound, operator observes.
 
 TM harness: building scripts/tm_probe.py so operator runs one command per combo -> logs RAM/DB-timeout/tab-health -> derives safe N. Removes hand-instrumentation.
+
+Updated: 2026-08-28 08:00 SGT — DEPLOY SESSION (operator present)
+
+DEPLOYED LIVE this session:
+- SC2: exposure collector restarted -> 347 dorks actively collecting (verified log).
+- S2: watchdog restarted earlier -> rotator pause-awareness live (verified prod log).
+SC1 wiring COMPLETE + committed (3cba582): analyze_media_office_text stage registered in incremental_runner. Deps now BAKED into unifiedanalyzer:latest via thin overlay image (python-docx/openpyxl/python-pptx verified in-image) -> SC1 activates on NEXT analyzer recreate (no 25-min rebuild). NOTE: full `docker compose build analyzer` exceeds ~25min tool timeout (requirements.txt change reinstalls insightface/onnx/torch); overlay bridges it. Operator should do a proper full rebuild in a maintenance window eventually. Latent value now (no office media in media_items until collectors fetch office files).
+
+BLOCKED ON OPERATOR (Chrome-side deploy):
+- Instagram: password changed; IG tab navigated to /accounts/login/ but NO session captured yet (cookie vault ig_markers empty). Operator must finish manual login. THEN: capture vault -> re-enable instagram in collection_schedules (currently enabled=f) -> reload extension.
+- G3-wire + X1: extension code committed (bundle version 1.23.75); needs EXTENSION BUNDLE RELOAD in managed Chrome to go live. Deferred until IG login done (reload would disrupt in-progress login).
+- Rotator: to actually rotate, run `python -m src.core.browser_rotator --loop` as sidecar OR wire self-gated into scheduler. Deploy-phase.
+
+STILL DEPLOY-PHASE (operator): analyzer recreate to activate SC1 (Z-mount incident risk, present); CTI1 DB enrichment+alerts wiring; TM live combo runs; X1 7-day soak.
+
+Docker note: partial analyzer build grew build cache to ~13.75GB (harmless; `docker builder prune` reclaims).
