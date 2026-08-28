@@ -408,3 +408,21 @@ TIME-BOUND tasks that CANNOT complete in an autonomous run (need real wall-clock
 - X1 7-day soak; FINAL end-to-end green with soak/one-full-rotation-cycle verification
 
 REMAINING BUILD tasks (multi-session): rotator gap fix + wire into _tick (self-gated, try/except); G2 verify msg realtime; S2 watchdog pause-awareness; S3 drain hook; SC1 analyzer image rebuild for office docs (python-docx/openpyxl/python-pptx); SC2 full infosec-dorks import throttled; CTI1 IOC feed ingest + enrichment + malicious-match alerts (new pipeline phase).
+
+Updated: 2026-08-26 04:00 SGT — SYSTEM GREEN; incident recovered; honest stop
+
+INCIDENT + RECOVERY (important for future ops on this host):
+- `docker compose up --force-recreate dashboard` hit stale Docker Desktop mount bug (mkdir /run/desktop/mnt/host/z: file exists) -> dashboard stuck "Created", would not start. Recovery required: kill Docker Desktop -> wsl --shutdown -> relaunch Docker Desktop -> engine re-provisioned -> `docker start unifiedcollector_dashboard`. All 36 containers healthy after.
+- LESSON: avoid --force-recreate on this host when possible; it can wedge the Z: bind mount. SC1 analyzer IMAGE REBUILD carries this same risk -> schedule it deliberately with operator present, not mid-autonomous-run.
+
+VERIFIED GREEN NOW: analyzer=ok ready_to_export=0 scheduler running; dashboard=ok; 36 containers up; /social/scrape-config live (enabled=[facebook,lemon8,strava,threads,tiktok,x] disabled=[instagram]); supabase reconcile clean local==remote==31566 orphans=0.
+
+COMMITTED THIS SESSION: T14 supabase-reconcile CLI (d86cfbf); G3 rotator core src/core/browser_rotator.py (b0192edd); /social/scrape-config + collection_schedules seeding for x/fb/threads (all 7 browser sources now in control plane); T12 redact-export drained 20,508 new indicators to supabase (mirror grew 8090->31566, reconciled clean).
+
+REMAINING (handoff, ordered; all recorded here):
+1. Extension background.js: poll /social/scrape-config, skip disabled platforms (LIVE extension reload - do with operator present).
+2. Wire rotator into scheduler _tick (self-gated, try/except) OR run `python -m src.core.browser_rotator --loop` as a small sidecar.
+3. G2 verify msg realtime; S2 watchdog pause-awareness; S3 drain hook.
+4. SC1 analyzer image rebuild for office docs (python-docx/openpyxl/python-pptx) - INCIDENT RISK, operator present.
+5. SC2 full infosec-dorks import throttled; CTI1 IOC feeds + enrichment + alerts (new pipeline).
+6. TIME-BOUND (operator observes, cannot autorun): TM 6-combo matrix; X1 7-day soak; FINAL soak verification.
