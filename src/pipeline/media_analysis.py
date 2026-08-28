@@ -22,6 +22,24 @@ from datetime import datetime, timedelta, timezone
 import fitz  # PyMuPDF
 import imagehash
 import pypdf
+
+# SC1: office-document text extraction. Guarded so the module still imports if
+# the libs are not yet in the image (activates after the operator-present
+# analyzer image rebuild that adds python-docx/openpyxl/python-pptx).
+try:  # pragma: no cover - import guard
+    import docx as _docx  # python-docx
+except Exception:  # noqa: BLE001
+    _docx = None
+try:  # pragma: no cover - import guard
+    import openpyxl as _openpyxl
+except Exception:  # noqa: BLE001
+    _openpyxl = None
+try:  # pragma: no cover - import guard
+    import pptx as _pptx  # python-pptx
+except Exception:  # noqa: BLE001
+    _pptx = None
+import imagehash
+import pypdf
 from PIL import ExifTags, Image
 
 from src.db.connection import get_analyzer_pool
@@ -622,6 +640,59 @@ def _extract_pdf_text(path) -> str:
     except Exception:
         logger.debug("PDF text extraction failed for %s", path, exc_info=True)
     return text
+
+
+_OFFICE_CONTENT_TYPES = [(None, "docx"), (None, "xlsx"), (None, "pptx")]
+_MAX_OFFICE_TEXT_LEN = 200_000
+
+
+def office_text_available() -> bool:
+    """True when at least one office-doc parser lib is importable in this image."""
+    return any(lib is not None for lib in (_docx, _openpyxl, _pptx))
+
+
+def _extract_office_text(path, kind: str) -> str:
+    """Extract plain text from a docx/xlsx/pptx file. Empty on any failure."""
+    kind = (kind or "").lower().lstrip(".")
+    try:
+        if kind == "docx" and _docx is not None:
+            doc = _docx.Document(str(path))
+            parts = [p.text for p in doc.paragraphs if p.text]
+            for table in getattr(doc, "tables", []):
+                for row in table.rows:
+                    parts.extend(c.text for c in row.cells if c.text)
+            return "\n".join(parts)[:_MAX_OFFICE_TEXT_LEN]
+        if kind == "xlsx" and _openpyxl is not None:
+            wb = _openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+            parts, total = [], 0
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    for cell in row:
+                        if cell is None:
+                            continue
+                        s = str(cell)
+                        parts.append(s)
+                        total += len(s)
+                    if total >= _MAX_OFFICE_TEXT_LEN:
+                        break
+                if total >= _MAX_OFFICE_TEXT_LEN:
+                    break
+            wb.close()
+            return " ".join(parts)[:_MAX_OFFICE_TEXT_LEN]
+        if kind == "pptx" and _pptx is not None:
+            prs = _pptx.Presentation(str(path))
+            parts = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if getattr(shape, "has_text_frame", False):
+                        for para in shape.text_frame.paragraphs:
+                            line = "".join(r.text for r in para.runs if r.text)
+                            if line:
+                                parts.append(line)
+            return "\n".join(parts)[:_MAX_OFFICE_TEXT_LEN]
+    except Exception:
+        logger.debug("office text extraction failed for %s (%s)", path, kind, exc_info=True)
+    return ""
 
 
 async def analyze_media_pdf_text(limit: int | None = None) -> dict:
