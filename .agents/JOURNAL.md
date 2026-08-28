@@ -65,3 +65,9 @@
 - 2026-08-25 21:59:29 +08:00 [PRAWN-L390/claude/stop] branch=main head=c879d5e dirty=1
 - 2026-08-26 01:35 SGT: Warning-severity extension issues must not block maintenance-state softening when samples prove they are warnings-only; summary counters count all severities while ok-logic must sample severities like existing soft-issue classification does.
 - 2026-08-26 01:42:25 +08:00 [PRAWN-L390/claude/stop] branch=main head=d480fa5 dirty=1
+- 2026-08-26 10:54:16 +08:00 [PRAWN-L390/claude/stop] branch=main head=e994b2e dirty=1
+- 2026-08-26 20:13:54 +08:00 [PRAWN-L390/claude/stop] branch=main head=e994b2e dirty=1
+- 2026-08-26 21:59:23 +08:00 [PRAWN-L390/claude/stop] branch=main head=e994b2e dirty=1
+- 2026-08-27 01:27:17 +08:00 [PRAWN-L390/claude/stop] branch=main head=e994b2e dirty=1
+- 2026-08-28 11:11:37 +08:00 [PRAWN-L390/claude/stop] branch=main head=75395d5 dirty=1
+- 2026-08-28 11:33:01 +08:00 [PRAWN-L390/claude/stop] branch=main head=2f8e2e4 dirty=1
