@@ -745,6 +745,46 @@ async def analyze_media_pdf_text(limit: int | None = None) -> dict:
     return stats
 
 
+async def analyze_media_office_text(limit: int | None = None) -> dict:
+    stats: dict = {"processed": 0}
+    if not office_text_available():
+        return {**stats, "skipped": "office_libs_unavailable"}
+    if not _drive_available():
+        logger.warning("6C office text: media drive unavailable, skipping")
+        return {**stats, "skipped": "drive_unavailable"}
+
+    items = await fetch_unprocessed_media(_OFFICE_CONTENT_TYPES, "office_text", limit=limit)
+    entity_lookup = await build_entity_lookup()
+    entity_texts: dict[str, list[tuple[str, str]]] = defaultdict(list)
+
+    rows = []
+    for item in items:
+        path = resolve_media_path(item["file_path"])
+        if path is None:
+            continue
+        kind = str(item.get("content_type") or "").lower()
+        text = await asyncio.to_thread(_extract_office_text, path, kind)
+        rows.append({
+            "media_item_id": item["id"], "source": item["source"],
+            "content_type": item["content_type"], "analysis_type": "office_text",
+            "extracted_text": text or None,
+            "result_json": None,
+            "model_version": "office-v1",
+        })
+        if text:
+            eid = lookup_entity(entity_lookup, item["source"], item["entity_id"])
+            if eid:
+                entity_texts[eid].append((item["source"], text))
+
+    await upsert_media_analysis(rows)
+    stats["processed"] = len(rows)
+    if stats["processed"]:
+        lookups = await build_contact_lookups()
+        stats.update(await emit_media_contact_signals(entity_texts, lookups, "office_text"))
+    logger.info("6C office text: %s", stats)
+    return stats
+
+
 # ── 6C.2: PDF embedded image extraction ──
 
 _MIN_EMBEDDED_IMAGE_DIM = 100
