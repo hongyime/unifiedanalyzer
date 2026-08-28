@@ -355,12 +355,12 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-08-28 12:06:57 +08:00
+- Updated: 2026-08-28 16:06:56 +08:00
 - Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 0011cdb
+- HEAD: 2506448
 - Dirty files: 1
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
@@ -484,3 +484,14 @@ BLOCKED ON OPERATOR (Chrome-side deploy):
 STILL DEPLOY-PHASE (operator): analyzer recreate to activate SC1 (Z-mount incident risk, present); CTI1 DB enrichment+alerts wiring; TM live combo runs; X1 7-day soak.
 
 Docker note: partial analyzer build grew build cache to ~13.75GB (harmless; `docker builder prune` reclaims).
+
+Updated: 2026-08-28 15:15 SGT — DEPLOY SESSION COMPLETE (operator present)
+
+IG RECOVERED + LIVE: CDP browser was hung (operator closed); relaunched (PID 12784), opened IG login, operator logged in. Vault backup captured instagram sessionid marker (count=90). instagram collection_schedules re-enabled. VERIFIED collecting: 9 ig browser_ingest_events in 5m, 83 in 30m.
+LIVE via CDP relaunch (loaded extension 1.23.75, verified): G3-wire scrape-config gate + X1 X-throttle-40min. /social/scrape-config returns enabled=[all 7] disabled=[] (rotator not running yet, so nothing gated - correct).
+ALSO LIVE: SC2 (347 dorks), S2 (watchdog rotator-pause-aware).
+IMAGE-READY: SC1 office-doc deps baked into unifiedanalyzer:latest via overlay (activates on next analyzer recreate).
+
+ROTATOR: built + armed (browser_rotator.py + G3-wire gate live + all 7 browser sources in collection_schedules) but NOT started, BY DESIGN: (1) plan order is TM-first to size width; (2) operator just re-logged IG to get it collecting - starting rotation now would time-slice IG off ~5/7 of the time. Turn on when ready to trade per-platform uptime for contention-reduction: run TM (python -m src.core.tm_probe --combo ...) to pick safe width N, then run `python -m src.core.browser_rotator --loop` (sidecar) or wire self-gated into collector scheduler _tick.
+
+REMAINING (operator maintenance window): analyzer recreate to activate SC1 (Z-mount risk, present); CTI1 DB enrichment+alerts wiring; TM live combo runs; X1 7-day soak; optional rotator activation.
