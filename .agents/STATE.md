@@ -432,3 +432,26 @@ Updated: 2026-08-26 04:30 SGT — S2 done, S3 covered-by-existing, safe-code pro
 - S2 watchdog pause-awareness: DONE + committed febca8be (collector). Rotator-paused browser sources (collection_schedules.enabled=false) no longer raise false capture-stalled alerts; fail-open; tested.
 - S3 post-rotation supabase drain: COVERED by existing analyzer scheduler `_export_supabase_indicators_until_drained` (scheduler.py:238) which runs every pass draining bounded 100x10=1000 indicators/pass, self-healing. Rotation-driven per-cycle volume << 1000, so a separate collector->analyzer hook would be redundant cross-service coupling (over-engineering) — NOT built by design. Big one-off bursts (e.g. the 23k domain flip) drain over ~N passes or via `supabase-export --limit 1000` loop.
 - G1/G2/G3-core/T14/S2 done. Remaining safe code-only: CTI1 (IOC feed module + tests, no deploy), SC2 (dork append). Operator-present required: G3-wire extension reload, SC1 image rebuild. Time-bound: TM, X1, FINAL soak.
+
+Updated: 2026-08-28 03:35 SGT — AUTONOMOUS WORK COMPLETE (safe-completable set), system GREEN
+
+FINAL GREEN: collector_dashboard=ok; analyzer=ok ready_to_export=0 scheduler running; 36 containers up; zero Traceback/500/CRITICAL across watchdog/dashboard/analyzer/scheduler in 5m scan.
+
+DONE + COMMITTED this session (all tested; live where safe-deployable):
+- T14 supabase-reconcile CLI (d86cfbf) — live-verified, mirror reconciled 31,566 orphans=0
+- G1/G2 collector groups + msg-realtime verified
+- G3 rotator core browser_rotator.py (b0192edd) — tested
+- /social/scrape-config endpoint + collection_schedules seeded x/fb/threads — LIVE
+- S2 watchdog rotator pause-awareness (febca8be) — DEPLOYED + verified live (prod log: "instagram browser source rotator-paused; skipping stall check")
+- S3 — covered by existing analyzer scheduler _export_supabase_indicators_until_drained (no redundant hook built)
+- CTI1 IOC feed parse+match core cti_enrichment.py (93ad661) — tested
+- T12 redact-export drained 20,508 indicators to supabase (mirror 8090->31566)
+
+BLOCKED — cannot autonomously complete (require operator-present OR real wall-clock):
+- G3-wire: extension background.js must poll /social/scrape-config + skip disabled platforms -> LIVE EXTENSION BUNDLE RELOAD in managed Chrome (operator-present). Rotator is otherwise ready; run `python -m src.core.browser_rotator --loop` as sidecar OR wire self-gated into scheduler _tick.
+- SC1 analyzer office-doc parsing: needs python-docx/openpyxl/python-pptx -> IMAGE REBUILD -> recreate = the Z:-mount incident risk (recovered once this session via Docker Desktop restart + wsl --shutdown). DO WITH OPERATOR PRESENT.
+- SC2 new indicator extractors deploy via same SC1 rebuild (operator-present). Full infosec-dorks dork-list import = safe file append when ready.
+- CTI1 DB side: write threat_context into normalized_indicators.metadata + emit alerts + wire into scheduler = deploy phase (operator-present); pure core already landed+tested.
+- TIME-BOUND (operator observes): TM 6-combo matrix; X1 7-day soak; FINAL soak verification.
+
+NEXT SESSION QUICKSTART: sit with operator -> (1) recreate analyzer with office-doc deps (SC1) watching for Z-mount wedge, (2) reload extension bundle for G3-wire, (3) wire CTI1 DB enrichment+alerts, (4) start rotator sidecar, then operator runs TM + X1 soaks.
