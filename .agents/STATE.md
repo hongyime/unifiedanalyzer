@@ -355,12 +355,12 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-08-27 01:27:17 +08:00
+- Updated: 2026-08-28 11:11:37 +08:00
 - Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: e994b2e
+- HEAD: 75395d5
 - Dirty files: 1
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
@@ -426,3 +426,9 @@ REMAINING (handoff, ordered; all recorded here):
 4. SC1 analyzer image rebuild for office docs (python-docx/openpyxl/python-pptx) - INCIDENT RISK, operator present.
 5. SC2 full infosec-dorks import throttled; CTI1 IOC feeds + enrichment + alerts (new pipeline).
 6. TIME-BOUND (operator observes, cannot autorun): TM 6-combo matrix; X1 7-day soak; FINAL soak verification.
+
+Updated: 2026-08-26 04:30 SGT — S2 done, S3 covered-by-existing, safe-code progress
+
+- S2 watchdog pause-awareness: DONE + committed febca8be (collector). Rotator-paused browser sources (collection_schedules.enabled=false) no longer raise false capture-stalled alerts; fail-open; tested.
+- S3 post-rotation supabase drain: COVERED by existing analyzer scheduler `_export_supabase_indicators_until_drained` (scheduler.py:238) which runs every pass draining bounded 100x10=1000 indicators/pass, self-healing. Rotation-driven per-cycle volume << 1000, so a separate collector->analyzer hook would be redundant cross-service coupling (over-engineering) — NOT built by design. Big one-off bursts (e.g. the 23k domain flip) drain over ~N passes or via `supabase-export --limit 1000` loop.
+- G1/G2/G3-core/T14/S2 done. Remaining safe code-only: CTI1 (IOC feed module + tests, no deploy), SC2 (dork append). Operator-present required: G3-wire extension reload, SC1 image rebuild. Time-bound: TM, X1, FINAL soak.
