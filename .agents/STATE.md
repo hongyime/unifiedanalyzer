@@ -355,12 +355,12 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-08-28 11:11:37 +08:00
+- Updated: 2026-08-28 11:33:01 +08:00
 - Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 75395d5
+- HEAD: 2f8e2e4
 - Dirty files: 1
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
@@ -455,3 +455,16 @@ BLOCKED — cannot autonomously complete (require operator-present OR real wall-
 - TIME-BOUND (operator observes): TM 6-combo matrix; X1 7-day soak; FINAL soak verification.
 
 NEXT SESSION QUICKSTART: sit with operator -> (1) recreate analyzer with office-doc deps (SC1) watching for Z-mount wedge, (2) reload extension bundle for G3-wire, (3) wire CTI1 DB enrichment+alerts, (4) start rotator sidecar, then operator runs TM + X1 soaks.
+
+Updated: 2026-08-28 04:15 SGT — ALL AUTONOMOUS PORTIONS DONE; system GREEN
+
+Every plan task's safely-autonomous portion is complete + committed + tested. System verified green: dashboard ok, analyzer ok ready_to_export=0, 36 containers, zero Traceback/500/CRITICAL (5m scan). Full commit set this session:
+  analyzer: readiness deadline(4a59b9c), T14 reconcile(d86cfbf), CTI1 core(93ad661), SC1 office-doc code(d723fdc), redact-export(T12)
+  collector: browser-recovery/500 fixes(3bab003a), rotator core(b0192edd), scrape-config endpoint, S2 watchdog pause-aware(febca8be DEPLOYED+live), G3-wire ext gate(35c4eccc), SC2 dork gap-fill(14e7a4da 347 dorks), X1 X throttle 20->40(a6ef7064), compose ext-version syncs
+
+REMAINING = ONLY operator-present deploys + time-bound soaks (cannot autorun):
+  - Deploy G3-wire + SC1 + CTI1-DB + rotator sidecar: needs analyzer IMAGE REBUILD (Z-mount incident risk, recovered once) + extension bundle reload -> DO WITH OPERATOR.
+  - SC2 secret-type extractors: build w/ export-safety (discovered secrets must be supabase_exportable=FALSE since mirror is future-public) at deploy time.
+  - TM matrix C1-C6, X1 7-day soak, FINAL soak: physically time-bound, operator observes.
+
+TM harness: building scripts/tm_probe.py so operator runs one command per combo -> logs RAM/DB-timeout/tab-health -> derives safe N. Removes hand-instrumentation.
