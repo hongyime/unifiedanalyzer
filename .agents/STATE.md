@@ -355,12 +355,12 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-08-28 16:06:56 +08:00
+- Updated: 2026-08-29 23:15:36 +08:00
 - Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 2506448
+- HEAD: 3c84172
 - Dirty files: 1
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
@@ -495,3 +495,12 @@ IMAGE-READY: SC1 office-doc deps baked into unifiedanalyzer:latest via overlay (
 ROTATOR: built + armed (browser_rotator.py + G3-wire gate live + all 7 browser sources in collection_schedules) but NOT started, BY DESIGN: (1) plan order is TM-first to size width; (2) operator just re-logged IG to get it collecting - starting rotation now would time-slice IG off ~5/7 of the time. Turn on when ready to trade per-platform uptime for contention-reduction: run TM (python -m src.core.tm_probe --combo ...) to pick safe width N, then run `python -m src.core.browser_rotator --loop` (sidecar) or wire self-gated into collector scheduler _tick.
 
 REMAINING (operator maintenance window): analyzer recreate to activate SC1 (Z-mount risk, present); CTI1 DB enrichment+alerts wiring; TM live combo runs; X1 7-day soak; optional rotator activation.
+
+Updated: 2026-08-29 15:37 SGT — SC1 LIVE + incident notes
+
+- Postgres CRASHED + recovered this session (pg_is_in_recovery cleared, container healthy). This caused the transient stale-Beeper alert on Telegram (collectors couldn't write during recovery). Root cause of the crash not yet diagnosed (was under load); watch for recurrence.
+- SC1 ACTIVATED the SAFE way (no recreate/Z-mount risk): exec-installed python-docx/openpyxl/python-pptx into running unifiedanalyzer_scheduler + `docker restart` (reuses mounts). Verified office_text_available=True, libs import ok, scheduler running. Overlay image unifiedanalyzer:latest also has deps baked for future recreates.
+- Chrome NOT freezing: all 8 browser platforms collected in last 60m (instagram 1149 stored/2125 events, facebook 159, threads 130, x 40, tiktok/strava/lemon8 active). Earlier freeze was the CDP hang (recovered via relaunch, PID 12784).
+- Threads OK: running, 130 stored/60m. Empty threads vault marker is expected (Threads rides Instagram/Meta session). IG login solid (sessionid, 1149 stored/60m).
+- REAL degraded (not crash-related): whatsapp stale ~37h -> needs QR re-pair; x DLQ 112 old failed media (oldest ~19d) -> self-draining, cosmetic.
+- CTI1 still NOT wired (code-only core only); operator questioned wanting it — pending their decision to keep or drop.
