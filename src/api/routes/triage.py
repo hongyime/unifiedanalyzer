@@ -11,6 +11,7 @@ One endpoint feeds the three triage lanes + the coverage strip:
 
 Faces for everyone shown come from the representative-face helper.
 """
+import asyncio
 import json
 
 from fastapi import APIRouter
@@ -37,14 +38,29 @@ def _decode(raw) -> dict:
 async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 12):
     pool = get_analyzer_pool()
     min_weight = merge_candidate_min_weight()
-    async with pool.acquire() as conn:
-        total = await conn.fetchval("SELECT count(*) FROM entities") or 0
-        with_face = await conn.fetchval("SELECT count(DISTINCT entity_id) FROM entity_faces") or 0
-        multi = await conn.fetchval(
+
+    # These lanes are independent, so run them CONCURRENTLY (each on its own
+    # pooled connection) instead of sequentially — this query set was the
+    # analyzer home page's ~30s stall. representative_faces still runs after,
+    # since it needs the ids collected from the candidate/alert/new lanes.
+    async def _one(fn):
+        async with pool.acquire() as conn:
+            return await fn(conn)
+
+    async def _total(c):
+        return await c.fetchval("SELECT count(*) FROM entities") or 0
+
+    async def _with_face(c):
+        return await c.fetchval("SELECT count(DISTINCT entity_id) FROM entity_faces") or 0
+
+    async def _multi(c):
+        return await c.fetchval(
             "SELECT count(*) FROM (SELECT entity_id FROM entity_platform_links "
             "GROUP BY entity_id HAVING count(*) > 1) t"
         ) or 0
-        backlog = await conn.fetchval(
+
+    async def _backlog(c):
+        return await c.fetchval(
             """
             SELECT count(*)
             FROM entity_relationships
@@ -58,9 +74,12 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
             """,
             min_weight,
         ) or 0
-        unread = await conn.fetchval("SELECT count(*) FROM alerts WHERE is_read = false") or 0
 
-        cand_rows = await conn.fetch("""
+    async def _unread(c):
+        return await c.fetchval("SELECT count(*) FROM alerts WHERE is_read = false") or 0
+
+    async def _cands(c):
+        return await c.fetch("""
             SELECT r.entity_a_id, r.entity_b_id, r.weight, r.cross_platform, r.sources,
                    ea.canonical_name AS name_a, eb.canonical_name AS name_b
             FROM entity_relationships r
@@ -77,7 +96,8 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
             LIMIT $1
         """, merge_limit, min_weight)
 
-        alert_rows = await conn.fetch("""
+    async def _alerts(c):
+        return await c.fetch("""
             SELECT a.id, a.alert_type, a.severity, a.title, a.detail, a.entity_id,
                    a.detected_at, a.is_read, e.canonical_name
             FROM alerts a
@@ -86,29 +106,42 @@ async def triage(merge_limit: int = 25, alert_limit: int = 15, new_limit: int = 
             LIMIT $1
         """, alert_limit)
 
-        # "High-value" = the richest recently-updated people. Threshold relaxes
-        # to 2+ platforms (a face is a bonus, shown when present) because face
-        # bridging is still early — requiring a face here would empty the lane.
-        new_rows = await conn.fetch("""
-            SELECT e.id, e.canonical_name, e.tier, e.updated_at,
-                   (SELECT count(*) FROM entity_platform_links epl WHERE epl.entity_id = e.id) AS platforms
+    async def _new(c):
+        # Precompute platform counts once and JOIN, instead of a per-row
+        # correlated subquery (which re-scanned entity_platform_links per entity).
+        return await c.fetch("""
+            SELECT e.id, e.canonical_name, e.tier, e.updated_at, pl.platforms
             FROM entities e
-            WHERE (SELECT count(*) FROM entity_platform_links epl WHERE epl.entity_id = e.id) >= 2
+            JOIN (
+                SELECT entity_id, count(*) AS platforms
+                FROM entity_platform_links
+                GROUP BY entity_id
+                HAVING count(*) >= 2
+            ) pl ON pl.entity_id = e.id
             ORDER BY e.updated_at DESC NULLS LAST
             LIMIT $1
         """, new_limit)
 
-        face_bridge_audit = await audit_face_bridge_collisions(conn, sample_limit=3)
+    async def _audit(c):
+        return await audit_face_bridge_collisions(c, sample_limit=3)
 
-        ids: set[str] = set()
-        for r in cand_rows:
-            ids.add(str(r["entity_a_id"]))
-            ids.add(str(r["entity_b_id"]))
-        for r in alert_rows:
-            if r["entity_id"]:
-                ids.add(str(r["entity_id"]))
-        for r in new_rows:
-            ids.add(str(r["id"]))
+    (total, with_face, multi, backlog, unread,
+     cand_rows, alert_rows, new_rows, face_bridge_audit) = await asyncio.gather(
+        _one(_total), _one(_with_face), _one(_multi), _one(_backlog), _one(_unread),
+        _one(_cands), _one(_alerts), _one(_new), _one(_audit),
+    )
+
+    ids: set[str] = set()
+    for r in cand_rows:
+        ids.add(str(r["entity_a_id"]))
+        ids.add(str(r["entity_b_id"]))
+    for r in alert_rows:
+        if r["entity_id"]:
+            ids.add(str(r["entity_id"]))
+    for r in new_rows:
+        ids.add(str(r["id"]))
+
+    async with pool.acquire() as conn:
         rep = await representative_faces(conn, list(ids))
 
     merge_candidates = []
