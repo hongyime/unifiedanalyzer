@@ -135,11 +135,25 @@ async def search_timeline(
                    NULL::int AS semantic_rank,
                    ranked.keyword_rank AS rrf_rank
             FROM (
-                SELECT ttf.*,
+                SELECT ttf.event_id, ttf.entity_id, ttf.source, ttf.occurred_at,
+                       ttf.canonical_text, tr.translated_text,
                        ts_rank_cd(ttf.search_vector, query.tsq) AS keyword_score,
-                       (ttf.translated_text IS NOT NULL AND to_tsvector('simple', ttf.translated_text) @@ query.tsq) AS matched_translation,
+                       (tr.translated_text IS NOT NULL AND to_tsvector('simple', tr.translated_text) @@ query.tsq) AS matched_translation,
                        row_number() OVER (ORDER BY ts_rank_cd(ttf.search_vector, query.tsq) DESC, ttf.occurred_at DESC)::int AS keyword_rank
-                FROM timeline_translation_search ttf, query
+                -- Match the BASE table's stored search_vector so the GIN index
+                -- (idx_timeline_text_fts) drives the scan. The timeline_translation_search
+                -- VIEW wraps search_vector in COALESCE(...)||to_tsvector(...), which
+                -- defeated the index and forced a 41s seq-scan + per-row translations
+                -- join. Translated text is pulled per matched row via a cheap LATERAL.
+                FROM timeline_text_features ttf
+                CROSS JOIN query
+                LEFT JOIN LATERAL (
+                    SELECT t.translated_text
+                    FROM timeline_translations t
+                    WHERE t.event_id = ttf.event_id AND t.target_language = 'en' AND t.status = 'translated'
+                    ORDER BY t.updated_at DESC
+                    LIMIT 1
+                ) tr ON true
                 WHERE ttf.search_vector @@ query.tsq {filter_sql}
             ) ranked
             ORDER BY ranked.keyword_rank
@@ -176,7 +190,7 @@ async def search_timeline(
                 SELECT ttf.event_id,
                        ts_rank_cd(ttf.search_vector, query.tsq) AS keyword_score,
                        row_number() OVER (ORDER BY ts_rank_cd(ttf.search_vector, query.tsq) DESC, ttf.occurred_at DESC)::int AS keyword_rank
-                FROM timeline_translation_search ttf, query
+                FROM timeline_text_features ttf, query
                 WHERE ttf.search_vector @@ query.tsq {filter_sql}
                 ORDER BY keyword_rank
                 LIMIT ${limit_idx}
