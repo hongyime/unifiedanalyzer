@@ -15,6 +15,24 @@ import { LABELS } from '../lib/labels'
  * here), what changed recently, and who's new. No duplicated same/not-same
  * controls: Review is the single place to make those calls.
  */
+/** Strip a raw metadata dict the backend sometimes appends ("name · {json}") so
+ *  the feed never leaks JSON; the alert title already carries the human message. */
+function cleanDetail(detail: string | null): string {
+  if (!detail) return ''
+  const brace = detail.indexOf('{')
+  return (brace >= 0 ? detail.slice(0, brace) : detail).replace(/[·\s]+$/, '').trim()
+}
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return ''
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return ''
+  const s = Math.max(0, (Date.now() - t) / 1000)
+  if (s < 3600) return `${Math.round(s / 60)}m ago`
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`
+  return `${Math.round(s / 86400)}d ago`
+}
+
 export default function TriagePage() {
   const [data, setData] = useState<TriageData | null>(null)
   const [coverage, setCoverage] = useState<CollectorCoverageRow[]>([])
@@ -52,16 +70,16 @@ export default function TriagePage() {
           status={cov.merge_backlog > 0 ? 'warning' : 'success'}
           help="Account pairs that might be the same person. Decide them in the Review tab."
         />
-        <MetricCard label="Unread alerts" value={cov.unread_alerts} />
+        <MetricCard label="Unread alerts" value={cov.unread_alerts} status={cov.unread_alerts > 0 ? 'warning' : 'idle'} />
       </div>
 
       {cov.merge_backlog > 0 && (
         <Link
           to="/review"
-          className="mb-6 flex items-center justify-between rounded-lg border border-border bg-surface p-4 transition-colors hover:bg-hover"
+          className="mb-6 flex items-center justify-between rounded-xl border border-warning/30 bg-warning/5 p-4 transition-colors hover:bg-warning/10"
         >
           <div className="flex items-center gap-3">
-            <GitCompare className="h-5 w-5 text-text-muted" />
+            <GitCompare className="h-5 w-5 text-warning" />
             <div>
               <div className="font-medium">{cov.merge_backlog} pairs waiting to review</div>
               <div className="text-sm text-text-secondary">
@@ -69,10 +87,11 @@ export default function TriagePage() {
               </div>
             </div>
           </div>
-          <span className="shrink-0 text-sm">Open Review →</span>
+          <span className="shrink-0 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white">Open Review →</span>
         </Link>
       )}
 
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-widest text-text-muted">Explore</h2>
       <div className="mb-6 grid gap-3 md:grid-cols-3">
         <Link to="/search" className="rounded-lg border border-border bg-surface p-3 hover:bg-hover">
           <div className="mb-1 flex items-center gap-2 text-sm font-semibold"><MessageCircle className="h-4 w-4" /> Chat intelligence</div>
@@ -92,6 +111,7 @@ export default function TriagePage() {
         </Link>
       </div>
 
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-widest text-text-muted">Pipeline health</h2>
       <div className="mb-6 grid gap-3 lg:grid-cols-3">
         <Link to="/collector" className="rounded-lg border border-border bg-surface p-4 hover:bg-hover">
           <div className="mb-2 flex items-center justify-between">
@@ -174,7 +194,7 @@ export default function TriagePage() {
                   <div className="min-w-0">
                     <div className="truncate text-xs font-medium">{a.title || LABELS.alertType[a.alert_type] || a.alert_type}</div>
                     <div className="truncate text-xs text-text-muted">
-                      {a.entity_name || ''}{a.detail ? ' · ' + a.detail : ''}
+                      {[a.entity_name || cleanDetail(a.detail), timeAgo(a.detected_at)].filter(Boolean).join(' · ')}
                     </div>
                   </div>
                 </Link>

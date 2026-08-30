@@ -15,9 +15,9 @@
 @theme {
   /* Collector-named tokens (new UI kit + layout) */
   --color-background: #0a0a0a;
-  --color-surface: #111111;
-  --color-hover: #1a1a1a;
-  --color-border: #1e1e1e;
+  --color-surface: #141418;
+  --color-hover: #212128;
+  --color-border: #282830;
   --color-text-primary: #ffffff;
   --color-text-secondary: #a0a0a0;
   --color-text-muted: #606060;
@@ -26,9 +26,14 @@
   --color-warning: #f59e0b;
   --color-info: #3b82f6;
 
+  /* Bolder scale: raised surfaces + a stronger hairline give cards real
+     presence on the pure-black field instead of reading as flat holes. */
+  --color-surface-2: #1c1c22;   /* elevated card / stat band */
+  --color-border-strong: #34343d;
+
   /* Legacy analyzer names → same palette (so old pages recolor for free) */
   --color-bg: #0a0a0a;
-  --color-card: #111111;
+  --color-card: #141418;
   --color-fg: #ffffff;
   --color-muted: #606060;
   --color-accent: #3b82f6;        /* links / interactive highlight (readable on black) */
@@ -72,6 +77,11 @@ body {
 ::-webkit-scrollbar-track { background: var(--color-background); }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.28); }
+
+/* Browser surfaces carry the design too: theme selection + focus so the app
+   reads as built, not assembled (default OS blue selection is a tell). */
+::selection { background: rgba(59,130,246,0.32); color: #fff; }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 
 /* ── Health dots (shared by sidebar + status tiles) ── */
 .health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 9999px; margin-right: 0.5rem; }
