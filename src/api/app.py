@@ -48,6 +48,18 @@ def _load_router(module_path: str):
     return getattr(module, "router")
 
 
+def _ensure_spa_fallback_last() -> None:
+    """The SPA catch-all (/{full_path:path}) is registered at import time, so any
+    router mounted LATER (deferred routes + face API) is appended AFTER it and
+    shadowed — Starlette matches in list order and the catch-all 404s every
+    /api/* path. Re-append the fallback so real API routes always match first."""
+    routes = app.router.routes
+    fallback = [r for r in routes if getattr(r, "path", None) == "/{full_path:path}"]
+    for r in fallback:
+        routes.remove(r)
+        routes.append(r)
+
+
 _CORE_ROUTE_MODULES: tuple[tuple[str, str | None], ...] = (
     ("src.api.routes.health", "/api"),
     ("src.api.routes.export", "/api"),
@@ -140,6 +152,7 @@ async def startup():
                         exc_info=True,
                     )
             _deferred_routes_mounted[:] = mounted
+            _ensure_spa_fallback_last()
 
         _deferred_routes_task = asyncio.create_task(_mount_deferred_routes_fail_open())
     if _face_api_mount_task is None:
@@ -149,6 +162,7 @@ async def startup():
 
                 mounted = await asyncio.to_thread(mount_face_api, app)
                 _face_api_mounted[:] = mounted
+                _ensure_spa_fallback_last()
             except Exception:
                 logging.getLogger(__name__).warning("face API mount failed or timed out", exc_info=True)
 
