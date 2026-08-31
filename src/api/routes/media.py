@@ -25,6 +25,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi.responses import FileResponse
 
 from src.api.face_lookup import face_crop_url
 from src.db.connection import get_analyzer_pool, get_collector_pool
@@ -904,3 +905,43 @@ async def media_thumbnail(analysis_id: str):
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@router.get("/media/{analysis_id}/file")
+async def media_file(analysis_id: str):
+    """Serve the ORIGINAL media file (video/image/pdf) for one analysis row so
+    the dashboard can PLAY videos instead of only showing the thumbnail frame.
+    Resolves the real collector media_items.file_path first (the actual .mp4),
+    falling back to a derived artifact. FileResponse handles HTTP Range, so
+    <video> seeking works. Same path-confinement as thumbnails."""
+    try:
+        pool = get_analyzer_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT media_item_id, result_json->>'derived_path' AS derived_path "
+                "FROM media_analysis WHERE id = $1::uuid",
+                analysis_id,
+            )
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad analysis id")
+    if row is None:
+        raise HTTPException(status_code=404, detail="not found")
+
+    path = None
+    media_item_id = row["media_item_id"]
+    if media_item_id:
+        try:
+            collector = get_collector_pool()
+            async with collector.acquire() as c:
+                file_path = await c.fetchval(
+                    "SELECT file_path FROM media_items WHERE id = $1::uuid",
+                    media_item_id,
+                )
+            path = resolve_media_path(file_path)
+        except Exception as e:  # noqa: BLE001 - degrade to derived path below
+            logger.warning("collector media file lookup failed for %s: %s", media_item_id, e)
+    if path is None and row["derived_path"]:
+        path = resolve_media_path(row["derived_path"])
+    if path is None or not path.exists():
+        raise HTTPException(status_code=404, detail="media file not available")
+    return FileResponse(str(path), headers={"Cache-Control": "public, max-age=3600"})

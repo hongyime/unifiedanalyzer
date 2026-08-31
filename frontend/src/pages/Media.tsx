@@ -97,6 +97,16 @@ function DetailModal({ item, onClose }: { item: MediaItem; onClose: () => void }
           <div className="mb-4 flex h-48 items-center justify-center rounded border border-border bg-bg text-muted">
             <ImageOff size={28} />
           </div>
+        ) : ['video', 'story_video', 'reel'].includes(item.content_type) ? (
+          <video
+            src={`/api/media/${item.id}/file`}
+            poster={item.thumbnail_url}
+            controls
+            preload="metadata"
+            playsInline
+            className="mb-4 max-h-72 w-full rounded border border-border bg-black object-contain"
+            onError={() => setFailed(true)}
+          />
         ) : (
           <img
             src={item.thumbnail_url}
