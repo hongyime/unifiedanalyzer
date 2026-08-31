@@ -111,6 +111,17 @@ export interface EntityDetail {
   platform_links: PlatformLink[]
   identity_signals: Signal[]
   face_crop_url?: string | null
+  wa_devices?: WaDevice[]
+}
+
+export interface WaDevice {
+  phone_jid: string
+  phone_number: string
+  exists_on_wa: boolean
+  device_count: number
+  companion_count: number
+  device_ids: number[]
+  observed_at: string | null
 }
 
 export interface PlatformLink {

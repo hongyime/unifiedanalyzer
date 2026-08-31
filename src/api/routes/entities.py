@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query, HTTPException
 
-from src.db.connection import get_analyzer_pool
+from src.db.connection import get_analyzer_pool, get_collector_pool
 from src.api.face_lookup import representative_faces, face_crop_url
 from src.merge_candidates import merge_candidate_min_weight
 from src.api.routes.uuid_validation import require_uuid
@@ -503,6 +503,38 @@ async def get_entity(entity_id: str):
 
         _rep = await representative_faces(conn, [entity_id])
 
+    # WhatsApp device intelligence (cross-DB): map this entity's whatsapp phone
+    # JIDs to the collector's wa_device_observations (populated by the read-only
+    # 4h device sweep). Latest observation per number. ENRICHMENT ONLY — not fed
+    # into the pairwise merge scorer (device count/OS do not link two distinct
+    # numbers, so injecting them there would risk false merges).
+    wa_jids = [l["platform_id"] for l in links if l["source"] == "whatsapp" and l["platform_id"]]
+    wa_devices: list[dict] = []
+    if wa_jids:
+        try:
+            collector = get_collector_pool()
+            async with collector.acquire() as cconn:
+                drows = await cconn.fetch(
+                    "SELECT DISTINCT ON (phone_jid) phone_jid, exists_on_wa, device_count, "
+                    "device_ids, observed_at FROM wa_device_observations "
+                    "WHERE phone_jid = ANY($1::text[]) ORDER BY phone_jid, observed_at DESC",
+                    wa_jids,
+                )
+            wa_devices = [
+                {
+                    "phone_jid": d["phone_jid"],
+                    "phone_number": d["phone_jid"].split("@")[0],
+                    "exists_on_wa": d["exists_on_wa"],
+                    "device_count": d["device_count"],
+                    "companion_count": max(0, (d["device_count"] or 0) - 1),
+                    "device_ids": list(d["device_ids"] or []),
+                    "observed_at": d["observed_at"].isoformat() if d["observed_at"] else None,
+                }
+                for d in drows
+            ]
+        except Exception:
+            wa_devices = []
+
     return {
         "id": str(entity["id"]),
         "tier": entity["tier"],
@@ -551,4 +583,5 @@ async def get_entity(entity_id: str):
             }
             for s in signals
         ],
+        "wa_devices": wa_devices,
     }

@@ -1153,6 +1153,40 @@ export default function EntityDetailPage() {
           </Card>
 
           <Card
+            title="Device intelligence"
+            actions={<InfoTip text="WhatsApp linked devices for this person's number(s), from the read-only device sweep (no messages sent). Device 0 = phone; higher IDs = companion devices (WhatsApp Web/Desktop). Refreshed ~every 4h." />}
+          >
+            {!entity.wa_devices || entity.wa_devices.length === 0 ? (
+              <div className="text-sm text-text-muted">No WhatsApp device data yet — this number is queued for the 4h device sweep.</div>
+            ) : (
+              <div className="space-y-2">
+                {entity.wa_devices.map((d) => (
+                  <div key={d.phone_jid} className="rounded-lg border border-border-strong bg-surface-2 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="mono text-sm text-text-primary">+{d.phone_number}</span>
+                      <span className={d.exists_on_wa ? 'text-xs text-success' : 'text-xs text-text-muted'}>
+                        {d.exists_on_wa ? 'on WhatsApp' : 'not on WhatsApp'}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                      <span className="mono rounded bg-hover px-2 py-0.5">{d.device_count} device{d.device_count === 1 ? '' : 's'}</span>
+                      {d.companion_count > 0 && (
+                        <span className="rounded bg-info/15 px-2 py-0.5 text-info">{d.companion_count} companion (web/desktop)</span>
+                      )}
+                      {d.device_ids && d.device_ids.length > 0 && (
+                        <span className="mono text-text-muted">ids [{d.device_ids.join(', ')}]</span>
+                      )}
+                    </div>
+                    {d.observed_at && (
+                      <div className="mt-1.5 text-[0.7rem] text-text-muted">checked {formatDate(d.observed_at)}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card
             title="Identity evidence"
             actions={<InfoTip text="Individual clues linking this person to other accounts — same phone, similar name, same face in photos, etc. More independent clues = higher confidence." />}
           >
