@@ -388,9 +388,18 @@ async def load_profile_photo_hashes() -> dict[str, list[tuple[str, str]]]:
 STRONG_SIGNAL_TYPES = {
     "username_exact", "whatsapp_phone", "commit_email",
     "email_match", "phone_match", "profile_photo_sha256", "media_face_match",
+    # DETERMINISTIC Meta linking (Phase 1.5): a Threads handle IS the account's
+    # Instagram handle, and Instagram handles are globally unique. So a same-
+    # handle IG+Threads pair is the same real person by construction — even
+    # when the handle is COMMON across many unrelated accounts on OTHER platforms.
+    "instagram_threads_linked",
 }
 VERIFIED_SIGNAL_TYPES = {
     "whatsapp_phone", "commit_email", "email_match", "phone_match", "profile_photo_sha256",
+    # instagram_threads_linked is Meta-guaranteed same-person on its own (an
+    # Instagram handle is globally unique, and a Threads handle IS that same
+    # handle) — treat it like a verified shared identifier.
+    "instagram_threads_linked",
 }
 
 _CROSS_ENTITY_SIGNAL_CONFIDENCE = {
@@ -402,6 +411,8 @@ _CROSS_ENTITY_SIGNAL_CONFIDENCE = {
     "profile_photo_sha256": 0.95,
     "media_face_match": 0.90,
     "real_name_fuzzy": 0.65,
+    # Highest confidence in this map — Meta guarantee is deterministic.
+    "instagram_threads_linked": 0.99,
 }
 
 
@@ -470,8 +481,55 @@ def _apply_no_auto_merge_policy(
             continue
         groups: dict[tuple[str, ...], list[PlatformProfile]] = {}
         profile_groups: dict[tuple[str, str], tuple[str, ...]] = {}
+
+        # DETERMINISTIC Instagram <-> Threads bypass of the no-auto-merge policy
+        # (companion to Phase 1.5). Profiles named by an `instagram_threads_linked`
+        # STRONG signal are the SAME real person by Meta guarantee (an Instagram
+        # handle is globally unique, and a Threads handle IS that same handle).
+        # Persist them under a SHARED policy group so the pair converges on ONE
+        # entity, instead of getting split into two singletons + a cross-entity
+        # signal like every other new multi-platform cluster. This is the ONLY
+        # documented bypass — any OTHER same-cluster profile (e.g. a Telegram
+        # bystander Phase 1 pulled in on username_exact) still gets the normal
+        # per-profile split, so no adjacent platform gets free-ride-merged in.
+        igth_bypass_profiles: set[tuple[str, str]] = set()
+        for s in candidate.signals:
+            if s.signal_type == "instagram_threads_linked":
+                igth_bypass_profiles.add((s.source_platform, s.source_record_id))
+                igth_bypass_profiles.add((s.target_platform, s.target_record_id))
+        candidate_keys = {(p.source, p.platform_id) for p in candidate.profiles}
+        igth_bypass_profiles = {
+            k for k in igth_bypass_profiles
+            if k in candidate_keys and k[0] in ("instagram", "threads")
+        }
+        shared_key: tuple[str, ...] | None = None
+        if igth_bypass_profiles:
+            # Reuse an existing entity_id if any bypass profile is already linked
+            # (so persistence merges onto the existing entity rather than minting
+            # a new UUID and orphaning the prior row).
+            shared_existing_eid = None
+            for src, pid in igth_bypass_profiles:
+                eid = existing_links.get((src, pid))
+                if eid:
+                    shared_existing_eid = eid
+                    break
+            if shared_existing_eid is not None:
+                shared_key = ("existing", str(shared_existing_eid))
+            else:
+                # Deterministic synthetic key from the sorted first member; the
+                # "deterministic_igth" discriminator prevents collision with any
+                # normal ("new", src, pid) or ("existing", uuid) key.
+                first = sorted(igth_bypass_profiles)[0]
+                shared_key = ("deterministic_igth", first[0], first[1])
+
         for profile in candidate.profiles:
-            key = _policy_group_key(profile, existing_links)
+            if (
+                shared_key is not None
+                and (profile.source, profile.platform_id) in igth_bypass_profiles
+            ):
+                key = shared_key
+            else:
+                key = _policy_group_key(profile, existing_links)
             groups.setdefault(key, []).append(profile)
             profile_groups[(profile.source, profile.platform_id)] = key
 
@@ -498,6 +556,157 @@ def _apply_no_auto_merge_policy(
 
     stats["cross_entity_signals"] = len(cross_signals)
     return split_candidates, cross_signals, stats
+
+
+def _phase15_merge_instagram_threads(
+    profiles_by_username: dict[str, list[PlatformProfile]],
+    entities: list[EntityCandidate],
+    assigned: set[tuple[str, str]],
+) -> int:
+    """DETERMINISTIC Instagram <-> Threads auto-merge on shared handle.
+
+    Meta guarantee: a Threads handle IS the account's Instagram handle, and
+    Instagram handles are globally unique. So an Instagram profile and a
+    Threads profile that share the SAME strict-normalized handle (case +
+    punctuation only; digits KEPT, so "john" != "john123") are the same real
+    person by construction. This holds EVEN WHEN the handle is "common" across
+    many unrelated accounts on OTHER platforms (Telegram/X/etc.) — which is
+    exactly the case Phase 1 skips because `len(group) > COMMON_USERNAME_ACCOUNTS`,
+    and the failure mode this pass exists to correct.
+
+    Iterates the LOOSE-normalized `profiles_by_username` bucket (the same key
+    Phase 1 uses, so the common-handle groups Phase 1 skipped are re-covered
+    here), then keys inside each bucket by strict-normalized handle. For every
+    strict handle present on BOTH `instagram` AND `threads`, ensures those
+    profiles land in the SAME EntityCandidate and carry an
+    `instagram_threads_linked` STRONG signal — which auto-confirms the merge
+    via compute_confidence (no change to compute_confidence's logic; a single
+    STRONG signal already sets is_confirmed=True).
+
+    Handles three in-memory states cleanly:
+      (a) both profiles are already in the SAME EntityCandidate (Phase 1's
+          non-common cluster) — add the link signal only if missing, no dup;
+      (b) profiles are already in DIFFERENT EntityCandidates — fold those
+          candidates into one (union of profiles + signals), keeping the
+          `assigned` set consistent;
+      (c) neither profile is assigned yet (Phase 1 skipped a common group,
+          or the pair had no other same-strict-handle partner) — create a
+          fresh EntityCandidate.
+
+    The bypass is scoped to IG<->Threads ONLY. Any other same-cluster profile
+    (e.g. a Telegram user Phase 1 pulled in on username_exact) keeps its normal
+    treatment; the companion bypass inside `_apply_no_auto_merge_policy` also
+    only unifies profiles named by an `instagram_threads_linked` signal, so no
+    adjacent platform gets free-ride-merged in.
+
+    Mutates `entities` and `assigned` in place. Returns the number of distinct
+    strict-handle pairs merged (for logging / observability).
+    """
+    # Reverse map: which candidate holds each profile (O(1) lookup).
+    profile_to_candidate: dict[tuple[str, str], EntityCandidate] = {}
+    for cand in entities:
+        for p in cand.profiles:
+            profile_to_candidate[(p.source, p.platform_id)] = cand
+
+    merged_pairs = 0
+    # Iterate LOOSE groups — this is what `profiles_by_username` is keyed on
+    # (`normalize_username` strips digits + punctuation), so common-handle
+    # groups Phase 1 skipped are visible here. Inside each bucket, sub-group
+    # by the STRICT handle so we only pair truly-identical handles.
+    for _norm_user, group in profiles_by_username.items():
+        by_strict: dict[str, dict[str, list[PlatformProfile]]] = {}
+        for p in group:
+            if p.source not in ("instagram", "threads"):
+                continue
+            strict = normalize_username_strict(p.username)
+            if not strict:
+                continue
+            buckets = by_strict.setdefault(strict, {"instagram": [], "threads": []})
+            buckets[p.source].append(p)
+
+        for strict_handle, buckets in by_strict.items():
+            ig_profiles = buckets["instagram"]
+            th_profiles = buckets["threads"]
+            if not ig_profiles or not th_profiles:
+                continue
+
+            all_here = ig_profiles + th_profiles
+
+            # Collect any pre-existing candidates these profiles already sit in.
+            existing_candidates: list[EntityCandidate] = []
+            seen_cand_ids: set[int] = set()
+            for p in all_here:
+                c = profile_to_candidate.get((p.source, p.platform_id))
+                if c is not None and id(c) not in seen_cand_ids:
+                    existing_candidates.append(c)
+                    seen_cand_ids.add(id(c))
+
+            if existing_candidates:
+                # (a) / (b): fold every existing candidate into the first one.
+                target = existing_candidates[0]
+                for other in existing_candidates[1:]:
+                    target_keys = {(tp.source, tp.platform_id) for tp in target.profiles}
+                    for op in other.profiles:
+                        okey = (op.source, op.platform_id)
+                        if okey not in target_keys:
+                            target.profiles.append(op)
+                            target_keys.add(okey)
+                        profile_to_candidate[okey] = target
+                    target.signals.extend(other.signals)
+                    other.profiles.clear()
+                    other.signals.clear()
+            else:
+                # (c): none assigned yet — create a fresh candidate.
+                target = EntityCandidate(profiles=[])
+                entities.append(target)
+
+            # Merge any not-yet-in-target IG/Threads profiles and mark assigned.
+            existing_keys = {(p.source, p.platform_id) for p in target.profiles}
+            for p in all_here:
+                key = (p.source, p.platform_id)
+                if key not in existing_keys:
+                    target.profiles.append(p)
+                    existing_keys.add(key)
+                    profile_to_candidate[key] = target
+                assigned.add(key)
+
+            # Emit `instagram_threads_linked` STRONG signals for every unique
+            # (IG, Threads) pair inside the target, deduped so repeated runs
+            # (or interactions with Phase 1's existing signals) don't stack up.
+            existing_link_pairs = {
+                (s.source_record_id, s.target_record_id)
+                for s in target.signals
+                if s.signal_type == "instagram_threads_linked"
+            }
+            ig_in_target = [p for p in target.profiles if p.source == "instagram"]
+            th_in_target = [p for p in target.profiles if p.source == "threads"]
+            for ig in ig_in_target:
+                for th in th_in_target:
+                    pair_key = (ig.platform_id, th.platform_id)
+                    if pair_key in existing_link_pairs:
+                        continue
+                    target.signals.append(SignalMatch(
+                        signal_type="instagram_threads_linked",
+                        source_platform="instagram",
+                        target_platform="threads",
+                        source_record_id=ig.platform_id,
+                        target_record_id=th.platform_id,
+                        value=strict_handle,
+                        # Raw score 50.0 — highest single-signal contribution in
+                        # this resolver, reflecting the deterministic Meta
+                        # guarantee. Normalized cross-entity confidence is 0.99
+                        # via _CROSS_ENTITY_SIGNAL_CONFIDENCE.
+                        confidence=50.0,
+                    ))
+                    existing_link_pairs.add(pair_key)
+
+            merged_pairs += 1
+
+    # Prune candidates emptied by (b)-folding so downstream phases don't
+    # iterate ghosts.
+    entities[:] = [e for e in entities if e.profiles]
+    return merged_pairs
+
 
 
 async def resolve_entities() -> dict:
@@ -632,6 +841,18 @@ async def resolve_entities() -> dict:
             entities.append(candidate)
             for p in relevant:
                 assigned.add((p.source, p.platform_id))
+
+    # Phase 1.5: DETERMINISTIC Instagram <-> Threads auto-merge on shared handle.
+    # A Threads handle IS the account's Instagram handle (Meta-owned), and
+    # Instagram handles are globally unique — so a same-handle IG+Threads pair
+    # is the same real person regardless of whether that handle is common on
+    # unrelated platforms (Telegram/X/etc.). Phase 1 SKIPS common-handle loose
+    # groups entirely, wrongly dropping these deterministic pairs; Phase 1.5
+    # catches them and emits a STRONG `instagram_threads_linked` signal, which
+    # auto-confirms via compute_confidence. Bypass is IG<->Threads only — no
+    # other pairing has its gates weakened, and `_apply_no_auto_merge_policy`
+    # enforces the same scope on the persistence side.
+    _phase15_merge_instagram_threads(profiles_by_username, entities, assigned)
 
     # Phase 2: Add unmatched target profiles as single-profile entities
     for p in target_profiles:
