@@ -1326,3 +1326,109 @@ async def graph_communities():
     communities.sort(key=lambda c: c["member_count"], reverse=True)
 
     return {"data": communities}
+
+
+@router.get("/graph/nodes-edges")
+async def graph_nodes_edges(
+    limit: int = Query(300, ge=1, le=1000),
+    min_weight: float = Query(0, ge=0),
+    relationship_type: str | None = None,
+    seed_entity_id: str | None = None,
+):
+    """Bounded nodes+edges for the client-side sigma.js/graphology WebGL renderer.
+
+    Returns at most `limit` most-connected entities and the edges among them.
+    If seed_entity_id is given, returns the ego-net (edges touching that entity).
+    Always capped by `limit` so the JSON payload stays manageable.
+    """
+    from collections import Counter
+
+    if seed_entity_id is not None:
+        seed_entity_id = require_uuid(seed_entity_id)
+
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        if seed_entity_id is not None:
+            # Ego-net: all edges that touch the seed entity
+            edge_rows = await conn.fetch(
+                """
+                SELECT entity_a_id::text AS src,
+                       entity_b_id::text AS tgt,
+                       weight,
+                       relationship_type
+                FROM entity_relationships
+                WHERE (entity_a_id = $1::uuid OR entity_b_id = $1::uuid)
+                  AND weight >= $2
+                  AND ($3::text IS NULL OR relationship_type = $3)
+                  AND entity_a_id IS NOT NULL
+                  AND entity_b_id IS NOT NULL
+                ORDER BY weight DESC
+                LIMIT $4
+                """,
+                seed_entity_id,
+                min_weight,
+                relationship_type,
+                limit * 3,
+            )
+        else:
+            # Global: top edges by weight, then keep most-connected entities
+            edge_rows = await conn.fetch(
+                """
+                SELECT entity_a_id::text AS src,
+                       entity_b_id::text AS tgt,
+                       weight,
+                       relationship_type
+                FROM entity_relationships
+                WHERE weight >= $1
+                  AND ($2::text IS NULL OR relationship_type = $2)
+                  AND entity_a_id IS NOT NULL
+                  AND entity_b_id IS NOT NULL
+                ORDER BY weight DESC
+                LIMIT $3
+                """,
+                min_weight,
+                relationship_type,
+                limit * 3,
+            )
+
+        degree: Counter[str] = Counter()
+        raw_edges: list[tuple[str, str, float, str]] = []
+        for r in edge_rows:
+            src, tgt = r["src"], r["tgt"]
+            raw_edges.append((src, tgt, float(r["weight"] or 0), r["relationship_type"] or ""))
+            degree[src] += 1
+            degree[tgt] += 1
+
+        # Keep at most `limit` most-connected entities
+        top_entities: set[str] = {eid for eid, _ in degree.most_common(limit)}
+
+        # Filter edges to only those between kept entities
+        filtered: list[tuple[str, str, float, str]] = [
+            e for e in raw_edges if e[0] in top_entities and e[1] in top_entities
+        ]
+
+        # Final degree among filtered edges
+        final_degree: Counter[str] = Counter()
+        for src, tgt, _, _ in filtered:
+            final_degree[src] += 1
+            final_degree[tgt] += 1
+
+        entity_ids = list({eid for src, tgt, _, _ in filtered for eid in (src, tgt)})
+        if entity_ids:
+            name_rows = await conn.fetch(
+                "SELECT id::text AS id, canonical_name FROM entities WHERE id = ANY($1::uuid[])",
+                entity_ids,
+            )
+            names: dict[str, str | None] = {r["id"]: r["canonical_name"] for r in name_rows}
+        else:
+            names = {}
+
+    nodes = [
+        {"id": eid, "label": names.get(eid) or eid[:8], "degree": final_degree[eid]}
+        for eid in entity_ids
+    ]
+    edges = [
+        {"source": src, "target": tgt, "weight": w, "type": rtype}
+        for src, tgt, w, rtype in filtered
+    ]
+    return {"nodes": nodes, "edges": edges}

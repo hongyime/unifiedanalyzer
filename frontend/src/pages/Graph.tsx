@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { GitFork, RefreshCw } from 'lucide-react'
-import { api, GraphExplainEdge, GraphPivots } from '../api'
+import { api, GraphExplainEdge, GraphNodesEdges, GraphPivots } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Card } from '../components/ui/Card'
 import { MetricCard } from '../components/ui/MetricCard'
 import { StatusBadge } from '../components/ui/StatusBadge'
 import { LoadingSpinner } from '../components/ui/LoadingSpinner'
 import { ErrorState } from '../components/ui/ErrorState'
+import GraphRenderer from '../components/GraphRenderer'
 
 type Overview = Awaited<ReturnType<typeof api.getGraphOverview>>
 type Confidence = 'all' | 'hard' | 'strong' | 'weak' | 'context-only'
@@ -75,6 +76,27 @@ export default function GraphPage() {
   const [pivots, setPivots] = useState<GraphPivots | null>(null)
   const [actionError, setActionError] = useState('')
 
+  // ── WebGL graph state ──────────────────────────────────────────────────────
+  const [graphLimit, setGraphLimit] = useState(300)
+  const [graphMinWeight, setGraphMinWeight] = useState(0)
+  const [graphRelType, setGraphRelType] = useState('')
+  const [graphData, setGraphData] = useState<GraphNodesEdges | null>(null)
+  const [graphLoading, setGraphLoading] = useState(false)
+  const [graphError, setGraphError] = useState('')
+
+  const loadGraph = () => {
+    setGraphLoading(true)
+    setGraphError('')
+    api.getGraphNodesEdges({
+      limit: graphLimit,
+      min_weight: graphMinWeight,
+      relationship_type: graphRelType || undefined,
+    })
+      .then(setGraphData)
+      .catch((e: unknown) => setGraphError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setGraphLoading(false))
+  }
+
   const load = () => {
     setLoading(true)
     setError('')
@@ -84,7 +106,15 @@ export default function GraphPage() {
       .finally(() => setLoading(false))
   }
 
+  // Auto-load overview and sigma graph on mount
   useEffect(load, [])
+  useEffect(() => {
+    setGraphLoading(true)
+    api.getGraphNodesEdges({ limit: 300, min_weight: 0 })
+      .then(setGraphData)
+      .catch((e: unknown) => setGraphError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setGraphLoading(false))
+  }, [])
   useEffect(() => {
     window.localStorage.setItem('ua:graph:filters', JSON.stringify(filters))
   }, [filters])
@@ -160,6 +190,55 @@ export default function GraphPage() {
         <MetricCard label="WhatsApp co-members" value={overview?.whatsapp_co_members ?? 0} />
         <MetricCard label="Top connections" value={overview?.top_connections.length ?? 0} />
       </div>
+
+      {/* ── WebGL Relationship Graph (sigma.js + graphology) ──────────────── */}
+      <Card className="mb-6">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold">WebGL Relationship Graph</span>
+            <span className="text-xs text-text-muted">sigma.js · graphology · click node → entity</span>
+          </div>
+          {graphData && (
+            <span className="text-xs text-text-muted" data-testid="graph-node-count">
+              {graphData.nodes.length} nodes · {graphData.edges.length} edges
+            </span>
+          )}
+        </div>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <label className="text-sm text-text-secondary">Limit</label>
+          <input
+            type="number"
+            value={graphLimit}
+            onChange={(e) => setGraphLimit(Math.max(1, Math.min(1000, Number(e.target.value) || 300)))}
+            min={1}
+            max={1000}
+            className="w-24 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+          />
+          <label className="text-sm text-text-secondary">Min weight</label>
+          <input
+            type="number"
+            value={graphMinWeight}
+            onChange={(e) => setGraphMinWeight(Math.max(0, Number(e.target.value) || 0))}
+            min={0}
+            step={1}
+            className="w-20 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+          />
+          <input
+            value={graphRelType}
+            onChange={(e) => setGraphRelType(e.target.value)}
+            placeholder="relationship type filter"
+            className="rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+          />
+          <button type="button" onClick={loadGraph}>Load Graph</button>
+        </div>
+        {graphLoading ? (
+          <LoadingSpinner label="Loading graph data..." />
+        ) : graphError ? (
+          <div className="text-sm text-error">{graphError}</div>
+        ) : (
+          <GraphRenderer nodes={graphData?.nodes ?? []} edges={graphData?.edges ?? []} />
+        )}
+      </Card>
 
       <Card className="mb-6">
         <div className="mb-3 flex flex-wrap items-center gap-2">

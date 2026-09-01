@@ -403,6 +403,24 @@ export interface GraphPivots {
   groups: Record<string, GraphExplainEdge[]>
 }
 
+export interface GraphNode {
+  id: string
+  label: string
+  degree: number
+}
+
+export interface GraphEdge {
+  source: string
+  target: string
+  weight: number
+  type: string
+}
+
+export interface GraphNodesEdges {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
 export interface HealthInfo {
   status: string
   analyzer_db: string
@@ -1288,6 +1306,15 @@ export const api = {
   }>('/graph/overview'),
 
   getCommunities: () => get<{ data: Community[] }>('/graph/communities'),
+
+  getGraphNodesEdges: (params: { limit?: number; min_weight?: number; relationship_type?: string; seed_entity_id?: string } = {}) => {
+    const q = new URLSearchParams()
+    if (params.limit != null) q.set('limit', String(params.limit))
+    if (params.min_weight != null) q.set('min_weight', String(params.min_weight))
+    if (params.relationship_type) q.set('relationship_type', params.relationship_type)
+    if (params.seed_entity_id) q.set('seed_entity_id', params.seed_entity_id)
+    return get<GraphNodesEdges>(`/graph/nodes-edges?${q.toString()}`)
+  },
 
   getIntelligence: (entityId: string) => get<IntelligenceReport>(`/entities/${entityId}/intelligence`),
 
