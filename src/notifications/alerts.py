@@ -134,17 +134,80 @@ async def notify_daily_digest(digest: dict):
 
 
 async def notify_merge_candidate(entity_a_name: str, entity_b_name: str,
-                                  confidence: float, shared_signal: str):
-    url = telegram.get_dashboard_url()
-    await telegram.send(
+    confidence: float,
+    shared_signal: str,
+    *,
+    candidate: dict | None = None,
+) -> bool:
+    """Send a merge-review notification.
+
+    If *candidate* is supplied (full dict from entity_relationships + platform
+    links + face look-up) the message includes handles, score, deciding signals,
+    face-crop links, and a 2-button inline keyboard so the reviewer can act
+    directly from Telegram.
+    If *candidate* is None (legacy call) the plain-text fallback is sent.
+    """
+    from src.notifications.merge_bot import callback_data_yes, callback_data_no
+
+    base_url = telegram.get_dashboard_url()
+
+    if candidate:
+        id_a = candidate.get("entity_a", "")
+        id_b = candidate.get("entity_b", "")
+        name_a = _esc(candidate.get("name_a") or entity_a_name or "Unknown")
+        name_b = _esc(candidate.get("name_b") or entity_b_name or "Unknown")
+        score = candidate.get("score")
+        score_str = f"{float(score):.0%}" if score is not None else f"{confidence:.0%}"
+        cross = "cross-platform" if candidate.get("cross_platform") else "same platform"
+        signals: list = candidate.get("signals") or [shared_signal]
+        sig_str = ", ".join(str(s) for s in signals[:6]) or shared_signal
+        handles_a: list = candidate.get("handles_a") or []
+        handles_b: list = candidate.get("handles_b") or []
+        ha_str = " · ".join(_esc(h) for h in handles_a[:5]) if handles_a else ""
+        hb_str = " · ".join(_esc(h) for h in handles_b[:5]) if handles_b else ""
+        face_a_rel = candidate.get("face_a")
+        face_b_rel = candidate.get("face_b")
+
+        lines = [
+            "\U0001f517 <b>Review needed: probable same person</b>",
+            f"<b>{name_a}</b>  ↔  <b>{name_b}</b>",
+            f"Score: {score_str}  |  {cross}",
+        ]
+        if ha_str:
+            lines.append(f"A:  {ha_str}")
+        if hb_str:
+            lines.append(f"B:  {hb_str}")
+        if sig_str:
+            lines.append(f"Signals: {_esc(sig_str)}")
+        if face_a_rel:
+            lines.append(f"Face A: {base_url}{face_a_rel}")
+        if face_b_rel:
+            lines.append(f"Face B: {base_url}{face_b_rel}")
+        lines.append(f"{base_url}/review")
+
+        text = "\n".join(lines)
+
+        # Only attach the keyboard when we have both entity IDs
+        reply_markup: dict | None = None
+        if id_a and id_b:
+            reply_markup = {
+                "inline_keyboard": [[
+                    {"text": "\u2705 Same person",  "callback_data": callback_data_yes(id_a, id_b)},
+                    {"text": "\u274c Not same",     "callback_data": callback_data_no(id_a, id_b)},
+                ]]
+            }
+
+        return await telegram.send(text, reply_markup=reply_markup, message_type="merge_candidate")
+
+    # Fallback: legacy plain-text send (no candidate data, no buttons)
+    return await telegram.send(
         f"\U0001f517 <b>Review needed: probable same person</b>\n"
-        f"<b>{entity_a_name}</b> ↔ <b>{entity_b_name}</b>\n"
-        f"Probability: {confidence:.0%} via {shared_signal}\n"
+        f"<b>{_esc(entity_a_name)}</b> \u2194 <b>{_esc(entity_b_name)}</b>\n"
+        f"Probability: {confidence:.0%} via {_esc(shared_signal)}\n"
         f"No automatic merge occurred; review this pair before merging.\n"
-        f"{url}/entities",
+        f"{base_url}/entities",
         message_type="merge_candidate",
     )
-
 
 async def notify_error(run_type: str, error: str):
     await telegram.send(

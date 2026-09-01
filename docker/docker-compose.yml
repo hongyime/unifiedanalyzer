@@ -126,6 +126,9 @@ services:
       # NER transformer enrichment is optional and memory-heavy; keep it opt-in
       # for the scheduler so a secondary enrichment phase cannot kill a full run.
       ENTITY_ENRICHMENT_ENABLED: "${ENTITY_ENRICHMENT_ENABLED:-0}"
+      # Telegram merge-review bot (2-button inline keyboard). Set to 1 to enable
+      # the callback poller asyncio Task inside the scheduler loop.
+      TELEGRAM_MERGE_BOT_ENABLED: "${TELEGRAM_MERGE_BOT_ENABLED:-1}"
     volumes:
       # Live-mount src (no image rebuild — shared Docker vhdx must not grow).
       - "../src:/app/src"

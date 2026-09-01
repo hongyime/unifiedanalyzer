@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 _running = False
 _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE = merge_candidate_notify_min_confidence()
+# In-memory dedup set for merge-candidate notifications — prevents re-notifying
+# the same pair every scheduler cycle. Reset on process restart (acceptable).
+_notified_pairs: set[str] = set()
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
@@ -629,41 +632,106 @@ async def _build_status() -> dict:
 
 
 async def _check_merge_candidates():
+    """Query high-confidence same_person_probability pairs from entity_relationships,
+    get platform handles + face crops, and push a 2-button Telegram card.
+    Skips pairs already notified this process run (_notified_pairs dedup).
+    """
+    global _notified_pairs
     pool = get_analyzer_pool()
+    min_weight = _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT s.entity_id, s.signal_type, s.value, s.confidence,
-                   s.source_platform, s.target_platform,
-                   e.canonical_name
-            FROM identity_signals s
-            JOIN entities e ON s.entity_id = e.id
-            WHERE s.created_at > NOW() - INTERVAL '2 hours'
-              AND s.confidence >= $1
-        """, _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE)
+            SELECT r.entity_a_id::text AS entity_a,
+                   r.entity_b_id::text AS entity_b,
+                   r.weight, r.cross_platform, r.sources,
+                   ea.canonical_name AS name_a,
+                   eb.canonical_name AS name_b
+            FROM entity_relationships r
+            JOIN entities ea ON r.entity_a_id = ea.id
+            JOIN entities eb ON r.entity_b_id = eb.id
+            WHERE r.relationship_type = 'same_person_probability'
+              AND r.updated_at > NOW() - INTERVAL '2 hours'
+              AND COALESCE(
+                    CASE WHEN jsonb_typeof(r.sources->'score') = 'number'
+                         THEN (r.sources->>'score')::float8 * 100
+                    END,
+                    r.weight
+                  ) >= $1
+            ORDER BY r.weight DESC
+            LIMIT 20
+        """, min_weight)
 
-        seen = set()
+        if not rows:
+            return
+
+        # Collect entity ids to fetch handles + faces in bulk
+        ids = []
         for r in rows:
-            entity_id = str(r["entity_id"])
-            if entity_id in seen:
-                continue
-            seen.add(entity_id)
+            ids.append(r["entity_a"])
+            ids.append(r["entity_b"])
+        ids = list(set(ids))
 
-            other_entities = await conn.fetch("""
-                SELECT DISTINCT e2.canonical_name, e2.id
-                FROM identity_signals s2
-                JOIN entities e2 ON s2.entity_id = e2.id
-                WHERE s2.value = $1 AND s2.signal_type = $2
-                  AND s2.entity_id != $3
-            """, r["value"], r["signal_type"], r["entity_id"])
+        # Platform handles: source:username
+        handle_rows = await conn.fetch("""
+            SELECT entity_id::text AS eid, source,
+                   COALESCE(NULLIF(platform_username,''), NULLIF(platform_name,''), platform_id) AS handle
+            FROM entity_platform_links
+            WHERE entity_id = ANY($1::uuid[])
+            ORDER BY source
+        """, ids)
+        handles: dict[str, list[str]] = {}
+        for lr in handle_rows:
+            label = f"{lr['source']}:{lr['handle']}" if lr["handle"] else lr["source"]
+            handles.setdefault(lr["eid"], [])
+            if label not in handles[lr["eid"]]:
+                handles[lr["eid"]].append(label)
 
-            for other in other_entities:
-                await notify_merge_candidate(
-                    r["canonical_name"] or "Unknown",
-                    other["canonical_name"] or "Unknown",
-                    r["confidence"] / 100,
-                    r["signal_type"],
-                )
+        # Representative face crop (best quality)
+        face_rows = await conn.fetch("""
+            SELECT DISTINCT ON (ef.entity_id) ef.entity_id::text AS eid, ef.face_id
+            FROM entity_faces ef
+            JOIN facetracker.faces f ON f.id = ef.face_id
+            WHERE ef.entity_id = ANY($1::uuid[])
+            ORDER BY ef.entity_id, f.quality_score DESC NULLS LAST
+        """, ids)
+        faces: dict[str, str] = {r["eid"]: f"/api/face/gallery/faces/{r['face_id']}/crop" for r in face_rows}
 
+    for r in rows:
+        id_a, id_b = r["entity_a"], r["entity_b"]
+        pair_key = ":".join(sorted([id_a, id_b]))
+        if pair_key in _notified_pairs:
+            continue
+        _notified_pairs.add(pair_key)
+
+        import json as _json
+        try:
+            meta = _json.loads(r["sources"]) if isinstance(r["sources"], str) else (r["sources"] or {})
+        except Exception:
+            meta = {}
+        signals = meta.get("contributing_signals", []) or ["same_person_probability"]
+        score = meta.get("score")
+
+        candidate = {
+            "entity_a": id_a,
+            "entity_b": id_b,
+            "name_a": r["name_a"],
+            "name_b": r["name_b"],
+            "handles_a": handles.get(id_a, []),
+            "handles_b": handles.get(id_b, []),
+            "score": score,
+            "cross_platform": bool(r["cross_platform"]),
+            "signals": signals,
+            "face_a": faces.get(id_a),
+            "face_b": faces.get(id_b),
+        }
+        confidence = float(score or r["weight"] or 0) / 100
+        await notify_merge_candidate(
+            r["name_a"] or "Unknown",
+            r["name_b"] or "Unknown",
+            confidence,
+            signals[0] if signals else "same_person_probability",
+            candidate=candidate,
+        )
 
 async def start_scheduler() -> None:
     global _running
@@ -707,6 +775,18 @@ async def start_scheduler() -> None:
                 interval // 60, full_interval, digest_hour, status_interval_h,
                 "enabled" if backup_enabled else "disabled",
                 decision_outbox_interval)
+
+    # Telegram merge-review callback poller (single asyncio Task, not a new process)
+    _merge_bot_task = None
+    if _env_flag("TELEGRAM_MERGE_BOT_ENABLED"):
+        try:
+            from src.notifications.merge_bot import run_callback_poller
+            _merge_bot_task = asyncio.create_task(run_callback_poller(), name="merge_bot_poller")
+            logger.info("merge-bot: callback poller task created (TELEGRAM_MERGE_BOT_ENABLED=1)")
+        except Exception:
+            logger.exception("merge-bot: failed to start callback poller (non-fatal)")
+    else:
+        logger.info("merge-bot: TELEGRAM_MERGE_BOT_ENABLED not set — callback poller disabled")
 
     last_digest_date: str | None = None
     last_health_check: datetime | None = None

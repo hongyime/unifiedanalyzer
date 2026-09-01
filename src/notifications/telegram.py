@@ -114,14 +114,20 @@ async def _audit_send(
         logger.debug("Telegram notification audit write failed (non-fatal)", exc_info=True)
 
 
-def _send_sync(text: str, parse_mode: str = "HTML") -> tuple[bool, int | None, str | None]:
+def _send_sync(
+    text: str,
+    parse_mode: str = "HTML",
+    reply_markup: dict | None = None,
+) -> tuple[bool, int | None, str | None]:
     url = f"https://api.telegram.org/bot{_BOT_TOKEN}/sendMessage"
-    payload = {
+    payload: dict = {
         "chat_id": _CHAT_ID,
         "text": text,
         "parse_mode": parse_mode,
         "disable_web_page_preview": True,
     }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     if _THREAD_ID:
         payload["message_thread_id"] = _THREAD_ID
 
@@ -153,6 +159,7 @@ async def send(
     text: str,
     parse_mode: str = "HTML",
     *,
+    reply_markup: dict | None = None,
     message_type: str = "general",
     related_run_id: str | None = None,
     related_alert_id: str | None = None,
@@ -168,7 +175,7 @@ async def send(
                 error="telegram_not_configured",
             )
             return False
-    ok, message_id, error = await asyncio.to_thread(_send_sync, text, parse_mode)
+    ok, message_id, error = await asyncio.to_thread(_send_sync, text, parse_mode, reply_markup)
     await _audit_send(
         text=text,
         message_type=message_type,
@@ -179,3 +186,90 @@ async def send(
         error=error,
     )
     return ok
+
+
+# ──────────────────────────────────────────────────────
+# Bot-API helpers for the merge-review callback poller
+# ──────────────────────────────────────────────────────
+
+def _bot_post(method: str, payload: dict) -> dict:
+    """POST to a Telegram Bot API method; return parsed JSON."""
+    url = f"https://api.telegram.org/bot{_BOT_TOKEN}/{method}"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=15)
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:300]
+        logger.warning("Telegram %s failed: %s %s", method, e.code, body)
+        return {"ok": False, "error": f"{e.code} {body}"}
+    except Exception as exc:
+        logger.debug("Telegram %s error", method, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+
+
+def _bot_get(method: str, params: dict | None = None) -> dict:
+    """GET a Telegram Bot API method (e.g. getUpdates, getWebhookInfo)."""
+    import urllib.parse
+    base = f"https://api.telegram.org/bot{_BOT_TOKEN}/{method}"
+    if params:
+        base = f"{base}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(base, headers={"Accept": "application/json"})
+    try:
+        resp = urllib.request.urlopen(req, timeout=35)  # ≥ long-poll timeout
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:300]
+        logger.warning("Telegram %s GET failed: %s %s", method, e.code, body)
+        return {"ok": False, "error": f"{e.code} {body}"}
+    except Exception as exc:
+        logger.debug("Telegram %s GET error", method, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+
+
+def answer_callback_query(callback_query_id: str, text: str = "") -> dict:
+    """Acknowledge a callback query (clears the spinner on the tapped button)."""
+    _get_config()
+    return _bot_post("answerCallbackQuery", {
+        "callback_query_id": callback_query_id,
+        "text": text[:200] if text else "",
+    })
+
+
+def edit_message_text(chat_id: int | str, message_id: int, text: str) -> dict:
+    """Replace the text of a sent message (also removes any inline keyboard)."""
+    _get_config()
+    return _bot_post("editMessageText", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text[:4096],
+        "parse_mode": "HTML",
+    })
+
+
+def get_updates(offset: int = 0, timeout: int = 25) -> dict:
+    """Long-poll getUpdates; only requests callback_query updates."""
+    _get_config()
+    params: dict = {
+        "allowed_updates": json.dumps(["callback_query"]),
+        "timeout": timeout,
+    }
+    if offset:
+        params["offset"] = offset
+    return _bot_get("getUpdates", params)
+
+
+def get_webhook_info() -> dict:
+    """Return current webhook info (result.url is empty string when none set)."""
+    _get_config()
+    return _bot_get("getWebhookInfo")
+
+
+def delete_webhook() -> dict:
+    """Remove any set webhook so getUpdates long-polling works."""
+    _get_config()
+    return _bot_post("deleteWebhook", {"drop_pending_updates": False})
