@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { GitFork, RefreshCw } from 'lucide-react'
-import { api, GraphExplainEdge, GraphNodesEdges, GraphPivots } from '../api'
+import { api, GraphEdge, GraphExplainEdge, GraphNodesEdges, GraphPivots, GraphTelegramNetwork } from '../api'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Card } from '../components/ui/Card'
 import { MetricCard } from '../components/ui/MetricCard'
@@ -84,6 +84,28 @@ export default function GraphPage() {
   const [graphLoading, setGraphLoading] = useState(false)
   const [graphError, setGraphError] = useState('')
 
+  // ── Telegram network mode ────────────────────────────────────────────────
+  const [graphMode, setGraphMode] = useState<'relationships' | 'telegram'>('relationships')
+  const [tgLimit, setTgLimit] = useState(150)
+  const [tgMinWeight, setTgMinWeight] = useState(1)
+  const [tgInteractionType, setTgInteractionType] = useState('')
+  const [tgData, setTgData] = useState<GraphTelegramNetwork | null>(null)
+  const [tgLoading, setTgLoading] = useState(false)
+  const [tgError, setTgError] = useState('')
+
+  const loadTelegramNetwork = () => {
+    setTgLoading(true)
+    setTgError('')
+    api.getTelegramNetwork({
+      limit: tgLimit,
+      min_weight: tgMinWeight,
+      interaction_type: tgInteractionType || undefined,
+    })
+      .then(setTgData)
+      .catch((e: unknown) => setTgError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setTgLoading(false))
+  }
+
   const loadGraph = () => {
     setGraphLoading(true)
     setGraphError('')
@@ -124,6 +146,18 @@ export default function GraphPage() {
     const type = filters.relationshipType.trim().toLowerCase()
     return rows.filter((row) => !type || row.type.toLowerCase().includes(type))
   }, [overview, filters.relationshipType])
+
+  const tgGraphEdges = useMemo((): GraphEdge[] => {
+    if (!tgData) return []
+    return tgData.edges.map((e) => {
+      const { replied, reacted, forwarded } = e.types
+      const dominant =
+        replied >= reacted && replied >= forwarded ? 'replied'
+          : reacted >= forwarded ? 'reacted'
+            : 'forwarded'
+      return { source: e.source, target: e.target, weight: e.weight, type: dominant }
+    })
+  }, [tgData])
 
   const runPath = async () => {
     setActionError('')
@@ -196,47 +230,121 @@ export default function GraphPage() {
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold">WebGL Relationship Graph</span>
-            <span className="text-xs text-text-muted">sigma.js · graphology · click node → entity</span>
+            <span className="text-xs text-text-muted">sigma.js · graphology · click node to open entity</span>
           </div>
-          {graphData && (
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setGraphMode('relationships')}
+              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${ graphMode === 'relationships' ? 'bg-primary text-primary-foreground' : 'border border-border bg-background text-text-secondary hover:bg-muted' }`}
+              data-testid="mode-relationships"
+            >
+              Relationships
+            </button>
+            <button
+              type="button"
+              onClick={() => setGraphMode('telegram')}
+              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${ graphMode === 'telegram' ? 'bg-primary text-primary-foreground' : 'border border-border bg-background text-text-secondary hover:bg-muted' }`}
+              data-testid="mode-telegram"
+            >
+              Telegram network
+            </button>
+          </div>
+          {graphMode === 'relationships' && graphData && (
             <span className="text-xs text-text-muted" data-testid="graph-node-count">
               {graphData.nodes.length} nodes · {graphData.edges.length} edges
             </span>
           )}
+          {graphMode === 'telegram' && tgData && (
+            <span className="text-xs text-text-muted" data-testid="graph-node-count">
+              {tgData.nodes.length} nodes · {tgData.edges.length} edges
+            </span>
+          )}
         </div>
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <label className="text-sm text-text-secondary">Limit</label>
-          <input
-            type="number"
-            value={graphLimit}
-            onChange={(e) => setGraphLimit(Math.max(1, Math.min(1000, Number(e.target.value) || 300)))}
-            min={1}
-            max={1000}
-            className="w-24 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
-          />
-          <label className="text-sm text-text-secondary">Min weight</label>
-          <input
-            type="number"
-            value={graphMinWeight}
-            onChange={(e) => setGraphMinWeight(Math.max(0, Number(e.target.value) || 0))}
-            min={0}
-            step={1}
-            className="w-20 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
-          />
-          <input
-            value={graphRelType}
-            onChange={(e) => setGraphRelType(e.target.value)}
-            placeholder="relationship type filter"
-            className="rounded-md border border-border bg-background px-2 py-1.5 text-sm"
-          />
-          <button type="button" onClick={loadGraph}>Load Graph</button>
-        </div>
-        {graphLoading ? (
-          <LoadingSpinner label="Loading graph data..." />
-        ) : graphError ? (
-          <div className="text-sm text-error">{graphError}</div>
+
+        {graphMode === 'relationships' ? (
+          <>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <label className="text-sm text-text-secondary">Limit</label>
+              <input
+                type="number"
+                value={graphLimit}
+                onChange={(e) => setGraphLimit(Math.max(1, Math.min(1000, Number(e.target.value) || 300)))}
+                min={1}
+                max={1000}
+                className="w-24 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              />
+              <label className="text-sm text-text-secondary">Min weight</label>
+              <input
+                type="number"
+                value={graphMinWeight}
+                onChange={(e) => setGraphMinWeight(Math.max(0, Number(e.target.value) || 0))}
+                min={0}
+                step={1}
+                className="w-20 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              />
+              <input
+                value={graphRelType}
+                onChange={(e) => setGraphRelType(e.target.value)}
+                placeholder="relationship type filter"
+                className="rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              />
+              <button type="button" onClick={loadGraph}>Load Graph</button>
+            </div>
+            {graphLoading ? (
+              <LoadingSpinner label="Loading graph data..." />
+            ) : graphError ? (
+              <div className="text-sm text-error">{graphError}</div>
+            ) : (
+              <GraphRenderer nodes={graphData?.nodes ?? []} edges={graphData?.edges ?? []} />
+            )}
+          </>
         ) : (
-          <GraphRenderer nodes={graphData?.nodes ?? []} edges={graphData?.edges ?? []} />
+          <>
+            {tgData?.stats && (
+              <div className="mb-3 flex flex-wrap gap-4 rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-text-secondary">
+                <span><span className="font-semibold text-text-primary">{tgData.stats.node_count}</span> nodes</span>
+                <span><span className="font-semibold text-text-primary">{tgData.stats.edge_count}</span> edges</span>
+                <span>replied: <span className="font-semibold text-blue-500">{tgData.stats.total_replied.toLocaleString()}</span></span>
+                <span>reacted: <span className="font-semibold text-amber-500">{tgData.stats.total_reacted.toLocaleString()}</span></span>
+                <span>forwarded: <span className="font-semibold text-green-600">{tgData.stats.total_forwarded.toLocaleString()}</span></span>
+              </div>
+            )}
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <label className="text-sm text-text-secondary">Limit</label>
+              <input
+                type="number"
+                value={tgLimit}
+                onChange={(e) => setTgLimit(Math.max(1, Math.min(1000, Number(e.target.value) || 150)))}
+                min={1}
+                max={1000}
+                className="w-24 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              />
+              <label className="text-sm text-text-secondary">Min weight</label>
+              <input
+                type="number"
+                value={tgMinWeight}
+                onChange={(e) => setTgMinWeight(Math.max(1, Number(e.target.value) || 1))}
+                min={1}
+                step={1}
+                className="w-20 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              />
+              <input
+                value={tgInteractionType}
+                onChange={(e) => setTgInteractionType(e.target.value)}
+                placeholder="replied | reacted | forwarded"
+                className="rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              />
+              <button type="button" onClick={loadTelegramNetwork} data-testid="load-telegram-btn">Load Telegram Network</button>
+            </div>
+            {tgLoading ? (
+              <LoadingSpinner label="Loading Telegram network..." />
+            ) : tgError ? (
+              <div className="text-sm text-error">{tgError}</div>
+            ) : (
+              <GraphRenderer nodes={tgData?.nodes ?? []} edges={tgGraphEdges} />
+            )}
+          </>
         )}
       </Card>
 

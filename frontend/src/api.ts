@@ -421,6 +421,29 @@ export interface GraphNodesEdges {
   edges: GraphEdge[]
 }
 
+export interface GraphTelegramEdge {
+  source: string
+  target: string
+  weight: number
+  types: {
+    replied: number
+    reacted: number
+    forwarded: number
+  }
+}
+
+export interface GraphTelegramNetwork {
+  nodes: GraphNode[]
+  edges: GraphTelegramEdge[]
+  stats: {
+    node_count: number
+    edge_count: number
+    total_replied: number
+    total_reacted: number
+    total_forwarded: number
+  }
+}
+
 export interface HealthInfo {
   status: string
   analyzer_db: string
@@ -1367,4 +1390,12 @@ export const api = {
       page: number
       page_size: number
     }>(`/face/gallery/faces?page=${page}&page_size=${pageSize}`),
+
+  getTelegramNetwork: (params: { limit?: number; min_weight?: number; interaction_type?: string } = {}) => {
+    const q = new URLSearchParams()
+    if (params.limit != null) q.set('limit', String(params.limit))
+    if (params.min_weight != null) q.set('min_weight', String(params.min_weight))
+    if (params.interaction_type) q.set('interaction_type', params.interaction_type)
+    return get<GraphTelegramNetwork>(`/graph/telegram-network?${q.toString()}`)
+  },
 }

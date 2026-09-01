@@ -1432,3 +1432,129 @@ async def graph_nodes_edges(
         for src, tgt, w, rtype in filtered
     ]
     return {"nodes": nodes, "edges": edges}
+
+
+@router.get("/graph/telegram-network")
+async def graph_telegram_network(
+    limit: int = Query(300, ge=1, le=1000),
+    min_weight: int = Query(1, ge=1),
+    interaction_type: str | None = None,
+):
+    """Telegram chat-network graph: who-talks-to-whom.
+
+    NODES = entities active on Telegram (distinct actor/target from entity_interactions
+    WHERE source='telegram'), bounded to the top-`limit` most-connected entities.
+    EDGES = directed, aggregated per (actor, target), summing per interaction_type.
+    Returns stats with real totals from the bounded subset.
+    """
+    from collections import Counter
+
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        # Pull all telegram interaction rows grouped by (actor, target, type)
+        if interaction_type:
+            edge_rows = await conn.fetch(
+                """
+                SELECT actor_entity_id::text AS src,
+                       target_entity_id::text AS tgt,
+                       interaction_type,
+                       COUNT(*)::int AS n
+                FROM entity_interactions
+                WHERE source = 'telegram'
+                  AND actor_entity_id IS NOT NULL
+                  AND target_entity_id IS NOT NULL
+                  AND interaction_type = $1
+                GROUP BY actor_entity_id, target_entity_id, interaction_type
+                """,
+                interaction_type,
+            )
+        else:
+            edge_rows = await conn.fetch(
+                """
+                SELECT actor_entity_id::text AS src,
+                       target_entity_id::text AS tgt,
+                       interaction_type,
+                       COUNT(*)::int AS n
+                FROM entity_interactions
+                WHERE source = 'telegram'
+                  AND actor_entity_id IS NOT NULL
+                  AND target_entity_id IS NOT NULL
+                GROUP BY actor_entity_id, target_entity_id, interaction_type
+                """
+            )
+
+        # Accumulate degree (total interactions touching each entity)
+        degree: Counter[str] = Counter()
+        # Accumulate per-(src, tgt) type breakdown
+        edge_map: dict[tuple[str, str], dict[str, int]] = {}
+        for r in edge_rows:
+            src, tgt = r["src"], r["tgt"]
+            n = int(r["n"])
+            degree[src] += n
+            degree[tgt] += n
+            key = (src, tgt)
+            if key not in edge_map:
+                edge_map[key] = {"replied": 0, "reacted": 0, "forwarded": 0, "total": 0}
+            itype = r["interaction_type"] or "other"
+            if itype in edge_map[key]:
+                edge_map[key][itype] += n
+            edge_map[key]["total"] += n
+
+        # Keep top-`limit` most-connected entities by total interaction volume
+        top_entities: set[str] = {eid for eid, _ in degree.most_common(limit)}
+
+        # Filter edges: both endpoints in top set AND weight >= min_weight
+        filtered_edges: list[tuple[str, str, dict[str, int]]] = [
+            (src, tgt, data)
+            for (src, tgt), data in edge_map.items()
+            if src in top_entities and tgt in top_entities and data["total"] >= min_weight
+        ]
+
+        # Final degree = edge-count per node among filtered edges only
+        final_degree: Counter[str] = Counter()
+        for src, tgt, _ in filtered_edges:
+            final_degree[src] += 1
+            final_degree[tgt] += 1
+
+        entity_ids = list({eid for src, tgt, _ in filtered_edges for eid in (src, tgt)})
+        if entity_ids:
+            name_rows = await conn.fetch(
+                "SELECT id::text AS id, canonical_name FROM entities WHERE id = ANY($1::uuid[])",
+                entity_ids,
+            )
+            names: dict[str, str | None] = {r["id"]: r["canonical_name"] for r in name_rows}
+        else:
+            names = {}
+
+    total_replied = sum(d["replied"] for _, _, d in filtered_edges)
+    total_reacted = sum(d["reacted"] for _, _, d in filtered_edges)
+    total_forwarded = sum(d["forwarded"] for _, _, d in filtered_edges)
+
+    nodes = [
+        {"id": eid, "label": names.get(eid) or eid[:8], "degree": final_degree[eid]}
+        for eid in entity_ids
+    ]
+    edges = [
+        {
+            "source": src,
+            "target": tgt,
+            "weight": data["total"],
+            "types": {
+                "replied": data["replied"],
+                "reacted": data["reacted"],
+                "forwarded": data["forwarded"],
+            },
+        }
+        for src, tgt, data in filtered_edges
+    ]
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "stats": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "total_replied": total_replied,
+            "total_reacted": total_reacted,
+            "total_forwarded": total_forwarded,
+        },
+    }
