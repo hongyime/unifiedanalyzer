@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -286,18 +287,28 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
             ORDER BY r.cross_platform DESC, jsonb_array_length(r.sources->'contributing_signals') DESC, r.weight DESC
             LIMIT $1
         """, limit, min_weight)
-        ids: list[str] = []
-        for r in rows:
-            ids.append(str(r["entity_a_id"]))
-            ids.append(str(r["entity_b_id"]))
-        rep = await representative_faces(conn, ids)
+    ids: list[str] = []
+    for r in rows:
+        ids.append(str(r["entity_a_id"]))
+        ids.append(str(r["entity_b_id"]))
 
-        # Platform handles per entity — so a name-less entity shows WHO it is
-        # ("github:samho", "telegram:sam_ho") instead of a meaningless UUID, and
-        # the reviewer has real accounts to compare when deciding same/different.
-        handles: dict[str, list[str]] = {}
-        if ids:
-            link_rows = await conn.fetch("""
+    # Parallelize the two independent follow-up fetches (representative faces +
+    # platform handles). asyncpg runs one query per connection at a time, so each
+    # lane acquires its own pool connection and they overlap on the wire — same
+    # pattern the triage endpoint uses. Was serial (~2 sequential round-trips);
+    # now one wall-clock round-trip.
+    async def _fetch_faces() -> dict:
+        if not ids:
+            return {}
+        async with pool.acquire() as c:
+            return await representative_faces(c, ids)
+
+    async def _fetch_handles() -> dict[str, list[str]]:
+        h: dict[str, list[str]] = {}
+        if not ids:
+            return h
+        async with pool.acquire() as c:
+            link_rows = await c.fetch("""
                 SELECT entity_id::text AS eid, source,
                        -- username/name when present, else the platform_id (for
                        -- WhatsApp that's the phone/JID — the actual identifier for
@@ -307,11 +318,14 @@ async def review_candidates(limit: int = Query(50, ge=1, le=200)):
                 WHERE entity_id = ANY($1::uuid[])
                 ORDER BY source
             """, list(set(ids)))
-            for lr in link_rows:
-                label = f"{lr['source']}:{lr['handle']}" if lr["handle"] else lr["source"]
-                handles.setdefault(lr["eid"], [])
-                if label not in handles[lr["eid"]]:
-                    handles[lr["eid"]].append(label)
+        for lr in link_rows:
+            label = f"{lr['source']}:{lr['handle']}" if lr["handle"] else lr["source"]
+            h.setdefault(lr["eid"], [])
+            if label not in h[lr["eid"]]:
+                h[lr["eid"]].append(label)
+        return h
+
+    rep, handles = await asyncio.gather(_fetch_faces(), _fetch_handles())
 
     def _display(name, eid):
         if name:

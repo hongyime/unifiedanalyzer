@@ -413,6 +413,21 @@ WHERE er.id = r.id
 CREATE UNIQUE INDEX IF NOT EXISTS idx_relationships_pair_type_unique
     ON entity_relationships(entity_a_id, entity_b_id, relationship_type);
 
+-- Fast-path index for GET /api/review/candidates: matches the exact predicate
+-- (relationship_type='same_person_probability' AND COALESCE(score*100, weight) >= N).
+-- Without this the planner scans the entire idx_relationships_pair_type_unique index
+-- (346k+ rows) to find the 578 same_person rows. Partial+expression = ~200 rows scanned.
+CREATE INDEX IF NOT EXISTS idx_relationships_same_person_score
+    ON entity_relationships (
+        (COALESCE(
+            CASE WHEN jsonb_typeof(sources->'score') = 'number'
+                 THEN (sources->>'score')::float8 * 100
+            END,
+            weight::float8
+        ))
+    )
+    WHERE relationship_type = 'same_person_probability';
+
 CREATE TABLE IF NOT EXISTS entity_interactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     actor_entity_id UUID REFERENCES entities(id) ON DELETE CASCADE,
