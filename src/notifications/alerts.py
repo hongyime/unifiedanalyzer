@@ -197,7 +197,7 @@ async def notify_merge_candidate(entity_a_name: str, entity_b_name: str,
                 ]]
             }
 
-        return await telegram.send(text, reply_markup=reply_markup, message_type="merge_candidate")
+        return await telegram.send(text, reply_markup=reply_markup, message_type="merge_candidate", pin=True)
 
     # Fallback: legacy plain-text send (no candidate data, no buttons)
     return await telegram.send(

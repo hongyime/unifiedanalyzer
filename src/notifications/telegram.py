@@ -163,6 +163,7 @@ async def send(
     message_type: str = "general",
     related_run_id: str | None = None,
     related_alert_id: str | None = None,
+    pin: bool = False,
 ) -> bool:
     if not _BOT_TOKEN:
         if not _get_config():
@@ -185,6 +186,18 @@ async def send(
         related_alert_id=related_alert_id,
         error=error,
     )
+    # Merge-review cards get pinned so the collector-update flood doesn't bury
+    # them; the callback poller unpins on decision. Best-effort, non-fatal.
+    if ok and pin and message_id:
+        try:
+            res = await asyncio.to_thread(pin_chat_message, _CHAT_ID, message_id)
+            if not res.get("ok"):
+                logger.warning(
+                    "pin_chat_message failed (bot may lack can_pin_messages right): %s",
+                    res.get("error"),
+                )
+        except Exception:
+            logger.debug("pin_chat_message error (non-fatal)", exc_info=True)
     return ok
 
 
@@ -273,3 +286,27 @@ def delete_webhook() -> dict:
     """Remove any set webhook so getUpdates long-polling works."""
     _get_config()
     return _bot_post("deleteWebhook", {"drop_pending_updates": False})
+
+
+def pin_chat_message(chat_id: int | str, message_id: int, *, disable_notification: bool = True) -> dict:
+    """Pin a message so it stays visible above the collector-update flood.
+
+    disable_notification suppresses the pin alert; the tiny 'pinned a message'
+    service line may still appear on some clients. Requires the bot to have the
+    can_pin_messages right in a group/supergroup (fails gracefully otherwise).
+    """
+    _get_config()
+    return _bot_post("pinChatMessage", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "disable_notification": disable_notification,
+    })
+
+
+def unpin_chat_message(chat_id: int | str, message_id: int) -> dict:
+    """Unpin a specific message (called when a merge decision is made)."""
+    _get_config()
+    return _bot_post("unpinChatMessage", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+    })

@@ -185,6 +185,11 @@ async def _handle_callback(cq: dict) -> None:
 
     if chat_id and message_id:
         await asyncio.to_thread(telegram.edit_message_text, chat_id, message_id, new_text)
+        # Decision made — unpin so the pinned queue only holds OPEN candidates.
+        try:
+            await asyncio.to_thread(telegram.unpin_chat_message, chat_id, message_id)
+        except Exception:
+            logger.debug("merge-bot: unpin failed (non-fatal)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
