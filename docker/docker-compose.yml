@@ -83,6 +83,11 @@ services:
     depends_on:
       - analyzer
     command: ["python", "-m", "src.main", "scheduler"]
+    # Dynamic (env-tunable) resource caps — bounds the scheduler (entity
+    # resolution + recon_bridge tick) without harming a full-resolution run.
+    # Generous by design; lower via env if the box gets tight.
+    mem_limit: ${ANALYZER_SCHED_MEM:-3g}
+    cpus: "${ANALYZER_SCHED_CPUS:-3.0}"
     env_file:
       - ../.env
     environment:
