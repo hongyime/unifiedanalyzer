@@ -762,6 +762,17 @@ async def start_scheduler() -> None:
         900,
         minimum=60,
     )
+    recon_bridge_interval = _env_int(
+        "ANALYZER_RECON_BRIDGE_INTERVAL_SECONDS",
+        3600,
+        minimum=300,
+    )
+    recon_bridge_limit = _env_int(
+        "ANALYZER_RECON_BRIDGE_LIMIT",
+        1000,
+        minimum=1,
+        maximum=10000,
+    )
     lock_retry_seconds = _env_int(
         "ANALYZER_SCHEDULER_LOCK_RETRY_SECONDS",
         300,
@@ -793,6 +804,7 @@ async def start_scheduler() -> None:
     last_status: datetime | None = None
     last_backup_check: datetime | None = None
     last_decision_outbox_check: datetime | None = None
+    last_recon_bridge_check: datetime | None = None
     was_offline = False
 
     while _running:
@@ -839,6 +851,25 @@ async def start_scheduler() -> None:
                 last_status = now
             except Exception:
                 logger.exception("Status heartbeat failed")
+
+        # Recon-observations -> identity_signals bridge. Runs BEFORE the DB
+        # backup and other heavy blocks so a long-running pg_dump never starves
+        # the auto-bridge — new collector recon findings flow into analyzer
+        # identity_signals every ~hour by default. Idempotent (skips already
+        # bridged rows via source_record_id).
+        if (
+            last_recon_bridge_check is None
+            or (now - last_recon_bridge_check).total_seconds() >= recon_bridge_interval
+        ):
+            try:
+                from src.pipeline.recon_bridge import bridge_recon_observations
+                summary = await bridge_recon_observations(
+                    dry_run=False, limit=recon_bridge_limit,
+                )
+                logger.info("recon_bridge tick: %s", summary)
+            except Exception:
+                logger.exception("recon_bridge tick failed")
+            last_recon_bridge_check = now
 
         if backup_enabled and _backup_window_open(now, backup_hour) and (
             last_backup_check is None
