@@ -337,7 +337,28 @@ def prune_backups(config: BackupConfig, *, dry_run: bool = False) -> tuple[Path,
     for path in stale:
         path.unlink(missing_ok=True)
         logger.info("Deleted stale analyzer DB backup: %s", path)
+    _sweep_orphaned_tmp(config.root)
     return stale
+
+
+def _sweep_orphaned_tmp(root: str | Path) -> None:
+    """Remove leftover ``*.dump.tmp`` files from interrupted dumps.
+
+    ``_run_pg_dump`` only clears a tmp that collides with the current target
+    name; runs use unique timestamps, so an interrupted dump leaves an orphaned
+    ``.dump.tmp`` that would otherwise accumulate forever. Prune runs after the
+    active dump has been renamed to its final path, so any remaining
+    ``.dump.tmp`` under the root is orphaned and safe to remove.
+    """
+    backup_root = Path(root)
+    if not backup_root.exists():
+        return
+    for tmp in backup_root.rglob("*.dump.tmp"):
+        try:
+            tmp.unlink(missing_ok=True)
+            logger.info("Swept orphaned analyzer DB backup tmp: %s", tmp)
+        except OSError as exc:  # pragma: no cover - defensive
+            logger.warning("Could not remove orphaned tmp %s: %s", tmp, exc)
 
 
 def _stale_backup_paths(config: BackupConfig, backups: list[BackupFile]) -> tuple[Path, ...]:

@@ -251,3 +251,32 @@ def test_backup_config_allows_missing_database_for_listing(
 
     assert config.root == tmp_path
     assert config.database_url == "postgres://unused@127.0.0.1/postgres"
+
+
+def test_prune_backups_sweeps_orphaned_tmp_files(tmp_path: Path):
+    # A healthy dump within retention plus orphaned .dump.tmp leftovers from
+    # dumps that were interrupted before tmp->final rename (unique timestamps
+    # mean the same-name cleanup in _run_pg_dump never removes these).
+    keep = _write_backup(tmp_path, "daily", "20260720T010000Z")
+    orphan1 = tmp_path / "daily" / "unifiedanalyzer_daily_20260719T010000Z.dump.tmp"
+    orphan1.parent.mkdir(parents=True, exist_ok=True)
+    orphan1.write_bytes(b"partial-dump")
+    orphan2 = tmp_path / "weekly" / "unifiedanalyzer_weekly_20260713T010000Z.dump.tmp"
+    orphan2.parent.mkdir(parents=True, exist_ok=True)
+    orphan2.write_bytes(b"partial-dump")
+    config = BackupConfig(
+        database_url="postgres://collector:collector@localhost:5500/unifiedanalyzer",
+        root=tmp_path,
+        retention={"daily": 7, "weekly": 4, "monthly": 3},
+    )
+
+    # A dry run must never touch the filesystem.
+    prune_backups(config, dry_run=True)
+    assert orphan1.exists()
+    assert orphan2.exists()
+
+    # A real prune sweeps orphaned .tmp files but keeps real dumps.
+    prune_backups(config, dry_run=False)
+    assert not orphan1.exists()
+    assert not orphan2.exists()
+    assert keep.exists()
