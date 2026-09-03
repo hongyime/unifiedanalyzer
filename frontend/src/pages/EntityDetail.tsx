@@ -1186,6 +1186,96 @@ export default function EntityDetailPage() {
             )}
           </Card>
 
+          {/* ── OSINT Enrichment (GHunt / maigret / phone-intel) ── */}
+          <Card
+            title="OSINT Enrichment"
+            actions={<InfoTip text="Cross-platform enrichment: Google account info (GHunt), discovered external profiles (maigret), and phone carrier/region data. Updated each enrichment pass." />}
+          >
+            {(!entity.enrichment || (
+              entity.enrichment.google_accounts.length === 0 &&
+              entity.enrichment.discovered_accounts.length === 0 &&
+              entity.enrichment.phone_intel.length === 0
+            )) ? (
+              <div className="text-sm text-text-muted">No enrichment yet — run maigret / GHunt / phone-intel on this entity's usernames or emails to populate.</div>
+            ) : (
+              <div className="space-y-4">
+                {/* Google accounts (GHunt) */}
+                {entity.enrichment!.google_accounts.length > 0 && (
+                  <div>
+                    <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-text-muted">Google accounts</div>
+                    <div className="space-y-2">
+                      {entity.enrichment!.google_accounts.map((g) => (
+                        <div key={g.email} className="rounded-lg border border-border-strong bg-surface-2 p-3">
+                          <div className="flex items-center gap-3">
+                            {g.avatar_url && (
+                              <img
+                                src={g.avatar_url}
+                                alt={g.email}
+                                className="h-9 w-9 shrink-0 rounded-full object-cover"
+                                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                              />
+                            )}
+                            <div className="min-w-0">
+                              <div className="mono truncate text-sm text-text-primary">{g.email}</div>
+                              {g.gaia_id && (
+                                <div className="mono mt-0.5 text-xs text-text-muted">GAIA {g.gaia_id}</div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {/* Discovered accounts (maigret) */}
+                {entity.enrichment!.discovered_accounts.length > 0 && (
+                  <div>
+                    <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-text-muted">
+                      Discovered accounts ({entity.enrichment!.discovered_accounts.length})
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {entity.enrichment!.discovered_accounts.map((acc) => (
+                        <a
+                          key={acc.url}
+                          href={acc.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 rounded-md border border-border-strong bg-surface-2 px-2 py-1 text-xs text-text-primary transition-colors hover:border-accent hover:text-accent"
+                        >
+                          {acc.site}
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {/* Phone carrier / region intel */}
+                {entity.enrichment!.phone_intel.length > 0 && (
+                  <div>
+                    <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-text-muted">Phone carrier / region</div>
+                    <div className="space-y-2">
+                      {entity.enrichment!.phone_intel.map((p) => (
+                        <div key={p.phone_jid} className="rounded-lg border border-border-strong bg-surface-2 p-3">
+                          <div className="mono text-sm text-text-primary">{p.e164 ?? p.phone_jid.split('@')[0]}</div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-secondary">
+                            {p.carrier && <span>{p.carrier}</span>}
+                            {(p.region_name || p.region) && <span className="text-text-muted">·</span>}
+                            {p.region_name && <span>{p.region_name}</span>}
+                            {p.region && p.region !== p.region_name && (
+                              <span className="text-text-muted">({p.region})</span>
+                            )}
+                            {p.line_type && (
+                              <><span className="text-text-muted">·</span><span className="capitalize">{p.line_type.toLowerCase()}</span></>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </Card>
+
           <Card
             title="Identity evidence"
             actions={<InfoTip text="Individual clues linking this person to other accounts — same phone, similar name, same face in photos, etc. More independent clues = higher confidence." />}

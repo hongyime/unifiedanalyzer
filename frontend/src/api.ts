@@ -112,6 +112,7 @@ export interface EntityDetail {
   identity_signals: Signal[]
   face_crop_url?: string | null
   wa_devices?: WaDevice[]
+  enrichment?: OsintEnrichment | null
 }
 
 export interface WaDevice {
@@ -122,6 +123,33 @@ export interface WaDevice {
   companion_count: number
   device_ids: number[]
   observed_at: string | null
+}
+
+export interface GoogleAccount {
+  email: string
+  gaia_id: string | null
+  avatar_url: string | null
+}
+
+export interface DiscoveredAccount {
+  url: string
+  site: string
+  username: string
+}
+
+export interface PhoneIntel {
+  phone_jid: string
+  e164: string | null
+  carrier: string | null
+  region: string | null
+  region_name: string | null
+  line_type: string | null
+}
+
+export interface OsintEnrichment {
+  google_accounts: GoogleAccount[]
+  discovered_accounts: DiscoveredAccount[]
+  phone_intel: PhoneIntel[]
 }
 
 export interface PlatformLink {

@@ -549,6 +549,94 @@ async def get_entity(entity_id: str):
         except Exception:
             wa_devices = []
 
+    # OSINT Enrichment (cross-DB): GHunt google accounts, maigret discovered accounts,
+    # and phone carrier/region intel. Mirrors the wa_devices cross-DB pattern above.
+    # Fail-soft: never raises 500, returns empty lists on any error.
+    _usernames: list[str] = list({
+        l["platform_username"] for l in links
+        if l["platform_username"]
+    }) if links else []
+    # email-like: used as ghunt targets (e.g. theodorelcj@gmail.com)
+    _emails: list[str] = [
+        u for u in _usernames
+        if "@" in u and "." in u.split("@")[-1]
+    ]
+    enrichment_google: list[dict] = []
+    enrichment_accounts: list[dict] = []
+    enrichment_phone: list[dict] = []
+    if _usernames or wa_jids:
+        try:
+            from urllib.parse import urlparse
+            _ecoll = get_collector_pool()
+            async with _ecoll.acquire() as _econn:
+                # ── GHunt: group per email (GOOGLE_ACCOUNT / GAIA_ID / AVATAR) ──
+                if _emails:
+                    _grows = await _econn.fetch(
+                        "SELECT rt.target_value AS email, ro.observation_type, ro.value "
+                        "FROM recon_observations ro "
+                        "JOIN recon_targets rt ON rt.id = ro.target_id "
+                        "WHERE ro.module = 'ghunt' "
+                        "  AND rt.target_value = ANY($1::text[]) "
+                        "LIMIT 50",
+                        _emails,
+                    )
+                    _by_email: dict[str, dict] = {}
+                    for _gr in _grows:
+                        _em = _gr["email"]
+                        if _em not in _by_email:
+                            _by_email[_em] = {"email": _em, "gaia_id": None, "avatar_url": None}
+                        if _gr["observation_type"] == "GAIA_ID":
+                            _by_email[_em]["gaia_id"] = _gr["value"]
+                        elif _gr["observation_type"] == "AVATAR":
+                            _by_email[_em]["avatar_url"] = _gr["value"]
+                    enrichment_google = list(_by_email.values())
+                # ── maigret: discovered external accounts per username ──
+                if _usernames:
+                    _mrows = await _econn.fetch(
+                        "SELECT rt.target_value AS username, ro.value AS url "
+                        "FROM recon_observations ro "
+                        "JOIN recon_targets rt ON rt.id = ro.target_id "
+                        "WHERE ro.module = 'maigret' "
+                        "  AND ro.observation_type = 'ACCOUNT_EXTERNAL_OWNED' "
+                        "  AND rt.target_value = ANY($1::text[]) "
+                        "ORDER BY ro.last_seen_at DESC "
+                        "LIMIT 50",
+                        _usernames,
+                    )
+                    for _mr in _mrows:
+                        _url = _mr["url"] or ""
+                        try:
+                            _parsed = urlparse(_url)
+                            _site = _parsed.netloc.lstrip("www.") or _url
+                        except Exception:
+                            _site = _url
+                        enrichment_accounts.append({
+                            "url": _url,
+                            "site": _site,
+                            "username": _mr["username"],
+                        })
+                # ── phone intel: carrier / region / line type per WA JID ──
+                if wa_jids:
+                    _prows = await _econn.fetch(
+                        "SELECT phone_jid, e164, carrier, region, region_name, line_type "
+                        "FROM wa_phone_intel "
+                        "WHERE phone_jid = ANY($1::text[]) "
+                        "LIMIT 50",
+                        wa_jids,
+                    )
+                    for _pr in _prows:
+                        enrichment_phone.append({
+                            "phone_jid": _pr["phone_jid"],
+                            "e164": _pr["e164"],
+                            "carrier": _pr["carrier"],
+                            "region": _pr["region"],
+                            "region_name": _pr["region_name"],
+                            "line_type": _pr["line_type"],
+                        })
+        except Exception:
+            enrichment_google = []
+            enrichment_accounts = []
+            enrichment_phone = []
     return {
         "id": str(entity["id"]),
         "tier": entity["tier"],
@@ -598,4 +686,9 @@ async def get_entity(entity_id: str):
             for s in signals
         ],
         "wa_devices": wa_devices,
+        "enrichment": {
+            "google_accounts": enrichment_google,
+            "discovered_accounts": enrichment_accounts,
+            "phone_intel": enrichment_phone,
+        },
     }
