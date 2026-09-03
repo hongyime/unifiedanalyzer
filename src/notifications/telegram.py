@@ -155,6 +155,37 @@ def _send_sync(
         return False, None, "network_error"
 
 
+_SEND_MAX_RETRIES = int(os.getenv("TELEGRAM_SEND_MAX_RETRIES", "4"))
+
+
+def _parse_retry_after(error: str | None) -> int | None:
+    """Extract Telegram 429 retry_after seconds from a failed-send error, else None.
+
+    Convention: every outbound call throttles + backs off honoring the server's
+    retry_after, and never silently drops the message.
+    """
+    if not error or "429" not in error:
+        return None
+    try:
+        body = error[error.index("{"):]
+        secs = (json.loads(body).get("parameters") or {}).get("retry_after")
+        if secs is not None:
+            return max(1, int(secs))
+    except Exception:
+        pass
+    marker = "retry after "
+    if marker in error:
+        digits = ""
+        for ch in error.split(marker, 1)[1]:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if digits:
+            return int(digits)
+    return 5
+
+
 async def send(
     text: str,
     parse_mode: str = "HTML",
@@ -176,7 +207,24 @@ async def send(
                 error="telegram_not_configured",
             )
             return False
-    ok, message_id, error = await asyncio.to_thread(_send_sync, text, parse_mode, reply_markup)
+    # Dynamic backoff: honor Telegram's 429 retry_after and retry the SAME send
+    # (never drop the message) up to a bounded count. Prevents the burst-429
+    # storm that silently lost merge-review cards.
+    ok = False
+    message_id = None
+    error = None
+    for _attempt in range(_SEND_MAX_RETRIES + 1):
+        ok, message_id, error = await asyncio.to_thread(_send_sync, text, parse_mode, reply_markup)
+        if ok:
+            break
+        retry_after = _parse_retry_after(error)
+        if retry_after is None or _attempt >= _SEND_MAX_RETRIES:
+            break
+        logger.info(
+            "Telegram 429 rate-limit; backing off %ss then retrying (attempt %d/%d)",
+            retry_after, _attempt + 1, _SEND_MAX_RETRIES,
+        )
+        await asyncio.sleep(retry_after + 1)
     await _audit_send(
         text=text,
         message_type=message_type,

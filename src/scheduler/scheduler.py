@@ -631,6 +631,9 @@ async def _build_status() -> dict:
     }
 
 
+_MERGE_PUSH_PACE_SECONDS = float(os.getenv("ANALYZER_MERGE_PUSH_PACE_SECONDS", "3.5"))
+
+
 async def _check_merge_candidates():
     """Query high-confidence same_person_probability pairs from entity_relationships,
     get platform handles + face crops, and push a 2-button Telegram card.
@@ -701,7 +704,6 @@ async def _check_merge_candidates():
         pair_key = ":".join(sorted([id_a, id_b]))
         if pair_key in _notified_pairs:
             continue
-        _notified_pairs.add(pair_key)
 
         import json as _json
         try:
@@ -725,13 +727,20 @@ async def _check_merge_candidates():
             "face_b": faces.get(id_b),
         }
         confidence = float(score or r["weight"] or 0) / 100
-        await notify_merge_candidate(
+        # Deliver-before-mark + dynamic pacing: only remember a pair as notified
+        # once it ACTUALLY delivered, so a 429-throttled card retries next cycle
+        # instead of being silently lost. Pace between cards to stay under
+        # Telegram's ~20 msg/min group limit (send() also honors retry_after).
+        ok = await notify_merge_candidate(
             r["name_a"] or "Unknown",
             r["name_b"] or "Unknown",
             confidence,
             signals[0] if signals else "same_person_probability",
             candidate=candidate,
         )
+        if ok:
+            _notified_pairs.add(pair_key)
+        await asyncio.sleep(_MERGE_PUSH_PACE_SECONDS)
 
 async def start_scheduler() -> None:
     global _running

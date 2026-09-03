@@ -127,6 +127,16 @@ async def _apply_dismiss(id_a: str, id_b: str) -> dict:
 # Callback handler
 # ---------------------------------------------------------------------------
 
+def _is_authorized(user_id: str) -> bool:
+    """Authorized-user gate for the one command center. Empty allowlist locks
+    everything down (reject + self-discovery), matching the collector bot."""
+    raw = os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").strip()
+    if not raw:
+        return False
+    allowed = {x.strip() for x in raw.split(",") if x.strip()}
+    return str(user_id) in allowed
+
+
 async def _handle_callback(cq: dict) -> None:
     """Dispatch a single Telegram callback_query."""
     global _resolved
@@ -136,6 +146,17 @@ async def _handle_callback(cq: dict) -> None:
     msg = cq.get("message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
     message_id = msg.get("message_id")
+
+    # Authorized-user gating: only allow-listed Telegram ids may act on cards.
+    from_id = str((cq.get("from") or {}).get("id", ""))
+    if not _is_authorized(from_id):
+        allow = os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").strip()
+        reject = (
+            f"Not authorized. Your Telegram id is {from_id} \u2014 ask admin to add it "
+            "to TELEGRAM_ALLOWED_USER_IDS." if not allow else f"Not authorized (id {from_id})."
+        )
+        await asyncio.to_thread(telegram.answer_callback_query, cq_id, reject)
+        return
 
     parsed = parse_callback_data(data)
     if parsed is None:
