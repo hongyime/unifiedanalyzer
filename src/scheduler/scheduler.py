@@ -25,7 +25,7 @@ from src.pipeline.exposure_indicators import stage_exposure_findings_as_indicato
 from src.pipeline.run_reporting import production_run_types, probe_phase_names
 from src.notifications.alerts import (
     notify_collector_health, notify_daily_digest, notify_merge_candidate,
-    notify_status,
+    notify_status, notify_new_alerts, notify_identity_digest, build_identity_digest,
 )
 from src.notifications.intelligence import build_intelligence_status
 from src.merge_candidates import merge_candidate_notify_min_confidence
@@ -38,6 +38,9 @@ _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE = merge_candidate_notify_min_confidence()
 # In-memory dedup set for merge-candidate notifications — prevents re-notifying
 # the same pair every scheduler cycle. Reset on process restart (acceptable).
 _notified_pairs: set[str] = set()
+# In-memory dedup set for alert-push notifications — prevents re-notifying the
+# same alert every scheduler cycle. Reset on process restart (acceptable).
+_sent_alert_ids: set[str] = set()
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
@@ -742,6 +745,34 @@ async def _check_merge_candidates():
             _notified_pairs.add(pair_key)
         await asyncio.sleep(_MERGE_PUSH_PACE_SECONDS)
 
+
+async def _push_new_alerts() -> None:
+    """Push at most 5 recent unread alerts not yet notified this session.
+
+    Bounded (≤5/tick), deduped (_sent_alert_ids), paced via notify_new_alerts
+    which calls telegram.send() that already honors 429 retry_after.
+    """
+    global _sent_alert_ids
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id::text, title, severity, alert_type, detected_at
+            FROM alerts
+            WHERE is_read = false
+            ORDER BY detected_at DESC
+            LIMIT 20
+            """
+        )
+    unsent = [dict(r) for r in rows if r["id"] not in _sent_alert_ids][:5]
+    if not unsent:
+        return
+    await notify_new_alerts(unsent)
+    for r in unsent:
+        _sent_alert_ids.add(r["id"])
+    # Trim to avoid unbounded growth across very long sessions
+    if len(_sent_alert_ids) > 2000:
+        _sent_alert_ids = set(list(_sent_alert_ids)[-1000:])
 async def start_scheduler() -> None:
     global _running
     _running = True
@@ -788,6 +819,12 @@ async def start_scheduler() -> None:
         minimum=30,
         maximum=interval,
     )
+    identity_digest_interval_h = _env_int(
+        "ANALYZER_DIGEST_INTERVAL_HOURS", 24, minimum=1
+    )
+    alert_push_interval = _env_int(
+        "ANALYZER_ALERT_PUSH_INTERVAL_SECONDS", 300, minimum=60
+    )
 
     logger.info("Scheduler started: incremental every %d min, full resolution every %s, "
                 "digest at %02d:00 UTC, status heartbeat every %dh, DB backups %s, "
@@ -795,6 +832,11 @@ async def start_scheduler() -> None:
                 interval // 60, full_interval, digest_hour, status_interval_h,
                 "enabled" if backup_enabled else "disabled",
                 decision_outbox_interval)
+    logger.info(
+        "command-center ticks: identity digest every %dh, alert push every %ds",
+        identity_digest_interval_h,
+        alert_push_interval,
+    )
 
     # Telegram merge-review callback poller (single asyncio Task, not a new process)
     _merge_bot_task = None
@@ -814,6 +856,8 @@ async def start_scheduler() -> None:
     last_backup_check: datetime | None = None
     last_decision_outbox_check: datetime | None = None
     last_recon_bridge_check: datetime | None = None
+    last_identity_digest: datetime | None = None
+    last_alert_push: datetime | None = None
     was_offline = False
 
     while _running:
@@ -839,6 +883,29 @@ async def start_scheduler() -> None:
                 last_digest_date = now.strftime("%Y-%m-%d")
             except Exception:
                 logger.exception("Daily digest failed")
+
+        # Identity digest — every ANALYZER_DIGEST_INTERVAL_HOURS (default 24)
+        if (
+            last_identity_digest is None
+            or (now - last_identity_digest).total_seconds() >= identity_digest_interval_h * 3600
+        ):
+            try:
+                _id = await build_identity_digest()
+                await notify_identity_digest(_id)
+                last_identity_digest = now
+            except Exception:
+                logger.exception("Identity digest tick failed")
+
+        # Alert-push — new unread alerts, bounded/deduped/paced
+        if (
+            last_alert_push is None
+            or (now - last_alert_push).total_seconds() >= alert_push_interval
+        ):
+            try:
+                await _push_new_alerts()
+                last_alert_push = now
+            except Exception:
+                logger.debug("Alert push tick failed", exc_info=True)
 
         # Collector health check (every 3 hours)
         if last_health_check is None or (now - last_health_check).total_seconds() > 10800:

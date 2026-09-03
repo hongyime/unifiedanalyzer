@@ -327,3 +327,82 @@ async def notify_status(s: dict):
     lines.append("")
     lines.append(f"Dashboard: {url}")
     await telegram.send("\n".join(lines), message_type="status")
+
+
+# ---------------------------------------------------------------------------
+# Identity digest — concise 24-h command-center card
+# ---------------------------------------------------------------------------
+
+
+async def build_identity_digest() -> dict:
+    """Query the last-24 h identity-activity summary for the command-center digest.
+
+    Imported by both scheduler (scheduled tick) and merge_bot (/digest command).
+    DB imports are lazy so this module stays importable without a live pool.
+    """
+    from src.db.connection import get_analyzer_pool, get_collector_pool
+    from src.merge_candidates import merge_candidate_min_weight
+
+    pool = get_analyzer_pool()
+    async with pool.acquire() as conn:
+        new_entities = await conn.fetchval(
+            "SELECT COUNT(*) FROM entities WHERE created_at > NOW() - INTERVAL '24 hours'"
+        )
+        new_signals = await conn.fetchval(
+            "SELECT COUNT(*) FROM identity_signals WHERE created_at > NOW() - INTERVAL '24 hours'"
+        )
+        min_w = merge_candidate_min_weight()
+        merge_backlog = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM entity_relationships
+            WHERE relationship_type = 'same_person_probability'
+              AND COALESCE(
+                    CASE WHEN jsonb_typeof(sources->'score') = 'number'
+                         THEN (sources->>'score')::float8 * 100
+                    END,
+                    weight
+                  ) >= $1
+            """,
+            min_w,
+        )
+
+    # Collector DB: new maigret-discovered accounts in 24 h (best-effort)
+    new_discovered = 0
+    try:
+        cpool = get_collector_pool()
+        async with cpool.acquire() as cconn:
+            new_discovered = int(await cconn.fetchval(
+                """
+                SELECT COUNT(*) FROM recon_observations
+                WHERE module = 'maigret'
+                  AND observation_type = 'ACCOUNT_EXTERNAL_OWNED'
+                  AND created_at > NOW() - INTERVAL '24 hours'
+                """
+            ) or 0)
+    except Exception:
+        pass
+
+    return {
+        "new_entities": int(new_entities or 0),
+        "new_signals": int(new_signals or 0),
+        "new_discovered": int(new_discovered or 0),
+        "merge_backlog": int(merge_backlog or 0),
+    }
+
+
+async def notify_identity_digest(d: dict) -> bool:
+    """Push a concise 24-h identity-activity card to Telegram.
+
+    Returns True when the send succeeded.  Called by the scheduler tick
+    and by /digest on-demand.
+    """
+    url = telegram.get_dashboard_url()
+    lines = [
+        "\U0001f50e <b>Identity Digest (24 h)</b>",
+        f"New entities: {d['new_entities']}",
+        f"New identity signals: {d['new_signals']}",
+        f"New discovered accounts (recon): {d['new_discovered']}",
+        f"Merge-candidate backlog: {d['merge_backlog']}",
+        f"\n{url}/entities",
+    ]
+    return await telegram.send("\n".join(lines), message_type="identity_digest")

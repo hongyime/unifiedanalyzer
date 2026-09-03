@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import json
 import logging
 import os
@@ -214,6 +215,250 @@ async def _handle_callback(cq: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Command-center: /whois lookup
+# ---------------------------------------------------------------------------
+
+
+async def _whois_lookup(query: str) -> str:
+    """Resolve *query* to an entity (ILIKE match on name or platform handle).
+
+    Returns a compact HTML summary card, or a 'no entity' notice.
+    Enrichment from the collector DB is best-effort (never raises).
+    """
+    from src.db.connection import get_analyzer_pool, get_collector_pool
+
+    like = f"%{query.strip()}%"
+    pool = get_analyzer_pool()
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT e.id::text, e.canonical_name, e.tier, e.confidence_score,
+                   e.signal_count, e.last_seen_at
+            FROM entities e
+            WHERE e.canonical_name ILIKE $1
+               OR EXISTS (
+                   SELECT 1 FROM entity_platform_links epl
+                   WHERE epl.entity_id = e.id
+                     AND epl.platform_username ILIKE $1
+               )
+            ORDER BY e.confidence_score DESC NULLS LAST
+            LIMIT 1
+            """,
+            like,
+        )
+
+        if not row:
+            return f"\u2753 No entity found for <code>{html.escape(query[:80])}</code>"
+
+        eid = row["id"]
+
+        links = await conn.fetch(
+            """
+            SELECT source, platform_id, platform_username,
+                   COALESCE(NULLIF(platform_username,''),
+                            NULLIF(platform_name,''),
+                            platform_id) AS handle
+            FROM entity_platform_links
+            WHERE entity_id = $1::uuid
+            ORDER BY confidence DESC
+            """,
+            eid,
+        )
+
+        sigs = await conn.fetch(
+            """
+            SELECT signal_type, confidence
+            FROM identity_signals
+            WHERE entity_id = $1::uuid
+            ORDER BY confidence DESC NULLS LAST
+            LIMIT 5
+            """,
+            eid,
+        )
+
+    # Enrichment: collector DB (all best-effort, never fatal)
+    wa_jids = [
+        lnk["platform_id"] for lnk in links
+        if lnk["source"] == "whatsapp" and lnk["platform_id"]
+    ]
+    usernames = list({
+        lnk["platform_username"] for lnk in links
+        if lnk["platform_username"]
+    })
+    emails = [u for u in usernames if "@" in u]
+
+    gaia_line = ""
+    disc_count = 0
+    phone_info = ""
+    wa_device_count = 0
+
+    try:
+        cpool = get_collector_pool()
+        async with cpool.acquire() as cconn:
+            if emails:
+                grow = await cconn.fetchrow(
+                    "SELECT rt.target_value AS email, ro.value "
+                    "FROM recon_observations ro "
+                    "JOIN recon_targets rt ON rt.id = ro.target_id "
+                    "WHERE ro.module = 'ghunt' AND ro.observation_type = 'GAIA_ID' "
+                    "  AND rt.target_value = ANY($1::text[]) LIMIT 1",
+                    emails,
+                )
+                if grow:
+                    gaia_line = (
+                        f"{html.escape(grow['email'])} "
+                        f"GAIA:{html.escape(str(grow['value'] or ''))[:20]}"
+                    )
+            if usernames:
+                disc_count = int(await cconn.fetchval(
+                    "SELECT COUNT(DISTINCT ro.value) FROM recon_observations ro "
+                    "JOIN recon_targets rt ON rt.id = ro.target_id "
+                    "WHERE ro.module = 'maigret' "
+                    "  AND ro.observation_type = 'ACCOUNT_EXTERNAL_OWNED' "
+                    "  AND rt.target_value = ANY($1::text[])",
+                    usernames,
+                ) or 0)
+            if wa_jids:
+                prow = await cconn.fetchrow(
+                    "SELECT carrier, region_name FROM wa_phone_intel "
+                    "WHERE phone_jid = ANY($1::text[]) LIMIT 1",
+                    wa_jids,
+                )
+                if prow:
+                    phone_info = ", ".join(
+                        v for v in [prow["region_name"], prow["carrier"]] if v
+                    )
+                drow = await cconn.fetchrow(
+                    "SELECT SUM(COALESCE(device_count, 0)) AS total "
+                    "FROM wa_device_observations "
+                    "WHERE phone_jid = ANY($1::text[])",
+                    wa_jids,
+                )
+                if drow and drow["total"]:
+                    wa_device_count = int(drow["total"])
+    except Exception:
+        pass  # enrichment is always best-effort
+
+    # Format output
+    base_url = telegram.get_dashboard_url()
+    name = html.escape(row["canonical_name"] or "Unknown")
+    tier = row["tier"] or "?"
+    conf = (
+        f"{float(row['confidence_score']):.0%}"
+        if row["confidence_score"] is not None else "?"
+    )
+    handle_parts = [
+        f"{html.escape(lnk['source'])}:{html.escape(lnk['handle'])}"
+        for lnk in links[:8]
+        if lnk["handle"]
+    ]
+    sig_parts = [
+        f"{s['signal_type'].replace('_', ' ')} ({float(s['confidence']):.0%})"
+        if s["confidence"] is not None
+        else s["signal_type"].replace("_", " ")
+        for s in sigs
+    ]
+
+    lines = [f"\U0001f464 <b>{name}</b> [{tier}] conf {conf}"]
+    if handle_parts:
+        lines.append(f"Handles: {' \u00b7 '.join(handle_parts)}")
+    if sig_parts:
+        lines.append(f"Signals: {'; '.join(sig_parts)}")
+    if gaia_line:
+        lines.append(f"Google: {gaia_line}")
+    if disc_count:
+        lines.append(f"Discovered accounts: {disc_count}")
+    if phone_info:
+        lines.append(f"Phone: {phone_info}")
+    if wa_device_count:
+        lines.append(f"WA devices: {wa_device_count}")
+    lines.append(f"{base_url}/entities/{eid}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Command-center: message handler (/whois, /digest)
+# ---------------------------------------------------------------------------
+
+
+async def _handle_message(msg: dict) -> None:
+    """Dispatch a Telegram text message arriving from an authorized operator.
+
+    Supported commands:
+      /whois <handle-or-name>  — entity lookup card
+      /digest                  — on-demand identity digest
+
+    All sends use telegram.reply_message_sync (→ asyncio.to_thread).
+    Un-authorized senders get a brief rejection; all other text is ignored.
+    """
+    from_id = str((msg.get("from") or {}).get("id", ""))
+    chat_id = (msg.get("chat") or {}).get("id")
+    message_id = msg.get("message_id")
+    text = (msg.get("text") or "").strip()
+
+    if not text.startswith("/"):
+        return  # not a command — ignore silently
+
+    # Gate: only allow-listed Telegram ids may use command center
+    if not _is_authorized(from_id):
+        raw = os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").strip()
+        reject = (
+            f"\u26d4 Not authorized. Your Telegram id is <code>{html.escape(from_id)}</code>"
+            " — ask admin to add it to TELEGRAM_ALLOWED_USER_IDS."
+            if not raw
+            else f"\u26d4 Not authorized (id {html.escape(from_id)})."
+        )
+        if chat_id and message_id:
+            await asyncio.to_thread(
+                telegram.reply_message_sync, chat_id, reject, message_id
+            )
+        return
+
+    # Parse command (strip @botname suffix Telegram appends in group chats)
+    cmd_parts = text.split(None, 1)
+    cmd = cmd_parts[0].split("@")[0].lower()
+    arg = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
+
+    if cmd == "/whois":
+        if not arg:
+            reply = "Usage: <code>/whois &lt;handle or name&gt;</code>"
+        else:
+            logger.info("merge-bot: /whois %r from %s", arg, from_id)
+            try:
+                reply = await _whois_lookup(arg)
+            except Exception as exc:
+                logger.exception("merge-bot: /whois lookup failed for %r", arg)
+                reply = f"\u274c Lookup error: <code>{html.escape(str(exc)[:200])}</code>"
+        if chat_id and message_id:
+            await asyncio.to_thread(
+                telegram.reply_message_sync, chat_id, reply, message_id
+            )
+
+    elif cmd == "/digest":
+        logger.info("merge-bot: /digest requested by %s", from_id)
+        try:
+            from src.notifications.alerts import build_identity_digest, notify_identity_digest
+            d = await build_identity_digest()
+            ok = await notify_identity_digest(d)
+            if not ok and chat_id and message_id:
+                await asyncio.to_thread(
+                    telegram.reply_message_sync,
+                    chat_id,
+                    "\u274c Digest send failed (check scheduler logs).",
+                    message_id,
+                )
+        except Exception as exc:
+            logger.exception("merge-bot: /digest failed")
+            if chat_id and message_id:
+                await asyncio.to_thread(
+                    telegram.reply_message_sync,
+                    chat_id,
+                    f"\u274c Digest error: <code>{html.escape(str(exc)[:200])}</code>",
+                    message_id,
+                )
+    # Any other /command is silently ignored
+# ---------------------------------------------------------------------------
 # Long-poll loop (asyncio Task)
 # ---------------------------------------------------------------------------
 
@@ -261,12 +506,21 @@ async def run_callback_poller() -> None:
                 # Advance offset FIRST so a crash during handling doesn't re-deliver
                 _offset = upd["update_id"] + 1
                 cq = upd.get("callback_query")
+                msg_upd = upd.get("message")
                 if cq:
                     try:
                         await _handle_callback(cq)
                     except Exception:
                         logger.exception(
                             "merge-bot: error handling callback update_id=%s",
+                            upd.get("update_id"),
+                        )
+                elif msg_upd:
+                    try:
+                        await _handle_message(msg_upd)
+                    except Exception:
+                        logger.exception(
+                            "merge-bot: error handling message update_id=%s",
                             upd.get("update_id"),
                         )
 

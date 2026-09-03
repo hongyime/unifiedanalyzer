@@ -312,11 +312,17 @@ def edit_message_text(chat_id: int | str, message_id: int, text: str) -> dict:
     })
 
 
-def get_updates(offset: int = 0, timeout: int = 25) -> dict:
-    """Long-poll getUpdates; only requests callback_query updates."""
+def get_updates(
+    offset: int = 0,
+    timeout: int = 25,
+    allowed_updates: list[str] | None = None,
+) -> dict:
+    """Long-poll getUpdates.  Default requests callback_query + message updates."""
     _get_config()
     params: dict = {
-        "allowed_updates": json.dumps(["callback_query"]),
+        "allowed_updates": json.dumps(
+            allowed_updates if allowed_updates is not None else ["callback_query", "message"]
+        ),
         "timeout": timeout,
     }
     if offset:
@@ -358,3 +364,26 @@ def unpin_chat_message(chat_id: int | str, message_id: int) -> dict:
         "chat_id": chat_id,
         "message_id": message_id,
     })
+
+
+def reply_message_sync(
+    chat_id: int | str,
+    text: str,
+    reply_to_message_id: int | None = None,
+) -> dict:
+    """Send an HTML reply to *chat_id*, optionally quoting *reply_to_message_id*.
+
+    Called via asyncio.to_thread from the command-center message handler.
+    """
+    _get_config()
+    payload: dict = {
+        "chat_id": chat_id,
+        "text": text[:4096],
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
+    if _THREAD_ID:
+        payload["message_thread_id"] = _THREAD_ID
+    return _bot_post("sendMessage", payload)

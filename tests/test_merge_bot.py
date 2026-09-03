@@ -36,6 +36,7 @@ def _cq(callback_data: str, cq_id: str = "cqid123") -> dict:
     return {
         "id": cq_id,
         "data": callback_data,
+        "from": {"id": 12345},  # authorized test user (see setenv in each test)
         "message": {"message_id": 999, "chat": {"id": -100123}},
     }
 
@@ -134,6 +135,7 @@ async def test_handle_callback_yes_dispatches_merge(monkeypatch):
         dismiss_calls.append((id_a, id_b))
         return {"ok": True}
 
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "12345")
     monkeypatch.setattr(mb, "_apply_merge", fake_merge)
     monkeypatch.setattr(mb, "_apply_dismiss", fake_dismiss)
     monkeypatch.setattr(mb.telegram, "answer_callback_query",
@@ -174,6 +176,7 @@ async def test_handle_callback_no_dispatches_dismiss(monkeypatch):
         dismiss_calls.append((id_a, id_b))
         return {"ok": True}
 
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "12345")
     monkeypatch.setattr(mb, "_apply_merge", fake_merge)
     monkeypatch.setattr(mb, "_apply_dismiss", fake_dismiss)
     monkeypatch.setattr(mb.telegram, "answer_callback_query", lambda *a, **kw: {"ok": True})
@@ -207,6 +210,7 @@ async def test_handle_callback_double_tap_is_noop(monkeypatch):
         merge_calls.append((id_a, id_b))
         return {"ok": True}
 
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "12345")
     monkeypatch.setattr(mb, "_apply_merge", fake_merge)
     monkeypatch.setattr(mb, "_apply_dismiss", fake_merge)  # same sentinel
     monkeypatch.setattr(mb.telegram, "answer_callback_query",
@@ -237,6 +241,7 @@ async def test_handle_callback_stale_token_is_noop(monkeypatch):
     async def should_not_call(*args):
         pytest.fail("merge/dismiss must not be called for a stale token")
 
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "12345")
     monkeypatch.setattr(mb, "_apply_merge", should_not_call)
     monkeypatch.setattr(mb, "_apply_dismiss", should_not_call)
     monkeypatch.setattr(mb.telegram, "answer_callback_query",
