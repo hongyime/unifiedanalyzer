@@ -231,6 +231,7 @@ _PHASE_RESOURCE_CLASSES = {
     "media_phash": "media_io",
     "media_exif": "media_io",
     "media_pdf_text": "media_io",
+    "media_office_text": "media_io",
     "media_pdf_images": "media_io",
     "media_ocr": "media_io",
     "media_faces": "media_io",
