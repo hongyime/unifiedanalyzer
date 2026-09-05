@@ -1,8 +1,10 @@
 import asyncio
+import asyncio
 import logging
 import os
 import contextlib
 import importlib
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +19,90 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-app = FastAPI(title="UnifiedAnalyzer", version="0.1.0")
+_face_api_mount_task: asyncio.Task | None = None
+_face_api_mounted: list[str] = []
+_deferred_routes_task: asyncio.Task | None = None
+_deferred_routes_mounted: list[str] = []
+
+_scheduler_task: asyncio.Task | None = None
+_stop_scheduler = None
+
+
+@asynccontextmanager
+async def lifespan(app: "FastAPI"):
+    global _scheduler_task, _stop_scheduler, _face_api_mount_task, _deferred_routes_task
+    apply_schema = os.getenv("ANALYZER_APPLY_SCHEMA_ON_STARTUP", "1") != "0"
+    print("UnifiedAnalyzer startup: initializing DB pools", flush=True)
+    await init_pools(apply_schema_ddl=apply_schema)
+    print("UnifiedAnalyzer startup: DB pools initialized", flush=True)
+    # The scheduler runs the heavy Phase-6 pipeline (cv2 / ffmpeg / pypdf) whose
+    # blocking C calls would freeze this uvicorn event loop for the whole run,
+    # making the dashboard unresponsive. So it now runs as a SEPARATE process
+    # (the `scheduler` compose service / `python -m src.main scheduler`). Set
+    # RUN_SCHEDULER=1 to co-host it in-process (single-process / dev fallback).
+    if os.getenv("RUN_SCHEDULER", "0") == "1":
+        from src.scheduler.scheduler import start_scheduler, stop_scheduler
+        _stop_scheduler = stop_scheduler
+        _scheduler_task = asyncio.create_task(start_scheduler())
+        logging.getLogger(__name__).info("UnifiedAnalyzer started (scheduler in-process)")
+    else:
+        logging.getLogger(__name__).info("UnifiedAnalyzer started (API only; scheduler is a separate process)")
+    print("UnifiedAnalyzer startup: scheduling startup notification", flush=True)
+
+    async def _notify_startup_fail_open() -> None:
+        try:
+            await asyncio.wait_for(notify_startup(), timeout=float(os.getenv("ANALYZER_STARTUP_NOTIFY_TIMEOUT_SECONDS", "10")))
+        except Exception:
+            logging.getLogger(__name__).warning("startup notification failed or timed out", exc_info=True)
+
+    asyncio.create_task(_notify_startup_fail_open())
+    if _deferred_routes_task is None:
+        async def _mount_deferred_routes_fail_open() -> None:
+            mounted: list[str] = []
+            for module_path, prefix in _DEFERRED_ROUTE_MODULES:
+                try:
+                    router = await asyncio.to_thread(_load_router, module_path)
+                    if prefix is None:
+                        app.include_router(router)
+                    else:
+                        app.include_router(router, prefix=prefix)
+                    mounted.append(module_path)
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "deferred API route failed to mount: %s",
+                        module_path,
+                        exc_info=True,
+                    )
+            _deferred_routes_mounted[:] = mounted
+            _ensure_spa_fallback_last()
+
+        _deferred_routes_task = asyncio.create_task(_mount_deferred_routes_fail_open())
+    if _face_api_mount_task is None:
+        async def _mount_face_api_fail_open() -> None:
+            try:
+                from src.api.face_mount import mount_face_api
+
+                mounted = await asyncio.to_thread(mount_face_api, app)
+                _face_api_mounted[:] = mounted
+                _ensure_spa_fallback_last()
+            except Exception:
+                logging.getLogger(__name__).warning("face API mount failed or timed out", exc_info=True)
+
+        _face_api_mount_task = asyncio.create_task(_mount_face_api_fail_open())
+    print("UnifiedAnalyzer startup: complete", flush=True)
+
+    yield
+
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(notify_shutdown(), timeout=float(os.getenv("ANALYZER_SHUTDOWN_NOTIFY_TIMEOUT_SECONDS", "10")))
+    if _stop_scheduler:
+        _stop_scheduler()
+    if _scheduler_task:
+        _scheduler_task.cancel()
+    await close_pools()
+
+
+app = FastAPI(title="UnifiedAnalyzer", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -97,88 +182,6 @@ for module_path, prefix in _CORE_ROUTE_MODULES:
 # Face engine API (merge Stage 4 — docs/facetracker_merge_plan.md §7) is mounted
 # after core startup. Face route imports load FAISS/OpenCV and can take tens of
 # seconds on this host, so core health/readiness must not wait on them.
-_face_api_mount_task: asyncio.Task | None = None
-_face_api_mounted: list[str] = []
-_deferred_routes_task: asyncio.Task | None = None
-_deferred_routes_mounted: list[str] = []
-
-_scheduler_task: asyncio.Task | None = None
-_stop_scheduler = None
-
-
-@app.on_event("startup")
-async def startup():
-    global _scheduler_task, _stop_scheduler, _face_api_mount_task, _deferred_routes_task
-    apply_schema = os.getenv("ANALYZER_APPLY_SCHEMA_ON_STARTUP", "1") != "0"
-    print("UnifiedAnalyzer startup: initializing DB pools", flush=True)
-    await init_pools(apply_schema_ddl=apply_schema)
-    print("UnifiedAnalyzer startup: DB pools initialized", flush=True)
-    # The scheduler runs the heavy Phase-6 pipeline (cv2 / ffmpeg / pypdf) whose
-    # blocking C calls would freeze this uvicorn event loop for the whole run,
-    # making the dashboard unresponsive. So it now runs as a SEPARATE process
-    # (the `scheduler` compose service / `python -m src.main scheduler`). Set
-    # RUN_SCHEDULER=1 to co-host it in-process (single-process / dev fallback).
-    if os.getenv("RUN_SCHEDULER", "0") == "1":
-        from src.scheduler.scheduler import start_scheduler, stop_scheduler
-        _stop_scheduler = stop_scheduler
-        _scheduler_task = asyncio.create_task(start_scheduler())
-        logging.getLogger(__name__).info("UnifiedAnalyzer started (scheduler in-process)")
-    else:
-        logging.getLogger(__name__).info("UnifiedAnalyzer started (API only; scheduler is a separate process)")
-    print("UnifiedAnalyzer startup: scheduling startup notification", flush=True)
-
-    async def _notify_startup_fail_open() -> None:
-        try:
-            await asyncio.wait_for(notify_startup(), timeout=float(os.getenv("ANALYZER_STARTUP_NOTIFY_TIMEOUT_SECONDS", "10")))
-        except Exception:
-            logging.getLogger(__name__).warning("startup notification failed or timed out", exc_info=True)
-
-    asyncio.create_task(_notify_startup_fail_open())
-    if _deferred_routes_task is None:
-        async def _mount_deferred_routes_fail_open() -> None:
-            mounted: list[str] = []
-            for module_path, prefix in _DEFERRED_ROUTE_MODULES:
-                try:
-                    router = await asyncio.to_thread(_load_router, module_path)
-                    if prefix is None:
-                        app.include_router(router)
-                    else:
-                        app.include_router(router, prefix=prefix)
-                    mounted.append(module_path)
-                except Exception:
-                    logging.getLogger(__name__).warning(
-                        "deferred API route failed to mount: %s",
-                        module_path,
-                        exc_info=True,
-                    )
-            _deferred_routes_mounted[:] = mounted
-            _ensure_spa_fallback_last()
-
-        _deferred_routes_task = asyncio.create_task(_mount_deferred_routes_fail_open())
-    if _face_api_mount_task is None:
-        async def _mount_face_api_fail_open() -> None:
-            try:
-                from src.api.face_mount import mount_face_api
-
-                mounted = await asyncio.to_thread(mount_face_api, app)
-                _face_api_mounted[:] = mounted
-                _ensure_spa_fallback_last()
-            except Exception:
-                logging.getLogger(__name__).warning("face API mount failed or timed out", exc_info=True)
-
-        _face_api_mount_task = asyncio.create_task(_mount_face_api_fail_open())
-    print("UnifiedAnalyzer startup: complete", flush=True)
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(notify_shutdown(), timeout=float(os.getenv("ANALYZER_SHUTDOWN_NOTIFY_TIMEOUT_SECONDS", "10")))
-    if _stop_scheduler:
-        _stop_scheduler()
-    if _scheduler_task:
-        _scheduler_task.cancel()
-    await close_pools()
 
 
 # Serve the frontend build (single-page app). Static assets are served directly;
