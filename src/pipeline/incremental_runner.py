@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from asyncpg import UniqueViolationError
 
-from src.db.connection import get_analyzer_pool, is_collector_unavailable_error
+from src.db.connection import get_analyzer_pool, is_collector_unavailable_error, is_db_transient_error
 from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.beeper_bridge import bridge_beeper
 from src.pipeline.facebook_author_resolver import resolve_facebook_author_entities
@@ -938,7 +938,10 @@ async def run_incremental() -> dict:
     except Exception as e:
         logger.exception("Incremental run failed")
         await _finish_run(run_id, stats, error=str(e))
-        await notify_error("incremental", str(e))
+        if not is_db_transient_error(e):
+            await notify_error("incremental", str(e))
+        else:
+            logger.warning("Incremental run aborted by transient DB condition (no Telegram alert): %s", e)
         raise
     finally:
         await _stop_heartbeat(heartbeat)
@@ -1114,7 +1117,10 @@ async def run_full_resolution() -> dict:
     except Exception as e:
         logger.exception("Full resolution run failed")
         await _finish_run(run_id, stats, error=str(e))
-        await notify_error("full resolution", str(e))
+        if not is_db_transient_error(e):
+            await notify_error("full resolution", str(e))
+        else:
+            logger.warning("Full resolution run aborted by transient DB condition (no Telegram alert): %s", e)
         raise
     finally:
         await _stop_heartbeat(heartbeat)

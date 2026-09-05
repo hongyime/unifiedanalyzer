@@ -184,6 +184,31 @@ def is_collector_unavailable_error(exc: BaseException) -> bool:
     )
 
 
+def is_db_transient_error(exc: BaseException) -> bool:
+    """Return True when the analyzer DB itself is temporarily unavailable.
+
+    Covers Postgres startup/recovery states and connection-layer failures that
+    are transient (the DB will come back) rather than logic bugs. Used to
+    suppress Telegram error notifications for conditions that self-resolve.
+    """
+    if is_collector_unavailable_error(exc):
+        return True
+    msg = str(exc).lower()
+    transient_phrases = (
+        "the database system is starting up",
+        "the database system is in recovery mode",
+        "the database system is recovering",
+        "database system is starting",
+        "database is in recovery",
+        "cannot connect to server",
+        "connection refused",
+        "server closed the connection unexpectedly",
+        "terminating connection due to administrator command",
+        "too many connections",
+    )
+    return any(phrase in msg for phrase in transient_phrases)
+
+
 async def check_db_connectivity() -> bool:
     """Return whether the analyzer DB is usable.
 
