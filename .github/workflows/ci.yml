@@ -105,6 +105,21 @@ jobs:
     permissions:
       contents: read
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: collector
+          POSTGRES_PASSWORD: collector
+          POSTGRES_DB: unifiedanalyzer
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -120,5 +135,14 @@ jobs:
           pip install -r requirements.txt
           pip install pytest-cov
 
+      - name: Apply database schema
+        env:
+          ANALYZER_DATABASE_URL: postgres://collector:collector@localhost:5432/unifiedanalyzer
+          COLLECTOR_DATABASE_URL: postgres://collector:collector@localhost:5432/unifiedanalyzer
+        run: python -m src.main schema
+
       - name: Run tests
-        run: python -m pytest tests/ -q --cov=src --cov-report=term-missing --cov-fail-under=35
+        env:
+          ANALYZER_DATABASE_URL: postgres://collector:collector@localhost:5432/unifiedanalyzer
+          COLLECTOR_DATABASE_URL: postgres://collector:collector@localhost:5432/unifiedanalyzer
+        run: python -m pytest tests/ -q --cov=src --cov-report=term-missing --cov-fail-under=40
