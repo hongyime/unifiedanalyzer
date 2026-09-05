@@ -765,6 +765,8 @@ async def _run_phase(run_id: str, run_type: str, name: str, fn, *, default=None)
             logger.warning("%s skipped: collector unavailable: %s", name, err)
             status = "skipped"
             result = {"skipped": "collector_unavailable", "error": err[:500]}
+        elif is_db_transient_error(e):
+            raise
         else:
             logger.exception("%s failed (non-fatal)", name)
             status = "failed"
