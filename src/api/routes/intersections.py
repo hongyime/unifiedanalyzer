@@ -9,7 +9,7 @@ from itertools import combinations
 from typing import Any
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.api.face_lookup import face_crop_url, representative_faces
 from src.db.connection import get_analyzer_pool, get_collector_pool
@@ -36,8 +36,7 @@ class IntersectRequest(BaseModel):
     from_date: datetime | None = Field(None, alias="from")
     to_date: datetime | None = Field(None, alias="to")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 def _iso(value: datetime | None) -> str | None:
