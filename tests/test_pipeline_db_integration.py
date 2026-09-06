@@ -52,12 +52,13 @@ async def _with_pools(coro):
 # ---------------------------------------------------------------------------
 
 class TestEntityResolverIntegration:
-    async def test_get_entity_lookup_returns_dict(self):
+    async def test_load_platform_profiles_returns_tuple(self):
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
-        from src.pipeline.entity_resolver import _get_entity_lookup
-        result = await _with_pools(_get_entity_lookup())
-        assert isinstance(result, dict)
+        from src.pipeline.entity_resolver import load_platform_profiles
+        by_username, no_username = await _with_pools(load_platform_profiles())
+        assert isinstance(by_username, dict)
+        assert isinstance(no_username, list)
 
     async def test_get_last_run_time_incremental(self):
         if not await _db_ok(_ANALYZER_URL):
@@ -174,6 +175,14 @@ class TestFaceClusteringIntegration:
     async def test_flag_junk_faces_returns_dict(self):
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
+        import asyncpg
+        # _ensure_schema must run before flag_junk_faces uses the facetracker schema
+        conn = await asyncpg.connect(_ANALYZER_URL, timeout=5.0)
+        try:
+            from src.pipeline.face_clustering import _ensure_schema
+            await _ensure_schema(conn)
+        finally:
+            await conn.close()
         from src.pipeline.face_clustering import flag_junk_faces
         result = await _with_pools(flag_junk_faces())
         assert isinstance(result, dict)
@@ -207,9 +216,14 @@ class TestDataQualityLedgerIntegration:
     async def test_build_data_quality_ledger_returns_dict(self):
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
+        import asyncpg
         from src.pipeline.data_quality_ledger import build_data_quality_ledger
-        result = await _with_pools(build_data_quality_ledger())
-        assert isinstance(result, dict)
+        conn = await asyncpg.connect(_ANALYZER_URL, timeout=10.0)
+        try:
+            result = await build_data_quality_ledger(conn)
+            assert isinstance(result, dict)
+        finally:
+            await conn.close()
 
 
 # ---------------------------------------------------------------------------
