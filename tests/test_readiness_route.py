@@ -294,9 +294,11 @@ def test_core_analyst_routes_are_mounted_before_spa_fallback():
     required = {"/api/entities", "/api/review/candidates", "/api/triage", "/api/cases"}
 
     assert required.issubset(set(route_paths))
-    fallback_index = route_paths.index("/{full_path:path}")
-    for path in required:
-        assert route_paths.index(path) < fallback_index
+    # SPA fallback only registers when frontend/dist is built; skip ordering check in CI
+    if "/{full_path:path}" in route_paths:
+        fallback_index = route_paths.index("/{full_path:path}")
+        for path in required:
+            assert route_paths.index(path) < fallback_index
 
 
 def test_build_readiness_report_accepts_fresh_full_run_when_incremental_completion_is_stale():
