@@ -32,6 +32,11 @@ _COLLECTOR_URL = os.getenv(
     "postgres://collector:collector@localhost:5500/unifiedcollector",
 )
 
+# These tests only run when PYTEST_INTEGRATION_DB_ONLY=1 is set.
+# Set in CI docker-compose.test.yml and the GitHub Actions postgres job.
+# Never set by default so the suite never runs against a real populated DB.
+_INTEGRATION_ENABLED = os.getenv("PYTEST_INTEGRATION_DB_ONLY", "0") == "1"
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -66,26 +71,25 @@ async def _with_pools(coro):
 
 class TestResolveEntitiesIntegration:
     async def test_resolve_entities_returns_stats_dict(self):
-        """resolve_entities() runs end-to-end and returns a stats dict."""
+        if not _INTEGRATION_ENABLED:
+            pytest.skip("Set PYTEST_INTEGRATION_DB_ONLY=1 to run heavy integration tests")
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
         if not await _db_ok(_COLLECTOR_URL):
             pytest.skip("Collector DB not reachable")
-
         from src.pipeline.entity_resolver import resolve_entities
         result = await _with_pools(resolve_entities())
         assert isinstance(result, dict)
-        # Key stats fields that should always be present
         for key in ("entities_created", "entities_updated", "links", "signals"):
             assert key in result, f"Missing key: {key}"
 
     async def test_resolve_entities_counts_are_non_negative(self):
-        """All numeric stats must be >= 0."""
+        if not _INTEGRATION_ENABLED:
+            pytest.skip("Set PYTEST_INTEGRATION_DB_ONLY=1 to run heavy integration tests")
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
         if not await _db_ok(_COLLECTOR_URL):
             pytest.skip("Collector DB not reachable")
-
         from src.pipeline.entity_resolver import resolve_entities
         result = await _with_pools(resolve_entities())
         for key, value in result.items():
@@ -93,20 +97,15 @@ class TestResolveEntitiesIntegration:
                 assert value >= 0, f"{key} is negative: {value}"
 
     async def test_resolve_entities_is_idempotent(self):
-        """Running resolve_entities twice in a row should not crash
-        and should produce non-negative stats both times."""
+        if not _INTEGRATION_ENABLED:
+            pytest.skip("Set PYTEST_INTEGRATION_DB_ONLY=1 to run heavy integration tests")
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
         if not await _db_ok(_COLLECTOR_URL):
             pytest.skip("Collector DB not reachable")
-
         from src.pipeline.entity_resolver import resolve_entities
-
-        # First run
         r1 = await _with_pools(resolve_entities())
         assert isinstance(r1, dict)
-
-        # Second run — entities already exist, should update/skip rather than fail
         r2 = await _with_pools(resolve_entities())
         assert isinstance(r2, dict)
 
@@ -117,59 +116,55 @@ class TestResolveEntitiesIntegration:
 
 class TestBuildTimelineIntegration:
     async def test_build_timeline_returns_stats_dict(self):
-        """build_timeline() runs and returns a stats dict."""
+        if not _INTEGRATION_ENABLED:
+            pytest.skip("Set PYTEST_INTEGRATION_DB_ONLY=1 to run heavy integration tests")
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
         if not await _db_ok(_COLLECTOR_URL):
             pytest.skip("Collector DB not reachable")
-
         from src.pipeline.timeline_builder import build_timeline
         result = await _with_pools(build_timeline(since=None))
         assert isinstance(result, dict)
-        # Key stats fields
         for key in ("total", "inserted", "skipped_tables"):
             assert key in result, f"Missing key: {key}"
 
     async def test_build_timeline_with_only_sources_filter(self):
-        """build_timeline with only_sources filter skips other platforms."""
+        if not _INTEGRATION_ENABLED:
+            pytest.skip("Set PYTEST_INTEGRATION_DB_ONLY=1 to run heavy integration tests")
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
         if not await _db_ok(_COLLECTOR_URL):
             pytest.skip("Collector DB not reachable")
-
         from src.pipeline.timeline_builder import build_timeline
-        # Pass an empty set as only_sources — should skip all collector tables
         result = await _with_pools(
             build_timeline(since=None, only_sources={"__nonexistent_source__"})
         )
         assert isinstance(result, dict)
 
     async def test_build_timeline_inserted_is_non_negative(self):
-        """Inserted count must be >= 0."""
+        if not _INTEGRATION_ENABLED:
+            pytest.skip("Set PYTEST_INTEGRATION_DB_ONLY=1 to run heavy integration tests")
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
         if not await _db_ok(_COLLECTOR_URL):
             pytest.skip("Collector DB not reachable")
-
         from src.pipeline.timeline_builder import build_timeline
         result = await _with_pools(build_timeline(since=None))
         assert result.get("total", 0) >= 0
         assert result.get("inserted", 0) >= 0
 
     async def test_build_timeline_skip_sources_works(self):
-        """build_timeline with skip_sources respects the skip set."""
+        if not _INTEGRATION_ENABLED:
+            pytest.skip("Set PYTEST_INTEGRATION_DB_ONLY=1 to run heavy integration tests")
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
         if not await _db_ok(_COLLECTOR_URL):
             pytest.skip("Collector DB not reachable")
-
         from src.pipeline.timeline_builder import build_timeline
-        # Skip github (large table) to keep this test fast
         result = await _with_pools(
             build_timeline(since=None, skip_sources={"github"})
         )
         assert isinstance(result, dict)
-        # github should appear in skipped_tables since we skipped it
         skipped = result.get("skipped_tables", [])
         assert isinstance(skipped, list)
 
@@ -180,11 +175,10 @@ class TestBuildTimelineIntegration:
 
 class TestEnsureTimelinePartitionsIntegration:
     async def test_ensure_partitions_is_idempotent(self):
-        """Calling ensure_timeline_partitions multiple times must not fail."""
+        if not _INTEGRATION_ENABLED:
+            pytest.skip("Set PYTEST_INTEGRATION_DB_ONLY=1 to run heavy integration tests")
         if not await _db_ok(_ANALYZER_URL):
             pytest.skip("Analyzer DB not reachable")
-
         from src.pipeline.timeline_builder import ensure_timeline_partitions
-
         await _with_pools(ensure_timeline_partitions(months_ahead=3))
         await _with_pools(ensure_timeline_partitions(months_ahead=3))

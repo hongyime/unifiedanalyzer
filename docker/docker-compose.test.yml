@@ -36,6 +36,7 @@ services:
     environment:
       ANALYZER_DATABASE_URL: postgres://collector:collector@test-postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@test-postgres:5432/unifiedanalyzer
+      PYTEST_INTEGRATION_DB_ONLY: "1"
       # Disable heavy optional features that need GPU/drive mounts.
       RUN_SCHEDULER: "0"
       ENTITY_ENRICHMENT_ENABLED: "0"
