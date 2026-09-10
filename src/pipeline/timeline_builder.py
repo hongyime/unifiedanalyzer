@@ -1,4 +1,5 @@
 import json
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -847,9 +848,11 @@ async def build_timeline(
                         unresolved_count,
                     )
 
-        except Exception as e:
+        except (Exception, asyncio.CancelledError) as e:
             logger.warning("Skipping %s: %s", source_name, e)
             stats["skipped_tables"].append(source_name)
+            if isinstance(e, asyncio.CancelledError):
+                raise  # propagate shutdown — do not swallow cancellation
 
     logger.info("Timeline build complete: %s", stats)
     return stats
