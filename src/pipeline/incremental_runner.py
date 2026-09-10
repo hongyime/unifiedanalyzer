@@ -432,27 +432,52 @@ async def _get_recent_alerts(since_minutes: int = 5) -> list[dict]:
 
 
 async def _finish_run(run_id: str, stats: dict, error: str | None = None) -> None:
+    """Write the final status of a run to analysis_runs.
+
+    Retries with backoff for up to 5 minutes on transient DB errors
+    (e.g. CannotConnectNowError when the DB was briefly in recovery mode).
+    This prevents _finish_run failures from leaving analysis_runs rows stuck
+    as 'running' and permanently blocking new runs via _is_run_locked.
+    """
     pool = get_analyzer_pool()
     status = "failed" if error else "completed"
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE analysis_runs SET
-                status = $1,
-                finished_at = NOW(),
-                entities_processed = $2,
-                events_created = $3,
-                alerts_created = $4,
-                signals_created = $5,
-                error_message = $6
-            WHERE id = $7::uuid
-        """, status,
-            stats.get("entities", 0),
-            stats.get("events", 0),
-            stats.get("alerts", 0),
-            stats.get("signals", 0),
-            error,
-            run_id)
-
+    _FINISH_RETRIES = 10
+    _FINISH_BACKOFF_S = 30  # wait 30s between retries → max ~5 min total
+    for attempt in range(1, _FINISH_RETRIES + 1):
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE analysis_runs SET
+                        status = $1,
+                        finished_at = NOW(),
+                        entities_processed = $2,
+                        events_created = $3,
+                        alerts_created = $4,
+                        signals_created = $5,
+                        error_message = $6
+                    WHERE id = $7::uuid
+                """, status,
+                    stats.get("entities", 0),
+                    stats.get("events", 0),
+                    stats.get("alerts", 0),
+                    stats.get("signals", 0),
+                    error,
+                    run_id)
+            return  # success
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if attempt >= _FINISH_RETRIES:
+                logger.error(
+                    "_finish_run: gave up after %d attempts for run %s: %s",
+                    _FINISH_RETRIES, run_id, exc,
+                )
+                raise
+            logger.warning(
+                "_finish_run: attempt %d/%d failed (transient error), retrying in %ds: %s",
+                attempt, _FINISH_RETRIES, _FINISH_BACKOFF_S, exc,
+            )
+            await asyncio.sleep(_FINISH_BACKOFF_S)
 
 # P2-3: the secondary (non-fatal) pipeline phases, shared verbatim by
 # run_incremental and run_full_resolution. Order matters — the media block
