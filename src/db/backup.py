@@ -455,7 +455,20 @@ def _run_pg_dump(config: BackupConfig, target: Path) -> None:
         detail = (proc.stderr or proc.stdout or "").strip()
         raise BackupError(f"pg_dump failed with exit code {proc.returncode}: {detail}")
 
-    tmp.replace(target)
+    try:
+        tmp.replace(target)
+    except FileNotFoundError:
+        # The .tmp file was swept by _sweep_orphaned_tmp from a concurrent backup
+        # run that already succeeded. The backup file exists on disk; this is not
+        # a real failure — treat it as a no-op.
+        if target.exists():
+            logger.info(
+                "Analyzer DB backup already completed by concurrent run: %s", target
+            )
+            return
+        raise BackupError(
+            f"pg_dump succeeded but .tmp rename failed and target {target} is missing"
+        )
     logger.info("Analyzer DB backup created: %s", target)
 
 
