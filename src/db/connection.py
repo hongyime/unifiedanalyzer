@@ -46,6 +46,11 @@ async def _create_pool_once(params: dict, max_size: int) -> asyncpg.Pool:
         max_size=max_size,
         ssl="disable",
         command_timeout=300,
+        server_settings={
+            "application_name": os.getenv("ANALYZER_APP_NAME", "unifiedanalyzer"),
+            "idle_in_transaction_session_timeout": os.getenv(
+                "PG_IIT_TIMEOUT_MS", "300000"),  # 5 min — kills leaked IIT sessions
+        },
     )
 
 
