@@ -1,3 +1,9 @@
+# Portfolio review — 2026-09-10
+
+Reviewed the storage boundary, compact Supabase export path, scheduler export batching and frontend health connection. All 388 tracked Python files parsed without importing the application. This is a separate Docker/PostgreSQL/media service with optional normalized-indicator export to Supabase; its local timers and files are not Vercel function usage.
+
+Export has bounded row/batch counts and a connection timeout, but the reviewed remote SQL operations do not have an explicit overall execution deadline. The incoming scheduler heartbeat and backup recovery pre-flight were reviewed and fast-forwarded; the changed Python file was re-parsed. Runtime recovery behavior remains unverified. Backup retention and explicit clean-mode reconciliation need a preservation review. Existing records, media, browser profiles and live collector/analysis jobs were not accessed or changed. Historical live-health and test claims below were not rerun in this pass.
+
 # UnifiedAnalyzer Agent State
 
 

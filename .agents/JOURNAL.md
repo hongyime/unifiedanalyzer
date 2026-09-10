@@ -176,3 +176,5 @@
 - 2026-09-08 02:19:03 +08:00 [PRAWN-L390/claude/stop] branch=main head=765177b dirty=1
 - 2026-09-08 02:41:27 +08:00 [PRAWN-L390/claude/stop] branch=main head=c10447a dirty=1
 - 2026-09-08 02:58:20 +08:00 [PRAWN-L390/claude/stop] branch=main head=aaff300 dirty=1
+
+- 2026-09-10: Portfolio source review confirmed separate PostgreSQL/media storage and bounded compact Supabase export batches; 388 Python files parsed. Queue export deadlines and preservation checks without invoking live collection, matching or cleanup.
