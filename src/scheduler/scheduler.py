@@ -69,6 +69,20 @@ def _backup_window_open(now: datetime, backup_hour_utc: int) -> bool:
 
 
 async def _run_db_backup_check(now: datetime) -> None:
+    # Pre-flight: skip pg_dump entirely if Postgres is in recovery mode.
+    # pg_dump will always fail mid-table when the server is recovering, and the
+    # crash can leave the scheduler pool in a bad state. Better to skip silently
+    # and rely on the next scheduled backup window.
+    try:
+        pool = get_analyzer_pool()
+        async with pool.acquire() as conn:
+            in_recovery = await conn.fetchval("SELECT pg_is_in_recovery()")
+        if in_recovery:
+            logger.warning("Skipping scheduled backup — Postgres is in recovery mode")
+            return
+    except Exception:
+        logger.warning("Skipping scheduled backup — could not check Postgres recovery state", exc_info=True)
+        return
     try:
         config = BackupConfig.from_env()
         result = await asyncio.to_thread(run_due_backups, config, now=now)
@@ -873,6 +887,14 @@ async def start_scheduler() -> None:
             logger.info("Database connectivity restored — scheduler resuming")
             was_offline = False
 
+        # Write a heartbeat file so the Docker HEALTHCHECK can detect a hung process.
+        # If the scheduler hangs (blocked asyncpg call, deadlocked FAISS thread), the
+        # heartbeat file goes stale after 10 min, healthcheck fails 3× → Docker restarts.
+        try:
+            from pathlib import Path
+            Path("/tmp/scheduler_heartbeat").touch()
+        except OSError:
+            pass
         now = datetime.now(timezone.utc)
 
         # Daily digest

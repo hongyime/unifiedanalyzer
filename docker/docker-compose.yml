@@ -149,6 +149,13 @@ services:
     # yields under contention so it never starves host-critical neighbours
     # (pihole DNS, plex, the collector). Full speed when the host is idle.
     cpu_shares: 512
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import os,sys,time; f='/tmp/scheduler_heartbeat'; sys.exit(0 if os.path.exists(f) and time.time()-os.path.getmtime(f)<600 else 1)"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 3m
 
   # Face indexing worker (merge §6): a SEPARATE long-running process (SQLAlchemy
   # + ONNX threads) from the analyzer's asyncio API/scheduler. Reuses the same
