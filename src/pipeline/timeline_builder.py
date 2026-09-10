@@ -766,21 +766,58 @@ async def build_timeline(
 
         try:
             pool = analyzer if pq.get("db") == "analyzer" else collector
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    cursor = conn.cursor(query, *params, timeout=SOURCE_QUERY_TIMEOUT_SECONDS)
+            use_keyset = pq.get("db") != "analyzer" and not pq.get("time_filters")
 
-                    batch: list[tuple] = []
-                    row_count = 0
-                    attributed_count = 0
-                    unresolved_count = 0
-                    invalid_time_count = 0
+            if use_keyset:
+                # Keyset pagination: each page acquires and releases its own
+                # collector-pool connection.  No transaction spans the analyzer
+                # executemany at _insert_batch — eliminates the cross-pool IIT leak.
+                batch: list[tuple] = []
+                row_count = 0
+                attributed_count = 0
+                unresolved_count = 0
+                invalid_time_count = 0
+                last_ts: datetime | None = None  # high-water mark for keyset
 
-                    async for row in cursor:
-                        # Try the primary entity_ref then an optional fallback
-                        # (entity_ref2) — some sources match on an id column but
-                        # keep a handle/username as a secondary key (see the
-                        # per-source query comments). First ref that resolves wins.
+                while True:
+                    # Build page query: original query + keyset AND + LIMIT
+                    base_query, base_params = _format_platform_query(pq, since)
+                    # Strip trailing ORDER BY … — we re-add it with the limit
+                    page_query = base_query.rstrip()
+                    if last_ts is not None:
+                        # Add keyset filter after the existing WHERE clause.
+                        # The query already ends with ORDER BY …; inject before it.
+                        order_idx = page_query.upper().rfind("ORDER BY")
+                        if order_idx != -1:
+                            before_order = page_query[:order_idx].rstrip()
+                            after_order = page_query[order_idx:]
+                        else:
+                            before_order = page_query
+                            after_order = ""
+                        ks_param_n = len(base_params) + 1
+                        keyset_clause = f"AND {pq['time_col']} < ${ks_param_n}"
+                        page_query = f"{before_order} {keyset_clause} {after_order}"
+                        page_params = list(base_params) + [
+                            last_ts.replace(tzinfo=None) if last_ts.tzinfo else last_ts
+                        ]
+                    else:
+                        page_params = list(base_params)
+                    # Append LIMIT
+                    limit_n = len(page_params) + 1
+                    page_query = f"{page_query} LIMIT ${limit_n}"
+                    page_params.append(BATCH_SIZE)
+
+                    # Fetch one page — connection released immediately after
+                    async with pool.acquire() as conn:
+                        rows = await conn.fetch(
+                            page_query, *page_params,
+                            timeout=SOURCE_QUERY_TIMEOUT_SECONDS,
+                        )
+
+                    if not rows:
+                        break  # done with this source
+
+                    for row in rows:
                         entity_id = None
                         if pq.get("entity_ids_direct"):
                             entity_ref = row.get("entity_ref")
@@ -799,8 +836,6 @@ async def build_timeline(
                         occurred_at = row["occurred_at"]
                         if occurred_at and not occurred_at.tzinfo:
                             occurred_at = occurred_at.replace(tzinfo=timezone.utc)
-                        # Skip null/bogus timestamps so they don't regenerate as
-                        # 1970/198x (or far-future) timeline noise.
                         if not _valid_timeline_time(occurred_at):
                             invalid_time_count += 1
                             continue
@@ -820,33 +855,127 @@ async def build_timeline(
                         else:
                             unresolved_count += 1
 
-                        if len(batch) >= BATCH_SIZE:
-                            await _insert_batch(analyzer, batch)
-                            stats["inserted"] += len(batch)
-                            batch.clear()
-
+                    # Flush accumulated batch before fetching next page
                     if batch:
                         await _insert_batch(analyzer, batch)
                         stats["inserted"] += len(batch)
+                        batch.clear()
 
-                    stats["total"] += row_count
-                    stats["processed"] += row_count
-                    stats["attributed"] += attributed_count
-                    stats["unresolved"] += unresolved_count
-                    stats["skipped_invalid_time"] += invalid_time_count
-                    stats["by_source"][source_name] = {
-                        "processed": row_count,
-                        "attributed": attributed_count,
-                        "unresolved": unresolved_count,
-                        "skipped_invalid_time": invalid_time_count,
-                    }
-                    logger.info(
-                        "Timeline %s: %d rows processed (%d attributed, %d unresolved)",
-                        source_name,
-                        row_count,
-                        attributed_count,
-                        unresolved_count,
-                    )
+                    # Advance keyset cursor to oldest occurred_at on this page
+                    last_occurred_at_val = rows[-1]["occurred_at"]
+                    if last_occurred_at_val is None:
+                        break  # can't paginate further without a timestamp
+                    if last_occurred_at_val.tzinfo is None:
+                        last_ts = last_occurred_at_val.replace(tzinfo=timezone.utc)
+                    else:
+                        last_ts = last_occurred_at_val
+
+                    if len(rows) < BATCH_SIZE:
+                        break  # last page — no more rows
+
+                stats["total"] += row_count
+                stats["processed"] += row_count
+                stats["attributed"] += attributed_count
+                stats["unresolved"] += unresolved_count
+                stats["skipped_invalid_time"] += invalid_time_count
+                stats["by_source"][source_name] = {
+                    "processed": row_count,
+                    "attributed": attributed_count,
+                    "unresolved": unresolved_count,
+                    "skipped_invalid_time": invalid_time_count,
+                }
+                logger.info(
+                    "Timeline %s: %d rows processed (%d attributed, %d unresolved) [keyset]",
+                    source_name,
+                    row_count,
+                    attributed_count,
+                    unresolved_count,
+                )
+
+            else:
+                # Cursor path: kept for analyzer-DB entries (facetracker UNION ALL
+                # with time_filters) which do not contribute to collector-pool leaks.
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        cursor = conn.cursor(query, *params, timeout=SOURCE_QUERY_TIMEOUT_SECONDS)
+
+                        batch: list[tuple] = []
+                        row_count = 0
+                        attributed_count = 0
+                        unresolved_count = 0
+                        invalid_time_count = 0
+
+                        async for row in cursor:
+                            # Try the primary entity_ref then an optional fallback
+                            # (entity_ref2) — some sources match on an id column but
+                            # keep a handle/username as a secondary key (see the
+                            # per-source query comments). First ref that resolves wins.
+                            entity_id = None
+                            if pq.get("entity_ids_direct"):
+                                entity_ref = row.get("entity_ref")
+                                entity_id = str(entity_ref) if entity_ref else None
+                            else:
+                                for _ref_col in ("entity_ref", "entity_ref2"):
+                                    entity_ref = row.get(_ref_col)
+                                    if not entity_ref:
+                                        continue
+                                    entity_ref = str(entity_ref)
+                                    entity_id = entity_lookup.get((pq["source"], entity_ref.lower())) \
+                                        or entity_lookup.get((pq["source"], entity_ref))
+                                    if entity_id:
+                                        break
+
+                            occurred_at = row["occurred_at"]
+                            if occurred_at and not occurred_at.tzinfo:
+                                occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+                            # Skip null/bogus timestamps so they don't regenerate as
+                            # 1970/198x (or far-future) timeline noise.
+                            if not _valid_timeline_time(occurred_at):
+                                invalid_time_count += 1
+                                continue
+
+                            batch.append((
+                                entity_id,
+                                pq["source"],
+                                pq["event_type"],
+                                str(row["record_id"]),
+                                occurred_at,
+                                row.get("title"),
+                                _jsonb_param(row.get("metadata")),
+                            ))
+                            row_count += 1
+                            if entity_id:
+                                attributed_count += 1
+                            else:
+                                unresolved_count += 1
+
+                            if len(batch) >= BATCH_SIZE:
+                                await _insert_batch(analyzer, batch)
+                                stats["inserted"] += len(batch)
+                                batch.clear()
+
+                        if batch:
+                            await _insert_batch(analyzer, batch)
+                            stats["inserted"] += len(batch)
+
+                        stats["total"] += row_count
+                        stats["processed"] += row_count
+                        stats["attributed"] += attributed_count
+                        stats["unresolved"] += unresolved_count
+                        stats["skipped_invalid_time"] += invalid_time_count
+                        stats["by_source"][source_name] = {
+                            "processed": row_count,
+                            "attributed": attributed_count,
+                            "unresolved": unresolved_count,
+                            "skipped_invalid_time": invalid_time_count,
+                        }
+                        logger.info(
+                            "Timeline %s: %d rows processed (%d attributed, %d unresolved)",
+                            source_name,
+                            row_count,
+                            attributed_count,
+                            unresolved_count,
+                        )
 
         except (Exception, asyncio.CancelledError) as e:
             logger.warning("Skipping %s: %s", source_name, e)
