@@ -71,6 +71,7 @@ from src.pipeline.phone_enrichment import enrich_phone_signals
 from src.pipeline.email_breach import check_email_breaches
 from src.pipeline.handle_fanout import run_handle_fanout
 from src.pipeline.email_recognition import run_email_recognition
+from src.pipeline.wmn_fanout import run_wmn_fanout
 from src.pipeline.geocode import geocode_step
 from src.pipeline.run_reporting import production_run_types, probe_phase_names
 from src.notifications.alerts import notify_run_summary, notify_error, notify_new_alerts
@@ -252,6 +253,7 @@ _PHASE_RESOURCE_CLASSES = {
     "email_breach_check": "notification",
     "handle_fanout": "notification",
     "email_recognition": "notification",
+    "wmn_fanout": "notification",
     "calibration_watchdog": "db",
     "geocode": "geocode",
 }
@@ -553,6 +555,7 @@ def _secondary_phases() -> list[tuple[str, object]]:
         ("email_breach_check", check_email_breaches),
         ("handle_fanout", run_handle_fanout),
         ("email_recognition", run_email_recognition),
+        ("wmn_fanout", run_wmn_fanout),
         # Calibration cutover watchdog: emits CALIBRATION_READY alert + Telegram
         # notification when identity_labels >= CALIBRATION_MONITOR_MIN_LABELS
         # AND LR beats noisy-OR by >= CALIBRATION_MONITOR_MIN_DELTA AUC.

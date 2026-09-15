@@ -155,7 +155,10 @@ activemq-data/
 # Phase 6 media analysis: derived artifacts (extracted PDF images, video
 # frames) and downloaded ONNX face models — regenerable, not source.
 data/media_derived/
-data/
+data/*
+# Curated vendored data files (checked in explicitly)
+!data/wmn-data.json
+!data/README.md
 
 # Analyzer operational artifacts, not source.
 /backups/
