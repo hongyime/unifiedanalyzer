@@ -1,8 +1,10 @@
 """Normalized indicator extraction and compact Supabase export staging."""
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -317,6 +319,31 @@ def _supabase_database_url(database_url: str | None = None) -> str | None:
     return database_url or os.getenv("SUPABASE_DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
 
 
+SUPABASE_CLEANUP_TIMEOUT_SECONDS = 5.0
+
+
+def _supabase_operation_timeout() -> float:
+    """Invalid or unlimited configuration must not disable the deadline."""
+    try:
+        value = float(os.getenv("SUPABASE_OPERATION_TIMEOUT_SECONDS", "45"))
+    except ValueError:
+        return 45.0
+    return min(value, 120.0) if math.isfinite(value) and value > 0 else 45.0
+
+
+async def _close_supabase_connection(remote, result: dict[str, Any]) -> None:
+    """Release only a connection created by this operation, even after failure."""
+    try:
+        async with asyncio.timeout(SUPABASE_CLEANUP_TIMEOUT_SECONDS):
+            await remote.close()
+    except asyncio.CancelledError:
+        remote.terminate()
+        raise
+    except Exception:  # noqa: BLE001 - cleanup must not replace the write outcome
+        remote.terminate()
+        result["cleanup_warning"] = "Remote connection required forced termination"
+
+
 def _export_params(row: Any) -> tuple:
     return (
         uuid.UUID(str(row["id"])),
@@ -428,25 +455,35 @@ async def export_pending_supabase_indicators(
     owns_remote = remote_conn is None
     remote = remote_conn
     try:
-        if remote is None:
-            if not dsn:
-                raise RuntimeError("SUPABASE_DATABASE_URL is not configured")
-            remote = await asyncpg.connect(dsn, timeout=float(os.getenv("SUPABASE_CONNECT_TIMEOUT_SECONDS", "15")))
-        if ensure_schema:
-            await remote.execute(SUPABASE_REMOTE_TABLE_SQL)
-            result["schema_ensured"] = True
-        if not rows:
-            return result
-        await remote.executemany(SUPABASE_REMOTE_UPSERT_SQL, [_export_params(row) for row in rows])
-        await _mark_exported(conn, ids, write_method="postgres_direct")
+        budget = _supabase_operation_timeout()
+        async with asyncio.timeout(budget):
+            if remote is None:
+                if not dsn:
+                    raise RuntimeError("SUPABASE_DATABASE_URL is not configured")
+                remote = await asyncpg.connect(
+                    dsn, timeout=float(os.getenv("SUPABASE_CONNECT_TIMEOUT_SECONDS", "15")),
+                    command_timeout=budget,
+                )
+            if ensure_schema:
+                await remote.execute(SUPABASE_REMOTE_TABLE_SQL)
+                result["schema_ensured"] = True
+            if not rows:
+                return result
+            await remote.executemany(SUPABASE_REMOTE_UPSERT_SQL, [_export_params(row) for row in rows])
+            await _mark_exported(conn, ids, write_method="postgres_direct")
     except Exception as exc:  # noqa: BLE001 - exporter must report and leave retry state
-        await _mark_export_retry(conn, ids, str(exc))
         result["status"] = "error"
-        result["error"] = str(exc)[:500]
+        result["error"] = "Supabase export operation deadline exceeded" if isinstance(exc, TimeoutError) else str(exc)[:500]
+        try:
+            async with asyncio.timeout(SUPABASE_CLEANUP_TIMEOUT_SECONDS):
+                await _mark_export_retry(conn, ids, result["error"])
+            result["retry_state_recorded"] = True
+        except Exception:  # noqa: BLE001 - unacknowledged rows remain pending/retry
+            result["retry_state_recorded"] = False
         return result
     finally:
         if owns_remote and remote is not None:
-            await remote.close()
+            await _close_supabase_connection(remote, result)
 
     result["exported"] = len(rows)
     return result
@@ -484,55 +521,60 @@ async def reconcile_supabase_indicators(
     owns_remote = remote_conn is None
     remote = remote_conn
     try:
-        if remote is None:
-            if not dsn:
-                raise RuntimeError("SUPABASE_DATABASE_URL is not configured")
-            remote = await asyncpg.connect(dsn, timeout=float(os.getenv("SUPABASE_CONNECT_TIMEOUT_SECONDS", "15")))
-        local_rows = await conn.fetch(
-            """
-            SELECT indicator_type, normalized_value
-            FROM normalized_indicators
-            WHERE export_status = 'exported'
-            """
-        )
-        local_set = {(r["indicator_type"], r["normalized_value"]) for r in local_rows}
-        remote_rows = await remote.fetch(
-            "SELECT indicator_type, normalized_value FROM normalized_indicators"
-        )
-        remote_set = {(r["indicator_type"], r["normalized_value"]) for r in remote_rows}
-        result["local_exported"] = len(local_set)
-        result["remote_rows"] = len(remote_set)
-        orphans = sorted(remote_set - local_set)
-        result["orphans"] = len(orphans)
-        result["orphan_samples"] = [
-            {"indicator_type": t, "normalized_value": v} for t, v in orphans[:20]
-        ]
-        if clean and orphans:
-            deleted = 0
-            for i in range(0, len(orphans), 500):
-                chunk = orphans[i:i + 500]
-                types = [t for t, _ in chunk]
-                values = [v for _, v in chunk]
-                res = await remote.execute(
-                    """
-                    DELETE FROM normalized_indicators ni
-                    USING unnest($1::text[], $2::text[]) AS o(indicator_type, normalized_value)
-                    WHERE ni.indicator_type = o.indicator_type
-                      AND ni.normalized_value = o.normalized_value
-                    """,
-                    types,
-                    values,
+        budget = _supabase_operation_timeout()
+        async with asyncio.timeout(budget):
+            if remote is None:
+                if not dsn:
+                    raise RuntimeError("SUPABASE_DATABASE_URL is not configured")
+                remote = await asyncpg.connect(
+                    dsn, timeout=float(os.getenv("SUPABASE_CONNECT_TIMEOUT_SECONDS", "15")),
+                    command_timeout=budget,
                 )
-                try:
-                    deleted += int(res.split()[-1])
-                except (IndexError, ValueError):
-                    pass
-            result["deleted"] = deleted
+            local_rows = await conn.fetch(
+                """
+                SELECT indicator_type, normalized_value
+                FROM normalized_indicators
+                WHERE export_status = 'exported'
+                """
+            )
+            local_set = {(r["indicator_type"], r["normalized_value"]) for r in local_rows}
+            remote_rows = await remote.fetch(
+                "SELECT indicator_type, normalized_value FROM normalized_indicators"
+            )
+            remote_set = {(r["indicator_type"], r["normalized_value"]) for r in remote_rows}
+            result["local_exported"] = len(local_set)
+            result["remote_rows"] = len(remote_set)
+            orphans = sorted(remote_set - local_set)
+            result["orphans"] = len(orphans)
+            result["orphan_samples"] = [
+                {"indicator_type": t, "normalized_value": v} for t, v in orphans[:20]
+            ]
+            if clean and orphans:
+                deleted = 0
+                for i in range(0, len(orphans), 500):
+                    chunk = orphans[i:i + 500]
+                    types = [t for t, _ in chunk]
+                    values = [v for _, v in chunk]
+                    res = await remote.execute(
+                        """
+                        DELETE FROM normalized_indicators ni
+                        USING unnest($1::text[], $2::text[]) AS o(indicator_type, normalized_value)
+                        WHERE ni.indicator_type = o.indicator_type
+                          AND ni.normalized_value = o.normalized_value
+                        """,
+                        types,
+                        values,
+                    )
+                    try:
+                        deleted += int(res.split()[-1])
+                    except (IndexError, ValueError):
+                        pass
+                result["deleted"] = deleted
     except Exception as exc:  # noqa: BLE001 - reconcile must report, not crash
         result["status"] = "error"
-        result["error"] = str(exc)[:500]
+        result["error"] = "Supabase reconciliation operation deadline exceeded" if isinstance(exc, TimeoutError) else str(exc)[:500]
         return result
     finally:
         if owns_remote and remote is not None:
-            await remote.close()
+            await _close_supabase_connection(remote, result)
     return result
