@@ -26,6 +26,7 @@ on:
       # Also run when Python source or dependencies change
       - "**.py"
       - "requirements*.txt"
+      - ".github/workflows/ci.yml"
 
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
@@ -111,7 +112,7 @@ jobs:
         env:
           POSTGRES_USER: collector
           POSTGRES_PASSWORD: collector
-          POSTGRES_DB: unifiedanalyzer
+          POSTGRES_DB: analyzer_ci
         ports:
           - 5432:5432
         options: >-
@@ -129,21 +130,33 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Checkout reviewed Collector schemas
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: hongyime/unifiedcollector
+          # Checked schema/bootstrap repair from Collector PR #31.
+          # Pin the reviewed commit; this is test schema, not a backend deployment.
+          ref: 2f06425270122dea095bc3321bc802c883b586fe
+          path: .test-upstream/collector-reviewed
+          sparse-checkout: src/db
+          persist-credentials: false
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest-cov pytest-asyncio anyio
 
-      - name: Apply database schema
+      - name: Apply isolated integration schemas
         env:
-          ANALYZER_DATABASE_URL: postgres://collector:collector@localhost:5432/unifiedanalyzer
-          COLLECTOR_DATABASE_URL: postgres://collector:collector@localhost:5432/unifiedanalyzer
-        run: python -m src.main schema
+          ANALYZER_DATABASE_URL: postgres://collector:collector@localhost:5432/analyzer_ci
+          COLLECTOR_DATABASE_URL: postgres://collector:collector@localhost:5432/collector_ci
+          ANALYZER_CI_SCHEMA_SETUP: "1"
+        run: python -m scripts.bootstrap_integration_db
 
       - name: Run tests
         env:
-          ANALYZER_DATABASE_URL: postgres://collector:collector@localhost:5432/unifiedanalyzer
-          COLLECTOR_DATABASE_URL: postgres://collector:collector@localhost:5432/unifiedanalyzer
+          ANALYZER_DATABASE_URL: postgres://collector:collector@localhost:5432/analyzer_ci
+          COLLECTOR_DATABASE_URL: postgres://collector:collector@localhost:5432/collector_ci
           PYTEST_INTEGRATION_DB_ONLY: "1"
         run: python -m pytest tests/ -q --cov=src --cov-report=term-missing --cov-fail-under=100
