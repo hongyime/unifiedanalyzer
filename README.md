@@ -145,6 +145,24 @@ placeholders hydrates them and fills the disk. Never add it. Excluded subtrees
 (analyzer's own derived dir, collector media, recycle bins) are set via
 `EXCLUDE_PATHS` in the compose file.
 
+## API readiness and framework compatibility
+
+The API requires FastAPI 0.137.2 or newer. Readiness inspects effective paths
+through FastAPI's public `iter_route_contexts` API, including nested routers and
+prefixes. Missing routes remain unhealthy unless the existing HTTP probe proves
+they are served; listing a module in configuration is not proof of a mounted route.
+
+Run the focused route checks with:
+
+```bash
+python -m pytest tests/test_route_discovery.py tests/test_readiness_route.py -q
+```
+
+GitHub default CodeQL setup provides the automatic security scans. The advanced
+workflow remains a deliberate manual fallback after default setup is disabled,
+so two scanners do not attempt conflicting uploads. The full Python suite still
+requires its existing 100% coverage gate and provisioned integration schemas.
+
 ## Frontend dev
 
 ```bash

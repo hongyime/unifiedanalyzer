@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.routing import iter_route_contexts
 
 router = APIRouter(tags=["readiness"])
 
@@ -410,26 +411,13 @@ async def _analyst_workflow_status(api_app: Any | None = None) -> dict[str, Any]
 
             api_app = api_app_module.app
 
-        route_candidates = list(getattr(api_app, "routes", []) or [])
-        router_obj = getattr(api_app, "router", None)
-        route_candidates.extend(list(getattr(router_obj, "routes", []) or []))
+        # Included routers retain their prefixes in FastAPI's route tree.
+        # Inspect effective routes through the public traversal API.
         mounted = {
-            str(getattr(route, "path", ""))
-            for route in route_candidates
-            if getattr(route, "path", None)
+            context.path
+            for context in iter_route_contexts(api_app.routes)
+            if context.path
         }
-        if not mounted and api_app is not None:
-            from src.api import app as api_app_module
-
-            fallback_app = api_app_module.app
-            fallback_routes = list(getattr(fallback_app, "routes", []) or [])
-            fallback_router = getattr(fallback_app, "router", None)
-            fallback_routes.extend(list(getattr(fallback_router, "routes", []) or []))
-            mounted = {
-                str(getattr(route, "path", ""))
-                for route in fallback_routes
-                if getattr(route, "path", None)
-            }
     except Exception as exc:  # noqa: BLE001 - readiness should report route proof drift
         return {
             "ok": False,
@@ -443,29 +431,6 @@ async def _analyst_workflow_status(api_app: Any | None = None) -> dict[str, Any]
         http_probe = await _analyst_workflow_http_probe(required)
         if http_probe.get("ok") is True:
             return http_probe
-        try:
-            from src.api import app as api_app_module
-
-            core_modules = {
-                str(module_path)
-                for module_path, _prefix in getattr(api_app_module, "_CORE_ROUTE_MODULES", ())
-            }
-            required_modules = {
-                "src.api.routes.entities",
-                "src.api.routes.triage",
-                "src.api.routes.cases",
-            }
-            if required_modules.issubset(core_modules):
-                return {
-                    "ok": True,
-                    "required": required,
-                    "mounted": list(required),
-                    "missing": [],
-                    "probe": "core_module_config",
-                    "http_probe": http_probe,
-                }
-        except Exception:
-            pass
     return {
         "ok": not missing,
         "required": required,

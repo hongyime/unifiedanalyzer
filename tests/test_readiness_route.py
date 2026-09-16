@@ -297,9 +297,10 @@ def test_build_readiness_report_surfaces_incomplete_analyst_value_path_as_warnin
 
 
 def test_core_analyst_routes_are_mounted_before_spa_fallback():
+    from fastapi.routing import iter_route_contexts
     from src.api import app as api_app
 
-    route_paths = [str(getattr(route, "path", "")) for route in api_app.app.routes]
+    route_paths = [context.path for context in iter_route_contexts(api_app.app.routes)]
     required = {"/api/entities", "/api/review/candidates", "/api/triage", "/api/cases"}
 
     assert required.issubset(set(route_paths))
