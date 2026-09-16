@@ -1,48 +1,16 @@
 name: CodeQL Analysis
 
-# COST-OPTIMISED (2026-07-04):
-# - `paths` filter so CodeQL only fires when actual code changes (not markdown/config).
-# - `concurrency: cancel-in-progress` cancels stale runs when new commits land.
-# - Weekly cron kept but shifted off Monday spike (spreads load, avoids stacking with sync workflows).
+# GitHub default setup is the automatic scanner for Actions, JavaScript and Python.
+# Retain advanced setup only as a manual fallback; disable default setup before
+# deliberately running this workflow. Running both rejects the advanced upload.
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - "**.ts"
-      - "**.tsx"
-      - "**.js"
-      - "**.jsx"
-      - "**.mjs"
-      - "**.cjs"
-      - "**.vue"
-      - "**.py"
-      - "**.pyi"
-      - "**/package.json"
-      - "**/pnpm-lock.yaml"
-      - "**/package-lock.json"
-      - "**/requirements*.txt"
-      - "**/pyproject.toml"
-      - ".github/workflows/codeql.yml"
-  pull_request:
-    branches: [main, master]
-    paths:
-      - "**.ts"
-      - "**.tsx"
-      - "**.js"
-      - "**.jsx"
-      - "**.mjs"
-      - "**.cjs"
-      - "**.vue"
-      - "**.py"
-      - "**.pyi"
-      - "**/package.json"
-      - "**/pnpm-lock.yaml"
-      - "**/package-lock.json"
-      - "**/requirements*.txt"
-      - "**/pyproject.toml"
-      - ".github/workflows/codeql.yml"
-  schedule:
-    - cron: "0 14 * * 3" # Weekly Wed 10 PM SGT (off Monday spike)
+  workflow_dispatch:
+    inputs:
+      default_setup_disabled:
+        description: "Default CodeQL setup has been disabled for this deliberate advanced scan"
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: codeql-${{ github.workflow }}-${{ github.ref }}
@@ -59,42 +27,14 @@ jobs:
   # did a full checkout (~30-60s each) before exiting — ~100 wasted min/week
   # on push-heavy private repos like unifiedcollector.
   detect:
-    if: github.event.repository.private == false
+    if: github.event.repository.private == false && inputs.default_setup_disabled == true
     runs-on: ubuntu-latest
     outputs:
       languages: ${{ steps.langs.outputs.languages }}
       any: ${{ steps.langs.outputs.any }}
     steps:
-      - name: Check the active CodeQL setup
-        id: setup
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          timeout 30s gh api "repos/$GH_REPO/code-scanning/default-setup" > "$RUNNER_TEMP/codeql-setup.json"
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          setup = json.loads((Path(os.environ['RUNNER_TEMP']) / 'codeql-setup.json').read_text())
-          state = setup.get('state')
-          if state == 'configured':
-              required = {'actions', 'javascript-typescript', 'python'}
-              if not required.issubset(set(setup.get('languages', []))):
-                  raise SystemExit('Default CodeQL setup must cover this repository before advanced scanning can defer')
-              enabled = 'false'
-          elif state == 'not-configured':
-              enabled = 'true'
-          else:
-              raise SystemExit('Unknown CodeQL setup state; refusing to skip scanning')
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('use_advanced=' + enabled + '\n')
-          PY
       - uses: actions/checkout@v7
-        if: steps.setup.outputs.use_advanced == 'true'
       - name: Detect languages
-        if: steps.setup.outputs.use_advanced == 'true'
         id: langs
         shell: bash
         run: |
