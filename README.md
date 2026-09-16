@@ -145,6 +145,45 @@ placeholders hydrates them and fills the disk. Never add it. Excluded subtrees
 (analyzer's own derived dir, collector media, recycle bins) are set via
 `EXCLUDE_PATHS` in the compose file.
 
+## API readiness and framework compatibility
+
+The API requires FastAPI 0.137.2 or newer. Readiness inspects effective paths
+through FastAPI's public `iter_route_contexts` API, including nested routers and
+prefixes. Missing routes remain unhealthy unless the existing HTTP probe proves
+they are served; listing a module in configuration is not proof of a mounted route.
+
+Run the focused route checks with:
+
+```bash
+python -m pytest tests/test_route_discovery.py tests/test_readiness_route.py -q
+```
+
+GitHub default CodeQL setup provides the automatic security scans. The advanced
+workflow remains a deliberate manual fallback after default setup is disabled,
+so two scanners do not attempt conflicting uploads. The full Python suite still
+requires its existing 100% coverage gate and provisioned integration schemas.
+
+## Integration database fixtures
+
+Python CI uses separate disposable `analyzer_ci` and `collector_ci` databases.
+The bootstrap applies Analyzer's committed SQL, Face Tracker's existing ORM
+models and Collector's real schema runner. Collector's checkout is pinned to
+`2f06425270122dea095bc3321bc802c883b586fe`, the checked schema repair in draft
+[Collector #31](https://github.com/hongyime/unifiedcollector/pull/31). This fixture
+reference does not deploy Collector; update it deliberately after reviewing a
+replacement revision and its bootstrap checks.
+
+To reproduce the setup, use the pinned `src/db` checkout under
+`.test-upstream/collector-reviewed` and a local pgvector server with the two
+configured database URLs. Run `ANALYZER_CI_SCHEMA_SETUP=1 python -m
+scripts.bootstrap_integration_db` before `PYTEST_INTEGRATION_DB_ONLY=1 python -m
+pytest tests/`. The helper refuses non-loopback hosts, other database names and
+connection-string overrides. It is never a production migration command.
+
+A regression inserts synthetic Analyzer, Face Tracker and Collector records,
+replays setup and checks row contents, the migration ledger and database
+separation. The full CI coverage requirement remains 100%.
+
 ## Frontend dev
 
 ```bash
