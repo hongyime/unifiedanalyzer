@@ -18,7 +18,12 @@ venv
 
 # Local env + data (image reads config via env_file at run time, not build)
 .env
-data
+# data/ is broadly excluded because it holds runtime scratch (media, embeddings)
+# — but the vendored OSINT rulesets shipped in data/*.json MUST make it into
+# the image so pipeline phases like wmn_fanout can load them at runtime.
+data/*
+!data/*.json
+!data/README.md
 docs
 
 # OS / editor
