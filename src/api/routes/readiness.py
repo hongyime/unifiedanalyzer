@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import asyncio
 import time
+from typing import Any
 
 from fastapi import APIRouter, Request
 
@@ -93,9 +94,7 @@ USER_STORIES: dict[str, dict[str, str]] = {
 
 
 async def _health_status() -> dict[str, Any]:
-    from src.api.routes.health import health_check
-
-    return await health_check()
+    return await _health_status_fast_fallback(None, 0.0)
 
 
 async def _health_status_retry_after_timeout(original_error: Exception, timeout_seconds: float) -> dict[str, Any] | None:
@@ -121,7 +120,7 @@ async def _health_status_retry_after_timeout(original_error: Exception, timeout_
     return health
 
 
-async def _health_status_fast_fallback(original_error: Exception, timeout_seconds: float) -> dict[str, Any]:
+async def _health_status_fast_fallback(original_error: Exception | None, timeout_seconds: float) -> dict[str, Any]:
     """Build the critical readiness health surface with smaller independent queries.
 
     The full health endpoint intentionally includes broad operator evidence. Under
@@ -147,8 +146,8 @@ async def _health_status_fast_fallback(original_error: Exception, timeout_second
         "decision_log": {},
         "face_bridge_audit": {},
         "face_processing": {},
-        "fallback": "fast_health",
-        "primary_error": f"{original_error.__class__.__name__}: {original_error}",
+        "fallback": "fast_health" if original_error is not None else "critical_health",
+        "primary_error": f"{original_error.__class__.__name__}: {original_error}" if original_error is not None else None,
         "timeout_seconds": timeout_seconds,
     }
 
@@ -175,19 +174,17 @@ async def _health_status_fast_fallback(original_error: Exception, timeout_second
                 max(24, _env_int_local("FULL_RESOLUTION_INTERVAL_HOURS", 12, minimum=1) * 2),
                 minimum=1,
             ) * 3600
-            inc, full = await asyncio.gather(
-                _run_freshness(
-                    conn,
-                    "incremental",
-                    completed_stale_after_seconds=max(incremental_stale_seconds, incremental_interval_seconds),
-                    heartbeat_stale_after_seconds=heartbeat_stale_seconds,
-                ),
-                _run_freshness(
-                    conn,
-                    "full_resolution",
-                    completed_stale_after_seconds=max(full_stale_seconds, full_interval_seconds),
-                    heartbeat_stale_after_seconds=heartbeat_stale_seconds,
-                ),
+            inc = await _run_freshness(
+                conn,
+                "incremental",
+                completed_stale_after_seconds=max(incremental_stale_seconds, incremental_interval_seconds),
+                heartbeat_stale_after_seconds=heartbeat_stale_seconds,
+            )
+            full = await _run_freshness(
+                conn,
+                "full_resolution",
+                completed_stale_after_seconds=max(full_stale_seconds, full_interval_seconds),
+                heartbeat_stale_after_seconds=heartbeat_stale_seconds,
             )
             status["scheduler_freshness"] = {"incremental": inc, "full_resolution": full}
             status["supabase_export"] = await _supabase_export_health(conn)
@@ -1237,8 +1234,8 @@ async def _production_readiness(request_app: Any | None = None) -> dict[str, Any
         asyncio.wait_for(_supabase_remote_readback_status(), timeout=_stage_timeout(supabase_timeout)),
         asyncio.wait_for(_data_quality_ledger_status(), timeout=_stage_timeout(data_quality_timeout)),
         asyncio.wait_for(_collector_action_queue_status(), timeout=_stage_timeout(action_queue_timeout)),
-        workflow_coro,
-        value_path_coro,
+        asyncio.wait_for(workflow_coro, timeout=_stage_timeout(health_timeout)),
+        asyncio.wait_for(value_path_coro, timeout=_stage_timeout(health_timeout)),
         return_exceptions=True,
     )
     deadline_skips: list[str] = []

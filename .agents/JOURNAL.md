@@ -1,5 +1,7 @@
 # UnifiedAnalyzer Agent Journal
 
+- 2026-09-16: Reproduced and repaired readiness deadline bypass, same-connection asyncpg concurrency, and missing annotation import; primary proof now uses the existing critical-only snapshot. Deployed shared PostgreSQL init guard after isolated exit-2 fault proof (1 crash without init, 0 with it); preserved the live volume. Final tests 5427 passed/58 DB skips, frontend build passed, export backlog drained to 32261 matching local/remote rows. Readiness remains timeout-degraded under load, so full production readiness and full restore proof remain open; no false-green severity changes.
+
 - 2026-09-16 02:24 SGT: Vendored the WhatsMyName ruleset (data/wmn-data.json, CC0, 716 sites) directly into the analyzer repo and gated the new fanout behind WMN_FANOUT_ENABLED (default OFF); a naive scan would burst ~700 outbound GETs per username and trip egress filters, so this stays opt-in even after the Dockerfile COPYs the file into the image.
 - 2026-09-16 02:24 SGT: Implemented v7 Explore-tier local NL query (src/pipeline/graph_nl_query.py + /api/entities/{id}/nl-summary) as ollama-first with an OpenAI-compatible fallback and a hard "off" mode. Every failure path (disabled, entity-missing, backend-unreachable) returns the raw dossier context so the caller can render evidence even when no LLM is running. Never auto-writes back to the DB — LLM output is treated as untrusted.
 - 2026-09-16 02:24 SGT: Confirmed my earlier v7 gap analysis mislabelled holehe as "not present" — email_recognition.py IS the holehe subprocess integration and holehe 1.61 is on-PATH in analyzer + scheduler containers. Only genuine remaining v7 gap now is a local-LLM backend actually running on this host (no ollama service on port 11434 as of check).
@@ -186,3 +188,6 @@
 - 2026-09-15 07:10:49 +08:00 [PRAWN-L390/claude/stop] branch=main head=36ca657 dirty=1
 - 2026-09-15 22:49:46 +08:00 [PRAWN-L390/claude/stop] branch=main head=36ca657 dirty=1
 - 2026-09-16: Reproduced readiness deadline bypass in both analyst probes (two failing stalled-probe tests); every readiness probe must share the global budget and retain explicit failure evidence. Prior Collector backup TODO is superseded by a completed table-excluded dump, but full-cluster backup still failed and cannot be claimed verified. Existing code edits and backup artifacts are preserved.
+- 2026-09-16 12:19:53 +08:00 [PRAWN-L390/claude/stop] branch=main head=5027e56 dirty=4
+- 2026-09-16 12:19:53 +08:00 [PRAWN-L390/claude/stop] branch=main head=5027e56 dirty=4
+- 2026-09-16 17:06:57 +08:00 [PRAWN-L390/claude/stop] branch=main head=5027e56 dirty=4

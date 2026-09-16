@@ -1,3 +1,23 @@
+# Recovery checkpoint — 2026-09-16 04:17 UTC
+
+Current task: finish post-reboot recovery. **Dashboards are reachable; production readiness is still degraded.** Await a quiet maintenance-window decision before pausing additional heavy workers for load isolation/full-backup validation.
+
+Verified completed work:
+- Fixed the shared database crash mechanism in Collector Compose: `init: true` prevents PostgreSQL PID-1 adoption of orphan exec clients. Same-image isolated fault test: one crash recovery without init, zero with init. Live data volume remained `unifiedcollector_pgdata`; both databases preserved. Current post-repair log has no exit-2/SIGPIPE/reinitialization events. Docker health briefly timed out under load, then returned healthy; direct `pg_isready` accepted connections.
+- Deployed readiness repairs: bound both analyst probes, serialize queries sharing an asyncpg connection, restore the missing `Any` import, and use the existing critical-only health snapshot as primary proof. Each bug had failing-first coverage; focused suites passed 70. No check severity was relaxed.
+- Final full host suite: **5427 passed, 58 existing DB-dependent skips, 9 warnings**, 271.79s. Test DB URLs were isolated from production. Frontend `npm run build` passed. Analyzer diagnostics and Collector guard lint/diff checks passed; Collector config tests passed 2.
+- Export catch-up wrote 145 already-staged compact indicators. Local pending count = 0, local exported = 32261, remote reachable/table exists/row count = 32261, `raw_mirror=false`.
+- Read-only pipeline records show completed incremental/full runs; the stale scheduler heartbeat file alone was misleading. Latest Analyzer backup is success with restore-list proof; Collector's reduced Sep-15 dump also passed `pg_restore --list`. A full restore drill/full-cluster backup is **not** validated.
+- Restarted the Instagram worker to release accumulated browser-driver processes: about 975 MiB/232 PIDs before, 36.54 MiB/3 PIDs after; container healthy. Stored data and host browser profile preserved.
+
+Remaining work:
+- Latest `/api/production/readiness`: HTTP 200 in 46.1s, 4/13 checks passing, 7 critical failures from timed-out/missing health and Collector evidence. Do not claim production-ready or clear these checks without proof. Need a quiet baseline, identify expensive probes, then revalidate with normal workloads restored.
+- Validate a complete backup and isolated restore; reduced/table-excluded archive readability is not disaster-recovery proof.
+- Reconcile optional feature rollout with concurrent agents: graph-query work was committed by another agent during recovery; earlier agent notes below still list image/optional-backend rollout work. Preserve it rather than blindly restarting the entire stack.
+- Independent reviewer unavailable: configured helper model fails to resolve and this harness cannot lead a team. No reviewer approval is claimed.
+
+Evidence/cleanup: dashboards returned HTTP 200 (Analyzer 7.28s, Collector basic health 0.90s); Playwright `/production` screenshot is `recovery-20260916-production.jpg`. QA browser closed, both isolated fault-test containers stopped/auto-removed, test PIDs exited, and no read-only probe subprocesses remain. Recovery source/config edits are uncommitted by this session. Historical notes follow.
+
 Updated: 2026-09-16 02:24 SGT / 2026-09-15 18:24 UTC
 
 Current live update:
@@ -379,13 +399,13 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-09-15 22:49:46 +08:00
+- Updated: 2026-09-16 17:06:57 +08:00
 - Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 36ca657
-- Dirty files: 1
+- HEAD: 5027e56
+- Dirty files: 4
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
 

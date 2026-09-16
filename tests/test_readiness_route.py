@@ -151,6 +151,15 @@ def _healthy_collector():
     }
 
 
+def test_readiness_annotations_can_be_resolved():
+    from typing import get_type_hints
+
+    hints = get_type_hints(readiness._production_readiness)
+
+    assert "request_app" in hints
+    assert "return" in hints
+
+
 def test_build_readiness_report_passes_all_user_story_checks():
     report = readiness.build_readiness_report(_healthy_health(), _healthy_collector(), _healthy_data_quality())
 
@@ -448,6 +457,44 @@ async def test_production_readiness_respects_global_deadline_when_health_recover
     databases = next(item for item in report["checks"] if item["id"] == "databases_connected")
     assert databases["ok"] is False
     assert report["status"] == "degraded"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("probe_name", "check_id"),
+    [
+        ("_analyst_workflow_status", "analyst_workflows_available"),
+        ("_analyst_value_path_status", "analyst_value_path_proven"),
+    ],
+)
+async def test_production_readiness_bounds_stalled_analyst_probe(monkeypatch, probe_name, check_id):
+    async def healthy_health():
+        return _healthy_health()
+
+    async def healthy_collector():
+        return _healthy_collector()
+
+    async def healthy_remote():
+        return _healthy_health()["supabase_export"]["remote_readback"]
+
+    async def stalled_probe():
+        await asyncio.Event().wait()
+
+    monkeypatch.setenv("ANALYZER_READINESS_TOTAL_BUDGET_SECONDS", "0.1")
+    monkeypatch.setattr(readiness, "_health_status", healthy_health)
+    monkeypatch.setattr(readiness, "_collector_status", healthy_collector)
+    monkeypatch.setattr(readiness, "_supabase_remote_readback_status", healthy_remote)
+    monkeypatch.setattr(readiness, probe_name, stalled_probe)
+
+    try:
+        report = await asyncio.wait_for(readiness._production_readiness(), timeout=1.0)
+    except TimeoutError:
+        pytest.fail(f"{probe_name} escaped the global readiness deadline")
+
+    checks = {item["id"]: item for item in report["checks"]}
+    assert checks[check_id]["ok"] is False
+    assert "TimeoutError" in checks[check_id]["evidence"]["error"]
+    assert checks["databases_connected"]["ok"] is True
+
 
 @pytest.mark.asyncio
 async def test_production_readiness_uses_isolated_health_retry_after_primary_timeout(monkeypatch):
