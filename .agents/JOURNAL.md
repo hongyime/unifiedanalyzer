@@ -1,5 +1,8 @@
 # UnifiedAnalyzer Agent Journal
 
+- 2026-09-16 02:24 SGT: Vendored the WhatsMyName ruleset (data/wmn-data.json, CC0, 716 sites) directly into the analyzer repo and gated the new fanout behind WMN_FANOUT_ENABLED (default OFF); a naive scan would burst ~700 outbound GETs per username and trip egress filters, so this stays opt-in even after the Dockerfile COPYs the file into the image.
+- 2026-09-16 02:24 SGT: Implemented v7 Explore-tier local NL query (src/pipeline/graph_nl_query.py + /api/entities/{id}/nl-summary) as ollama-first with an OpenAI-compatible fallback and a hard "off" mode. Every failure path (disabled, entity-missing, backend-unreachable) returns the raw dossier context so the caller can render evidence even when no LLM is running. Never auto-writes back to the DB — LLM output is treated as untrusted.
+- 2026-09-16 02:24 SGT: Confirmed my earlier v7 gap analysis mislabelled holehe as "not present" — email_recognition.py IS the holehe subprocess integration and holehe 1.61 is on-PATH in analyzer + scheduler containers. Only genuine remaining v7 gap now is a local-LLM backend actually running on this host (no ollama service on port 11434 as of check).
 - 2026-08-25 14:20 UTC: Production readiness must obey one global wall-clock budget across ALL stages including isolated retries and fallbacks; per-stage budgets alone summed past any client timeout (55.6s live). ANALYZER_READINESS_TOTAL_BUDGET_SECONDS now caps every stage and records deadline_skipped_stages instead of hanging.
 - 2026-08-21 21:38 UTC: Treat visible Chrome logout/page-shell reports as profile-specific until CDP/vault/browser-ingest proof says otherwise; current Collector CDP auth is intact after canonical tab repair, while Analyzer readiness degradation is timeout/load-derived and separate from browser cookies.
 - 2026-08-21 16:25 UTC: Supabase compact indicator export remained healthy after Collector hardening, but production readiness is currently degraded under load and by two real Collector browser/content actions; do not claim production-ready until those gates revalidate cleanly.
@@ -178,3 +181,8 @@
 - 2026-09-08 02:58:20 +08:00 [PRAWN-L390/claude/stop] branch=main head=aaff300 dirty=1
 - 2026-09-09 22:37:55 +08:00 [PRAWN-L390/claude/stop] branch=main head=80d0adf dirty=1
 - 2026-09-10 10:59:06 +08:00 [PRAWN-L390/claude/stop] branch=main head=80d0adf dirty=1
+- 2026-09-10 21:23:55 +08:00 [PRAWN-L390/claude/stop] branch=main head=e332aca dirty=1
+- 2026-09-11 22:09:54 +08:00 [PRAWN-L390/claude/stop] branch=main head=36ca657 dirty=1
+- 2026-09-15 07:10:49 +08:00 [PRAWN-L390/claude/stop] branch=main head=36ca657 dirty=1
+- 2026-09-15 22:49:46 +08:00 [PRAWN-L390/claude/stop] branch=main head=36ca657 dirty=1
+- 2026-09-16: Reproduced readiness deadline bypass in both analyst probes (two failing stalled-probe tests); every readiness probe must share the global budget and retain explicit failure evidence. Prior Collector backup TODO is superseded by a completed table-excluded dump, but full-cluster backup still failed and cannot be claimed verified. Existing code edits and backup artifacts are preserved.

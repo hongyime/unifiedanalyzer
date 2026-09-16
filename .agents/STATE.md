@@ -1,3 +1,21 @@
+Updated: 2026-09-16 02:24 SGT / 2026-09-15 18:24 UTC
+
+Current live update:
+- Shipped v7 zero-paid OSINT plan Do-Next #4 (WhatsMyName account-existence fan-out, opt-in WMN_FANOUT_ENABLED). New src/pipeline/wmn_fanout.py (async httpx, bounded concurrency 20, per-site 5s / total 90s timeouts, staged to handle_discoveries with tool=whatsmyname). Registered as a phase in incremental_runner.py alongside handle_fanout + email_recognition. Vendored data/wmn-data.json (716 sites, CC0 from WebBreacher/WhatsMyName main) + data/README.md + scripts/refresh_wmn_data.py. Dockerfile now COPY data/ data/; .gitignore uses data/* + explicit negations. 21 pure-function tests pass locally.
+- Shipped v7 Explore #9 local NL query surface: src/pipeline/graph_nl_query.py (ollama-first, openai-compatible optional, off default) and GET /api/entities/{id}/nl-summary route. Bounded context extraction (30 edges / 30 timeline / 15 platforms cap) so a modest local model can consume it. All failure paths (disabled, entity-missing, backend-unreachable) return the raw dossier context, never raise. 20 pure-function tests pass locally; no live LLM required.
+- Corrected earlier v7 gap analysis: holehe is present as email_recognition.py (Track-C Holehe silent email-recognition), holehe 1.61 installed in analyzer + scheduler containers.
+- Live flags: WMN_FANOUT_ENABLED=1 in analyzer .env (waiting on Dockerfile-updated image before it takes effect on the running container — analyzer image is still 2 weeks old, rebuild in flight); GRAPH_NL_ENABLED=0 (no local LLM backend running on this host yet).
+- Verification pending: analyzer image rebuild finish → docker compose up -d analyzer scheduler → WMN phase will surface in the next incremental cycle. GRAPH_NL_ENABLED remains 0 until an ollama/openrouter backend is available.
+
+Updated: 2026-08-25 14:20 UTC / 22:20 SGT
+# Active recovery — 2026-09-16
+
+User requested post-reboot recovery, log/config inspection, and completion of interrupted agent tasks. Initial live checks: Analyzer root HTTP timed out at 10s; Docker inventory initially timed out at 30s but subsequently succeeded, showing Analyzer API/scheduler/face worker already running and Collector Postgres/dashboard container health green. Windows has low free RAM; local data disks have ample space. No restart or data mutation has been performed in this recovery pass. Older green readiness claims below are historical, not current proof.
+
+Preserve pre-existing work: modified `src/api/routes/entities.py`, untracked `src/pipeline/graph_nl_query.py` and `tests/test_graph_nl_query_pure.py`, existing state/journal edits and `tmp_data_quality_ledger_latest.json`. Next: inspect current application logs/readiness, reconcile hidden agent task state, then diagnose before changing production behavior. Parallel explore helpers could not launch because their configured model was unavailable; direct inspection continues.
+
+Confirmed readiness diagnosis: `_production_readiness()` passes its workflow and value-path probes into `asyncio.gather()` without the deadline wrappers used for the other five probes. Live in-container readiness exceeded 55s; new parameterized regression `test_production_readiness_bounds_stalled_analyst_probe` fails for both probes with `escaped the global readiness deadline` (2 failed, 51 deselected). Minimal repair: apply the existing health/stage deadline to those two probes; preserve explicit failed-check evidence. Host and in-container dashboard root now return HTTP 200. PostgreSQL separately entered crash recovery at 01:24 UTC and again 02:30 UTC; container-level OOM counters are zero, so root cause of those crashes is still under investigation.
+
 # Portfolio review — 2026-09-10
 
 Reviewed the storage boundary, compact Supabase export path, scheduler export batching and frontend health connection. All 388 tracked Python files parsed without importing the application. This is a separate Docker/PostgreSQL/media service with optional normalized-indicator export to Supabase; its local timers and files are not Vercel function usage.
@@ -361,12 +379,12 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-09-10 10:59:06 +08:00
+- Updated: 2026-09-15 22:49:46 +08:00
 - Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 80d0adf
+- HEAD: 36ca657
 - Dirty files: 1
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->

@@ -8,6 +8,7 @@ from src.db.connection import get_analyzer_pool, get_collector_pool
 from src.api.face_lookup import representative_faces, face_crop_url
 from src.merge_candidates import merge_candidate_min_weight
 from src.api.routes.uuid_validation import require_uuid
+from src.pipeline.graph_nl_query import summarise_entity as _nl_summarise_entity
 
 router = APIRouter(tags=["entities"])
 
@@ -692,3 +693,30 @@ async def get_entity(entity_id: str):
             "phone_intel": enrichment_phone,
         },
     }
+
+
+
+# ---------------------------------------------------------------------------
+# NL summary — v7 Explore #9: local-LLM Q&A over entity graph + timeline
+# ---------------------------------------------------------------------------
+
+
+@router.get("/entities/{entity_id}/nl-summary")
+async def entity_nl_summary(
+    entity_id: str,
+    question: str = Query("", description="Optional question; blank = free-form summary"),
+):
+    """Compose a natural-language answer over the entity's graph + timeline.
+
+    Backend is env-configured (Ollama by default, OpenAI-compatible optional)
+    — see ``src.pipeline.graph_nl_query`` for env vars. Default disabled;
+    set ``GRAPH_NL_ENABLED=1`` in ``.env`` to opt in.
+
+    The response is a JSON dict with either:
+      * ``{"answer": str, "context": ..., "backend": str}`` on success, or
+      * ``{"skipped": <reason>, ...}`` when disabled, entity missing, or the
+        backend is unreachable (context is still attached when available so
+        the client can render the raw evidence).
+    """
+    entity_id = require_uuid(entity_id)
+    return await _nl_summarise_entity(entity_id, question)
