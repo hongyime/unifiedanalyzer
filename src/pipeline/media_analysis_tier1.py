@@ -25,14 +25,17 @@ import shutil
 import subprocess
 from collections import defaultdict
 
-import cv2
-import numpy as np
-from PIL import Image
-
-# Cap OpenCV's internal thread pool (DNN face detect/embed) so it doesn't peg
-# every core. Runtime call — independent of env-var import timing. media_common
-# (imported below) already set OMP/BLAS caps for numpy/onnxruntime.
-cv2.setNumThreads(int(os.getenv("MEDIA_CV_NUM_THREADS", "2")))
+try:
+    import cv2
+    import numpy as np
+    from PIL import Image
+    cv2.setNumThreads(int(os.getenv("MEDIA_CV_NUM_THREADS", "2")))
+    _CV2_AVAILABLE = True
+except ImportError:
+    cv2 = None  # type: ignore[assignment]
+    np = None  # type: ignore[assignment]
+    Image = None  # type: ignore[assignment]
+    _CV2_AVAILABLE = False
 
 from src.db.connection import get_analyzer_pool
 from src.pipeline.media_common import (

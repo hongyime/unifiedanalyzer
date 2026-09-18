@@ -69,6 +69,11 @@ services:
       - unifiedcollector_default
     restart: unless-stopped
     logging: *default-logging
+    # MEM-CAP: 512MB ceiling for the API server. Uvicorn + FastAPI + deferred
+    # route mounts (FAISS, face search) fit in ~300MB warm; 512MB gives headroom
+    # for concurrent request spikes without letting a leak starve neighbours.
+    mem_limit: 512m
+    init: true
 
   # Analysis scheduler: a SEPARATE process running the periodic incremental /
   # full-resolution pipeline (Phase 6 media analysis, identity resolution,
@@ -86,8 +91,8 @@ services:
     # Dynamic (env-tunable) resource caps — bounds the scheduler (entity
     # resolution + recon_bridge tick) without harming a full-resolution run.
     # Generous by design; lower via env if the box gets tight.
-    mem_limit: ${ANALYZER_SCHED_MEM:-3g}
-    cpus: "${ANALYZER_SCHED_CPUS:-3.0}"
+    mem_limit: ${ANALYZER_SCHED_MEM:-1536m}
+    cpus: "${ANALYZER_SCHED_CPUS:-2.0}"
     env_file:
       - ../.env
     environment:
@@ -241,6 +246,9 @@ services:
       - unifiedcollector_default
     restart: unless-stopped
     logging: *default-logging
+    # MEM-CAP: face_worker loads ONNX models + FAISS index into RSS. 768MB
+    # covers the ~700MB warm state with headroom for batch spikes.
+    mem_limit: 768m
     # Soft CPU priority — same as the scheduler: ONNX face inference yields to
     # host-critical neighbours under contention rather than pegging cores.
     cpu_shares: 512
@@ -274,6 +282,7 @@ services:
     restart: unless-stopped
     logging: *default-logging
     cpu_shares: 256
+    mem_limit: 128m
 
 # CIFS volumes for the W:/X: drives on Tailscale host Prawn-E14. Credentials
 # come from .env (SMB_HOST/SMB_USER/SMB_PASS, gitignored) — pass
