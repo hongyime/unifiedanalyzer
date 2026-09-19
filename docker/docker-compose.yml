@@ -104,7 +104,7 @@ services:
       FACE_MODEL_ROOT: /app/media_derived/faces
       # Scheduled analyzer DB dumps land on the host at
       # Z:/unifiedanalyzer/backups/db via the bind mount below.
-      ANALYZER_DB_BACKUP_ENABLED: "${ANALYZER_DB_BACKUP_ENABLED:-1}"
+      ANALYZER_DB_BACKUP_ENABLED: "${ANALYZER_DB_BACKUP_ENABLED:-0}"
       ANALYZER_DB_BACKUP_DIR: /app/backups/db
       ANALYZER_DB_BACKUP_HOUR_UTC: "${ANALYZER_DB_BACKUP_HOUR_UTC:-2}"
       ANALYZER_DB_BACKUP_RETENTION_DAILY: "${ANALYZER_DB_BACKUP_RETENTION_DAILY:-7}"
