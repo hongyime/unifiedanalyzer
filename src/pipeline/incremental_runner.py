@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from asyncpg import UniqueViolationError
 
-from src.db.connection import get_analyzer_pool, is_collector_unavailable_error, is_db_transient_error
+from src.db.connection import get_analyzer_pool, is_collector_unavailable_error, is_db_transient_error, reconnect_collector_pool
 from src.pipeline.entity_resolver import resolve_entities
 from src.pipeline.beeper_bridge import bridge_beeper
 from src.pipeline.facebook_author_resolver import resolve_facebook_author_entities
@@ -96,6 +96,7 @@ logger = logging.getLogger(__name__)
 # the 2-5h total runtime the old start-based timeout kept tripping on.
 _STALE_HEARTBEAT_MINUTES = int(os.getenv("STALE_RUN_HEARTBEAT_MINUTES", "30"))
 _HEARTBEAT_INTERVAL_SECONDS = 60
+_PHASE_TIMEOUT_SECONDS = int(os.getenv("PHASE_TIMEOUT_SECONDS", "600"))
 _RUN_CLAIM_LOCK_KEY = 0x55414E4152554E  # "UANARUN": serialize run creation.
 _COVERAGE_SOURCE_BUCKETS = ("by_source", "by_type", "by_platform")
 _PROCESSED_KEYS = (
@@ -785,7 +786,10 @@ async def _run_phase(run_id: str, run_type: str, name: str, fn, *, default=None)
     status, err = "ok", None
     result = default
     try:
-        result = await _call_phase(fn)
+        if _PHASE_TIMEOUT_SECONDS > 0:
+            result = await asyncio.wait_for(_call_phase(fn), timeout=_PHASE_TIMEOUT_SECONDS)
+        else:
+            result = await _call_phase(fn)
     except Exception as e:  # noqa: BLE001 — phases are intentionally non-fatal
         detail = str(e).strip()
         err = f"{type(e).__name__}: {detail}" if detail else type(e).__name__
@@ -819,8 +823,13 @@ async def _run_phase(run_id: str, run_type: str, name: str, fn, *, default=None)
 
 
 async def _run_secondary_phases(run_id: str, run_type: str) -> None:
+    from pathlib import Path
     for name, fn in _secondary_phases():
         await _run_phase(run_id, run_type, name, fn)
+        try:
+            Path("/tmp/scheduler_heartbeat").touch()
+        except OSError:
+            pass
 
 
 async def _alert_on_repeated_phase_failures(threshold: int = 3) -> None:
@@ -857,6 +866,7 @@ async def run_incremental() -> dict:
 
     stats = {"entities": 0, "events": 0, "alerts": 0, "signals": 0}
     heartbeat = asyncio.create_task(_heartbeat_loop(run_id))
+    await reconnect_collector_pool()
 
     try:
         since = await get_last_run_time("incremental")
@@ -1008,6 +1018,7 @@ async def run_full_resolution() -> dict:
 
     stats = {"entities": 0, "events": 0, "alerts": 0, "signals": 0}
     heartbeat = asyncio.create_task(_heartbeat_loop(run_id))
+    await reconnect_collector_pool()
 
     try:
         # P0-1 (identity_system_review_plan.md): full resolution re-resolves every

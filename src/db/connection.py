@@ -162,6 +162,33 @@ def get_collector_pool() -> asyncpg.Pool:
     return _collector_pool
 
 
+async def reconnect_collector_pool() -> bool:
+    """Try to (re)create the collector pool if it is currently None.
+
+    Called at the top of each incremental/full run so a startup timeout
+    does not doom every subsequent run for the lifetime of the process.
+    Returns True when a usable pool is available afterwards."""
+    global _collector_pool
+    if _collector_pool is not None:
+        return True
+    dsn = os.getenv("COLLECTOR_DATABASE_URL")
+    if not dsn:
+        return False
+    timeout = float(os.getenv("COLLECTOR_DB_RECONNECT_TIMEOUT_SECONDS", "10"))
+    try:
+        params = _parse_dsn(dsn)
+        max_size = int(os.getenv("DB_MAX_POOL_SIZE", "10"))
+        _collector_pool = await asyncio.wait_for(
+            _create_pool_once(params, max_size),
+            timeout=timeout,
+        )
+        logger.info("Collector database reconnected (was unavailable at startup)")
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Collector reconnect failed: %s", e.__class__.__name__)
+        return False
+
+
 def is_collector_unavailable_error(exc: BaseException) -> bool:
     """Return True for optional-upstream connectivity failures.
 
