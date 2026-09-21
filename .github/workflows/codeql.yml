@@ -1,16 +1,47 @@
 name: CodeQL Analysis
 
-# GitHub default setup is the automatic scanner for Actions, JavaScript and Python.
-# Retain advanced setup only as a manual fallback; disable default setup before
-# deliberately running this workflow. Running both rejects the advanced upload.
+# COST-OPTIMISED (2026-07-04):
+# - `paths` filter so CodeQL only fires when actual code changes (not markdown/config).
+# - `concurrency: cancel-in-progress` cancels stale runs when new commits land.
+# - Weekly cron kept but shifted off Monday spike (spreads load, avoids stacking with sync workflows).
 on:
-  workflow_dispatch:
-    inputs:
-      default_setup_disabled:
-        description: "Default CodeQL setup has been disabled for this deliberate advanced scan"
-        required: true
-        type: boolean
-        default: false
+  push:
+    branches: [main, master]
+    paths:
+      - "**.ts"
+      - "**.tsx"
+      - "**.js"
+      - "**.jsx"
+      - "**.mjs"
+      - "**.cjs"
+      - "**.vue"
+      - "**.py"
+      - "**.pyi"
+      - "**/package.json"
+      - "**/pnpm-lock.yaml"
+      - "**/package-lock.json"
+      - "**/requirements*.txt"
+      - "**/pyproject.toml"
+      - ".github/workflows/codeql.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "**.ts"
+      - "**.tsx"
+      - "**.js"
+      - "**.jsx"
+      - "**.mjs"
+      - "**.cjs"
+      - "**.vue"
+      - "**.py"
+      - "**.pyi"
+      - "**/package.json"
+      - "**/pnpm-lock.yaml"
+      - "**/package-lock.json"
+      - "**/requirements*.txt"
+      - "**/pyproject.toml"
+  schedule:
+    - cron: "0 14 * * 3" # Weekly Wed 10 PM SGT (off Monday spike)
 
 concurrency:
   group: codeql-${{ github.workflow }}-${{ github.ref }}
@@ -27,7 +58,7 @@ jobs:
   # did a full checkout (~30-60s each) before exiting — ~100 wasted min/week
   # on push-heavy private repos like unifiedcollector.
   detect:
-    if: github.event.repository.private == false && inputs.default_setup_disabled == true
+    if: github.event.repository.private == false
     runs-on: ubuntu-latest
     outputs:
       languages: ${{ steps.langs.outputs.languages }}
