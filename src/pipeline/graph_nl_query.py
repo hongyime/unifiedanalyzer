@@ -46,9 +46,11 @@ import logging
 import os
 from typing import Any
 
+import asyncpg
 import httpx
 
 from src.db.connection import get_analyzer_pool
+from src.pipeline.relationship_confidence import confidence_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -123,30 +125,30 @@ async def _extract_context(entity_id: str) -> dict[str, Any]:
 
         links = await conn.fetch(
             """
-            SELECT platform, platform_username, platform_user_id, last_seen_at
+            SELECT source, platform_username, platform_id, updated_at
             FROM entity_platform_links
-            WHERE entity_id = $1::uuid
-            ORDER BY last_seen_at DESC NULLS LAST
+            WHERE entity_id = $1::uuid AND retracted_at IS NULL
+            ORDER BY updated_at DESC NULLS LAST
             LIMIT $2
             """,
             entity_id, max_links,
         )
         ctx["platforms"] = [
             {
-                "platform": r["platform"],
+                "platform": r["source"],
                 "username": r["platform_username"],
-                "platform_user_id": r["platform_user_id"],
-                "last_seen_at": r["last_seen_at"].isoformat() if r["last_seen_at"] else None,
+                "platform_user_id": r["platform_id"],
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
             }
             for r in links
         ]
 
         edges = await conn.fetch(
             """
-            SELECT from_entity_id, to_entity_id, relationship_type,
-                   confidence_bucket, weight, source, last_seen_at, why
-            FROM graph_edges
-            WHERE from_entity_id = $1::uuid OR to_entity_id = $1::uuid
+            SELECT entity_a_id, entity_b_id, relationship_type,
+                   cross_platform, weight, sources, last_seen_at
+            FROM entity_relationships
+            WHERE entity_a_id = $1::uuid OR entity_b_id = $1::uuid
             ORDER BY last_seen_at DESC NULLS LAST
             LIMIT $2
             """,
@@ -154,14 +156,14 @@ async def _extract_context(entity_id: str) -> dict[str, Any]:
         )
         ctx["edges"] = [
             {
-                "from_id": str(r["from_entity_id"]),
-                "to_id": str(r["to_entity_id"]),
+                "from_id": str(r["entity_a_id"]) if r["entity_a_id"] else None,
+                "to_id": str(r["entity_b_id"]) if r["entity_b_id"] else None,
                 "relationship_type": r["relationship_type"],
-                "confidence": r["confidence_bucket"],
+                "confidence": confidence_bucket(r["relationship_type"], r["weight"], bool(r["cross_platform"])),
                 "weight": r["weight"],
-                "source": r["source"],
+                "source": "entity_relationships",
                 "last_seen_at": r["last_seen_at"].isoformat() if r["last_seen_at"] else None,
-                "why": r["why"],
+                "evidence": r["sources"],
             }
             for r in edges
         ]
@@ -301,7 +303,10 @@ async def summarise_entity(entity_id: str, question: str = "") -> dict[str, Any]
             "hint": "set GRAPH_NL_ENABLED=1 in .env to enable graph_nl_query",
         }
 
-    context = await _extract_context(entity_id)
+    try:
+        context = await _extract_context(entity_id)
+    except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError, RuntimeError) as exc:
+        return {"skipped": "context_unavailable", "entity_id": entity_id, "error": exc.__class__.__name__}
     if context["entity"] is None:
         return {"skipped": "entity_not_found", "entity_id": entity_id}
 

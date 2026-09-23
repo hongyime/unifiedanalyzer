@@ -8,6 +8,7 @@ from src.db.connection import get_analyzer_pool, get_collector_pool
 from src.api.face_lookup import representative_faces, face_crop_url
 from src.api.routes.uuid_validation import require_uuid
 from src.merge_candidates import merge_candidate_min_weight
+from src.pipeline.relationship_confidence import confidence_bucket
 from src.pipeline.location_evidence import (
     attach_location_evidence_key,
     fetch_location_evidence_statuses,
@@ -78,19 +79,6 @@ def _decode_sources(sources):
         except Exception:
             return {}
     return sources if isinstance(sources, dict) else {}
-
-
-def confidence_bucket(relationship_type: str | None, weight: int | float | None, cross_platform: bool = False) -> str:
-    rtype = relationship_type or ""
-    if rtype in {"same_person_probability", "manual_identity", "identity_label"}:
-        return "hard" if float(weight or 0) >= 80 else "strong"
-    if cross_platform and rtype in {"shared_phone", "shared_email", "shared_website", "bio_mention"}:
-        return "strong"
-    if rtype in {"interaction", "social_graph_overlap", "face_coappearance", "location_copresence"}:
-        return "weak" if float(weight or 0) >= 2 else "context-only"
-    if rtype.startswith("temporal_"):
-        return "context-only"
-    return "weak" if float(weight or 0) >= 3 else "context-only"
 
 
 def _relationship_row(row) -> dict:
