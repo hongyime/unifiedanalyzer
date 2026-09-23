@@ -4,12 +4,18 @@ from __future__ import annotations
 import os
 import asyncio
 import time
+from contextvars import ContextVar
+from functools import partial
 from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.routing import iter_route_contexts
+from src.api.probe_deadline import with_deadline
 
 router = APIRouter(tags=["readiness"])
+_primary_health_snapshot: ContextVar[dict[str, Any] | None] = ContextVar(
+    "primary_readiness_health_snapshot", default=None,
+)
 
 
 USER_STORIES: dict[str, dict[str, str]] = {
@@ -111,7 +117,7 @@ async def _health_status_retry_after_timeout(original_error: Exception, timeout_
         retry_timeout = 90.0
     if retry_timeout <= timeout_seconds:
         return None
-    health = await asyncio.wait_for(_health_status(), timeout=retry_timeout)
+    health = await with_deadline(_health_status, timeout=retry_timeout)
     if isinstance(health, dict):
         health = dict(health)
         health["fallback"] = "isolated_health_retry"
@@ -152,6 +158,11 @@ async def _health_status_fast_fallback(original_error: Exception | None, timeout
         "timeout_seconds": timeout_seconds,
     }
 
+    snapshot = _primary_health_snapshot.get()
+    if snapshot is not None:
+        snapshot.update(status)
+        status = snapshot
+
     async def analyzer_slice() -> None:
         pool = get_analyzer_pool()
         async with pool.acquire() as conn:
@@ -181,13 +192,14 @@ async def _health_status_fast_fallback(original_error: Exception | None, timeout
                 completed_stale_after_seconds=max(incremental_stale_seconds, incremental_interval_seconds),
                 heartbeat_stale_after_seconds=heartbeat_stale_seconds,
             )
+            status["scheduler_freshness"]["incremental"] = inc
             full = await _run_freshness(
                 conn,
                 "full_resolution",
                 completed_stale_after_seconds=max(full_stale_seconds, full_interval_seconds),
                 heartbeat_stale_after_seconds=heartbeat_stale_seconds,
             )
-            status["scheduler_freshness"] = {"incremental": inc, "full_resolution": full}
+            status["scheduler_freshness"]["full_resolution"] = full
             status["supabase_export"] = await _supabase_export_health(conn)
 
             try:
@@ -246,7 +258,12 @@ async def _health_status_fast_fallback(original_error: Exception | None, timeout
                     ),
                 }
 
+    async def face_audit_slice() -> None:
+        async with get_analyzer_pool().acquire() as conn:
             status["face_bridge_audit"] = await audit_face_bridge_collisions(conn, sample_limit=5)
+
+    async def face_processing_slice() -> None:
+        async with get_analyzer_pool().acquire() as conn:
             status["face_processing"] = await _face_processing_health(conn)
 
     async def collector_slice() -> None:
@@ -261,12 +278,29 @@ async def _health_status_fast_fallback(original_error: Exception | None, timeout
             raise ValueError
     except (TypeError, ValueError):
         fallback_timeout = 35.0
+    if original_error is None:
+        try:
+            primary_timeout = min(
+                float(os.getenv("ANALYZER_READINESS_HEALTH_TIMEOUT_SECONDS", "20")),
+                float(os.getenv("ANALYZER_READINESS_TOTAL_BUDGET_SECONDS", "40")),
+            )
+            if primary_timeout <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            primary_timeout = 20.0
+        fallback_timeout = min(fallback_timeout, primary_timeout * 0.9)
     results = await asyncio.gather(
-        asyncio.wait_for(analyzer_slice(), timeout=fallback_timeout),
-        asyncio.wait_for(collector_slice(), timeout=min(fallback_timeout, 10.0)),
+        with_deadline(analyzer_slice, timeout=fallback_timeout),
+        with_deadline(collector_slice, timeout=min(fallback_timeout, 10.0)),
+        with_deadline(face_audit_slice, timeout=fallback_timeout),
+        with_deadline(face_processing_slice, timeout=fallback_timeout),
         return_exceptions=True,
     )
-    errors = [f"{item.__class__.__name__}: {item}" for item in results if isinstance(item, Exception)]
+    errors = [
+        f"{name}: {item.__class__.__name__}: {item}"
+        for name, item in zip(("analyzer", "collector", "face_audit", "face_processing"), results)
+        if isinstance(item, Exception)
+    ]
     if errors:
         status["fallback_errors"] = errors
     if (
@@ -316,7 +350,7 @@ async def _collector_status_retry_after_timeout(
         retry_timeout = 90.0
     if retry_timeout <= timeout_seconds:
         return None
-    collector_status = await asyncio.wait_for(_collector_status(), timeout=retry_timeout)
+    collector_status = await with_deadline(_collector_status, timeout=retry_timeout)
     if isinstance(collector_status, dict):
         collector_status = dict(collector_status)
         summary = dict(collector_status.get("summary") or {})
@@ -1012,7 +1046,7 @@ def build_readiness_report(
             title="Analyzer is populating Supabase with compact indicators",
             ok=(
                 supabase.get("ok") is True
-                and int(supabase.get("ready_to_export") or 0) == 0
+                and supabase.get("ready_to_export") == 0
                 and supabase_exported_count > 0
                 and supabase.get("raw_mirror") is False
                 and supabase_remote.get("reachable") is True
@@ -1032,7 +1066,7 @@ def build_readiness_report(
         _check(
             check_id="decision_log_durable",
             title="Decision log has no pending or failed JSONL writes",
-            ok=int(decision_log.get("pending_jsonl") or 0) == 0 and int(decision_log.get("jsonl_errors") or 0) == 0,
+            ok=decision_log.get("pending_jsonl") == 0 and decision_log.get("jsonl_errors") == 0,
             detail="Durable decisions must not be stuck in DB-only state.",
             evidence=decision_log,
         ),
@@ -1191,16 +1225,24 @@ async def _production_readiness(request_app: Any | None = None) -> dict[str, Any
             return 0.0
         return min(configured, remaining)
 
-    workflow_coro = _analyst_workflow_status(request_app) if request_app is not None else _analyst_workflow_status()
-    value_path_coro = _analyst_value_path_status()
+    workflow_probe = partial(_analyst_workflow_status, request_app) if request_app is not None else _analyst_workflow_status
+    partial_health: dict[str, Any] = {}
+
+    async def primary_health() -> dict[str, Any]:
+        token = _primary_health_snapshot.set(partial_health)
+        try:
+            return await _health_status()
+        finally:
+            _primary_health_snapshot.reset(token)
+
     health_result, collector_result, supabase_result, data_quality_result, action_queue_result, workflow_result, value_path_result = await asyncio.gather(
-        asyncio.wait_for(_health_status(), timeout=_stage_timeout(health_timeout)),
-        asyncio.wait_for(_collector_status(), timeout=_stage_timeout(collector_timeout)),
-        asyncio.wait_for(_supabase_remote_readback_status(), timeout=_stage_timeout(supabase_timeout)),
-        asyncio.wait_for(_data_quality_ledger_status(), timeout=_stage_timeout(data_quality_timeout)),
-        asyncio.wait_for(_collector_action_queue_status(), timeout=_stage_timeout(action_queue_timeout)),
-        asyncio.wait_for(workflow_coro, timeout=_stage_timeout(health_timeout)),
-        asyncio.wait_for(value_path_coro, timeout=_stage_timeout(health_timeout)),
+        with_deadline(primary_health, timeout=_stage_timeout(health_timeout)),
+        with_deadline(_collector_status, timeout=_stage_timeout(collector_timeout)),
+        with_deadline(_supabase_remote_readback_status, timeout=_stage_timeout(supabase_timeout)),
+        with_deadline(_data_quality_ledger_status, timeout=_stage_timeout(data_quality_timeout)),
+        with_deadline(_collector_action_queue_status, timeout=_stage_timeout(action_queue_timeout)),
+        with_deadline(workflow_probe, timeout=_stage_timeout(health_timeout)),
+        with_deadline(_analyst_value_path_status, timeout=_stage_timeout(health_timeout)),
         return_exceptions=True,
     )
     deadline_skips: list[str] = []
@@ -1214,8 +1256,8 @@ async def _production_readiness(request_app: Any | None = None) -> dict[str, Any
             else:
                 # Hard external cap: the isolated retry owns an internal 90s-class
                 # budget, so enforce the global deadline here too.
-                health = await asyncio.wait_for(
-                    _health_status_retry_after_timeout(health_result, timeout_seconds),
+                health = await with_deadline(
+                    partial(_health_status_retry_after_timeout, health_result, timeout_seconds),
                     timeout=retry_budget,
                 )
             if health is None:
@@ -1223,8 +1265,8 @@ async def _production_readiness(request_app: Any | None = None) -> dict[str, Any
                 if fallback_budget <= 0.05:
                     deadline_skips.append("health_fast_fallback")
                     raise asyncio.TimeoutError("health recovery skipped by global readiness deadline")
-                health = await asyncio.wait_for(
-                    _health_status_fast_fallback(
+                health = await with_deadline(
+                    partial(_health_status_fast_fallback,
                         health_result,
                         timeout_seconds,
                     ),
@@ -1242,6 +1284,7 @@ async def _production_readiness(request_app: Any | None = None) -> dict[str, Any
                 "decision_log": {},
                 "face_bridge_audit": {},
                 "face_processing": {},
+                **(partial_health if isinstance(health_result, asyncio.TimeoutError) else {}),
                 "error": f"{health_result.__class__.__name__}: {health_result}",
                 "fallback_error": f"{fallback_exc.__class__.__name__}: {fallback_exc}",
                 "error_component": "analyzer_health",
@@ -1270,8 +1313,8 @@ async def _production_readiness(request_app: Any | None = None) -> dict[str, Any
             if retry_budget <= 0.05:
                 deadline_skips.append("collector_isolated_retry")
             else:
-                collector_status = await asyncio.wait_for(
-                    _collector_status_retry_after_timeout(exc, collector_timeout),
+                collector_status = await with_deadline(
+                    partial(_collector_status_retry_after_timeout, exc, collector_timeout),
                     timeout=retry_budget,
                 )
             if collector_status is None:
@@ -1285,7 +1328,7 @@ async def _production_readiness(request_app: Any | None = None) -> dict[str, Any
                 if fallback_budget <= 0.05:
                     deadline_skips.append("collector_fallback")
                     raise asyncio.TimeoutError("collector recovery skipped by global readiness deadline")
-                collector_status = await asyncio.wait_for(_collector_status_fallback(), timeout=fallback_budget)
+                collector_status = await with_deadline(_collector_status_fallback, timeout=fallback_budget)
                 collector_status["summary"]["primary_error"] = f"{exc.__class__.__name__}: {exc}"
         except Exception as fallback_exc:  # noqa: BLE001 - readiness must report fallback drift
             collector_status = {

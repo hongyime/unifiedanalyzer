@@ -356,16 +356,16 @@ async def test_production_readiness_uses_25s_data_quality_default_timeout(monkey
     async def fake_data_quality():
         return _healthy_data_quality()
 
-    async def fake_wait_for(coro, timeout):
+    async def fake_wait_for(run, timeout):
         seen.append(timeout)
-        return await coro
+        return await run()
 
     monkeypatch.delenv("ANALYZER_READINESS_DATA_QUALITY_TIMEOUT_SECONDS", raising=False)
     monkeypatch.setattr(readiness, "_health_status", fake_health)
     monkeypatch.setattr(readiness, "_collector_status", fake_collector)
     monkeypatch.setattr(readiness, "_supabase_remote_readback_status", fake_supabase)
     monkeypatch.setattr(readiness, "_data_quality_ledger_status", fake_data_quality)
-    monkeypatch.setattr(readiness.asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(readiness, "with_deadline", fake_wait_for)
 
     report = await readiness._production_readiness()
 
@@ -707,23 +707,19 @@ async def test_production_readiness_bounds_collector_fallback_total_timeout(monk
             "row_count": 2368,
         }
 
-    real_wait_for = asyncio.wait_for
+    real_wait_for = readiness.with_deadline
 
-    async def fake_wait_for(coro, timeout):
+    async def fake_wait_for(run, timeout):
         seen.append(timeout)
         if timeout == 12.0:
-            try:
-                coro.close()
-            except AttributeError:
-                pass
             raise asyncio.TimeoutError()
-        return await real_wait_for(coro, timeout=timeout)
+        return await real_wait_for(run, timeout=timeout)
 
     monkeypatch.setattr(readiness, "_health_status", fake_health)
     monkeypatch.setattr(readiness, "_collector_status", slow_collector)
     monkeypatch.setattr(readiness, "_collector_status_fallback", slow_fallback)
     monkeypatch.setattr(readiness, "_supabase_remote_readback_status", fake_supabase)
-    monkeypatch.setattr(readiness.asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(readiness, "with_deadline", fake_wait_for)
     monkeypatch.setenv("ANALYZER_READINESS_COLLECTOR_RETRY_TIMEOUT_SECONDS", "0.01")
     monkeypatch.setenv("ANALYZER_READINESS_COLLECTOR_FALLBACK_TOTAL_TIMEOUT_SECONDS", "12")
 
