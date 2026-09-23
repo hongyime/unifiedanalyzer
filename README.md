@@ -39,7 +39,14 @@ location, indexes faces, and raises alerts.
 - **Telegram merge bot** — the scheduler pushes inline-keyboard cards for
   high-confidence merge candidates. Two buttons ([Same person] / [Not same
   person]) call the analyzer API directly. Resolved cards are unpinned
-  automatically; stale cards after a scheduler restart are silently discarded.
+  automatically; stale cards after a scheduler restart receive an explicit notice.
+
+  The bot handles button callbacks on an owned background thread so synchronous
+  analysis cannot delay acknowledgements. Repeated presses share one in-flight
+  decision; failed decisions retain their pinned retry card. Docker routes these
+  actions through `ANALYZER_INTERNAL_API_URL=http://analyzer:8002`. Callback overload
+  receives bounded, concurrent busy feedback. Graceful scheduler termination waits
+  for active decision writes before closing database pools.
 - **Self-hosted identity graph** — sigma.js and graphology WebGL graph at
   `/graph`. Two modes: entity relationship graph and Telegram network (reply,
   react, forward edges from `entity_interactions`).
@@ -183,6 +190,49 @@ connection-string overrides. It is never a production migration command.
 A regression inserts synthetic Analyzer, Face Tracker and Collector records,
 replays setup and checks row contents, the migration ledger and database
 separation. The full CI coverage requirement remains 100%.
+
+## Local graph summaries
+
+The optional `/api/entities/{entity_id}/nl-summary` endpoint uses the existing
+platform links, relationships, and timeline. Database or inference failures
+return an explicit `skipped` result instead of an invented summary.
+
+On a CPU-only Windows host, start Ollama with the bounded server configuration:
+
+```powershell
+pwsh -NoProfile -File docker/start-graph-ollama.ps1
+```
+
+In another shell, provision the small local model:
+
+```powershell
+ollama pull qwen2.5:0.5b
+ollama create unifiedanalyzer-graph -f docker/Modelfile.graph
+```
+
+The startup script stores models on Z:, disables cloud inference and GPU use,
+allows one loaded model/request, and unloads idle models immediately. A Windows
+logon task can run the script; use normal task priority to avoid starving cold
+startup under background load. Set `GRAPH_NL_ENABLED=1`,
+`GRAPH_NL_MODEL=unifiedanalyzer-graph`, and
+`GRAPH_NL_OLLAMA_URL=http://host.docker.internal:11434` in `.env`, then recreate
+the API container. Cold CPU loads may need `GRAPH_NL_TIMEOUT_S=240`; the
+`GRAPH_NL_MAX_EDGES`, `GRAPH_NL_MAX_TIMELINE`, and `GRAPH_NL_MAX_LINKS` settings
+bound the dossier supplied to the model.
+
+## Database backup verification
+
+Scheduled backups run independently of analysis, with only one backup active
+per scheduler. Graceful shutdown waits for that backup's worker to finish.
+The dashboard image includes PostgreSQL 16 dump/restore tools to match the
+production database version.
+
+Legacy backup defaults exclude derived embedding/text data. For a complete
+database archive, explicitly set `ANALYZER_DB_BACKUP_EXCLUDE_TABLE_DATA=` to an
+empty value. Archive-list validation alone is not a recovery drill: restore the
+complete archive into an isolated PostgreSQL instance with the required
+extensions, check its tables/data/indexes, and retain the archive and verification
+evidence before removing the disposable instance.
 
 ## Frontend dev
 
