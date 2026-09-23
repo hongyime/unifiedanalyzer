@@ -279,7 +279,8 @@ def main():
                         _stale_run_heartbeat_minutes(),
                     )
                 from src.scheduler.scheduler import start_scheduler
-                await start_scheduler()
+                from src.scheduler.lifecycle import run_until_terminated
+                await run_until_terminated(start_scheduler)
             finally:
                 await close_pools()
 

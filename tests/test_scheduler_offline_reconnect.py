@@ -58,6 +58,7 @@ def _base_scheduler_patches(connectivity_fn):
         patch("src.scheduler.scheduler.notify_collector_health", new_callable=AsyncMock),
         patch("src.scheduler.scheduler._check_merge_candidates", new_callable=AsyncMock),
         patch("src.scheduler.scheduler._run_db_backup_check", new_callable=AsyncMock),
+        patch("src.scheduler.scheduler.run_scheduler_heartbeat", new_callable=AsyncMock),
         patch("src.scheduler.scheduler._run_decision_outbox_check", new_callable=AsyncMock),
         patch("src.scheduler.scheduler._stage_collector_priority_hints", new_callable=AsyncMock, return_value={}),
         patch("src.scheduler.scheduler._stage_identity_truth_and_indicators", new_callable=AsyncMock, return_value={}),

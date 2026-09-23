@@ -3,6 +3,11 @@ import asyncio
 import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
+from functools import partial
+
+import anyio
+from anyio.abc import TaskGroup
+from src.scheduler.heartbeat import run_scheduler_heartbeat
 
 from src.db.backup import BackupConfig, BackupError, run_due_backups
 from src.db.connection import check_db_connectivity, get_analyzer_pool, get_collector_pool
@@ -34,6 +39,7 @@ from src.util.audit_log import retry_pending_decision_jsonl
 logger = logging.getLogger(__name__)
 
 _running = False
+_HEARTBEAT_INTERVAL_SECONDS = 60.0
 _MERGE_CANDIDATE_NOTIFY_MIN_CONFIDENCE = merge_candidate_notify_min_confidence()
 # In-memory dedup set for merge-candidate notifications — prevents re-notifying
 # the same pair every scheduler cycle. Reset on process restart (acceptable).
@@ -85,7 +91,9 @@ async def _run_db_backup_check(now: datetime) -> None:
         return
     try:
         config = BackupConfig.from_env()
-        result = await asyncio.to_thread(run_due_backups, config, now=now)
+        result = await anyio.to_thread.run_sync(
+            partial(run_due_backups, config, now=now), abandon_on_cancel=False,
+        )
     except BackupError as exc:
         logger.error("Analyzer DB backup failed: %s", exc)
         return
@@ -788,6 +796,18 @@ async def _push_new_alerts() -> None:
     if len(_sent_alert_ids) > 2000:
         _sent_alert_ids = set(list(_sent_alert_ids)[-1000:])
 async def start_scheduler() -> None:
+    try:
+        async with anyio.create_task_group() as background_tasks:
+            background_tasks.start_soon(
+                run_scheduler_heartbeat, _HEARTBEAT_INTERVAL_SECONDS, name="scheduler_heartbeat",
+            )
+            await _scheduler_loop(background_tasks)
+            background_tasks.cancel_scope.cancel()
+    finally:
+        stop_scheduler()
+
+
+async def _scheduler_loop(background_tasks: TaskGroup) -> None:
     global _running
     _running = True
 
@@ -852,12 +872,11 @@ async def start_scheduler() -> None:
         alert_push_interval,
     )
 
-    # Telegram merge-review callback poller (single asyncio Task, not a new process)
-    _merge_bot_task = None
+    # The task group joins the callback worker before the CLI closes database pools.
     if _env_flag("TELEGRAM_MERGE_BOT_ENABLED"):
         try:
             from src.notifications.merge_bot import run_callback_poller
-            _merge_bot_task = asyncio.create_task(run_callback_poller(), name="merge_bot_poller")
+            background_tasks.start_soon(run_callback_poller, name="merge_bot_poller")
             logger.info("merge-bot: callback poller task created (TELEGRAM_MERGE_BOT_ENABLED=1)")
         except Exception:
             logger.exception("merge-bot: failed to start callback poller (non-fatal)")
@@ -868,6 +887,14 @@ async def start_scheduler() -> None:
     last_health_check: datetime | None = None
     last_status: datetime | None = None
     last_backup_check: datetime | None = None
+    backup_running = False
+
+    async def run_owned_backup(when: datetime) -> None:
+        nonlocal backup_running
+        try:
+            await _run_db_backup_check(when)
+        finally:
+            backup_running = False
     last_decision_outbox_check: datetime | None = None
     last_recon_bridge_check: datetime | None = None
     last_identity_digest: datetime | None = None
@@ -887,14 +914,6 @@ async def start_scheduler() -> None:
             logger.info("Database connectivity restored — scheduler resuming")
             was_offline = False
 
-        # Write a heartbeat file so the Docker HEALTHCHECK can detect a hung process.
-        # If the scheduler hangs (blocked asyncpg call, deadlocked FAISS thread), the
-        # heartbeat file goes stale after 10 min, healthcheck fails 3× → Docker restarts.
-        try:
-            from pathlib import Path
-            Path("/tmp/scheduler_heartbeat").touch()
-        except OSError:
-            pass
         now = datetime.now(timezone.utc)
 
         # Daily digest
@@ -969,11 +988,12 @@ async def start_scheduler() -> None:
                 logger.exception("recon_bridge tick failed")
             last_recon_bridge_check = now
 
-        if backup_enabled and _backup_window_open(now, backup_hour) and (
+        if backup_enabled and not backup_running and _backup_window_open(now, backup_hour) and (
             last_backup_check is None
             or (now - last_backup_check).total_seconds() >= backup_check_interval
         ):
-            await _run_db_backup_check(now)
+            backup_running = True
+            background_tasks.start_soon(run_owned_backup, now, name="database_backup")
             last_backup_check = now
 
         if (
@@ -1020,7 +1040,6 @@ async def start_scheduler() -> None:
             logger.debug("Merge candidate check failed", exc_info=True)
 
         await asyncio.sleep(sleep_seconds)
-
 
 def stop_scheduler() -> None:
     global _running
