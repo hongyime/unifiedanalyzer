@@ -217,4 +217,4 @@
 - 2026-09-22 21:04:21 +08:00 [PRAWN-L390/claude/stop] branch=main head=0a9dc31 dirty=29
 - 2026-09-22 21:11:15 +08:00 [PRAWN-L390/claude/stop] branch=main head=0a9dc31 dirty=29
 - 2026-09-23 23:30:01 +08:00 [PRAWN-L390/claude/stop] branch=main head=0a9dc31 dirty=29
-- 2026-09-24: git-sync push: bot responsiveness (callback-thread isolation, polling/lookup extraction), readiness AnyIO deadline fix, scheduler SIGTERM lifecycle, NL graph pipeline, docker Ollama scripts. Full suite 5493/60/0. Commits 3e77da4 aa007da d08b18b 069299a cc5f04e staged and pushed to origin/main. Final pushed hashes to follow.
+- 2026-09-24: git-sync push COMPLETE. 6 commits pushed to origin/main (22a41a8→af2fd84): 3e77da4 fix(notifications) bot callback-thread isolation; aa007da fix(api) AnyIO readiness deadline; d08b18b fix(scheduler) SIGTERM lifecycle; 069299a feat(pipeline) relationship-confidence + NL graph; cc5f04e chore(docker) Ollama scripts + Dockerfile + compose; af2fd84 docs(agents) MOLT state + JOURNAL + README. Full suite 5493/60/0 before and after commit.

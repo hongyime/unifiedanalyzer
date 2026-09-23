@@ -485,14 +485,14 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-09-24 (git-sync push session)
+- Updated: 2026-09-24 (git-sync push COMPLETE)
 - Machine: PRAWN-L390
 - Harness: opencode/sisyphus
-- Event: push
+- Event: push-complete
 - Branch: main
-- HEAD: cc5f04e (5 commits created, Commit 6 docs in progress)
-- Dirty files: 3 (STATE.md/JOURNAL.md/README.md — Commit 6)
-- Resume hint: Read .agents/STATE.md. git-sync push in progress; await final STATE update with pushed hashes.
+- HEAD: af2fd84
+- Dirty files: 0
+- Resume hint: git-sync push complete 2026-09-24. 6 commits pushed (3e77da4..af2fd84). Next: full restore/build proof and production readiness. See JOURNAL.md for commit list.
 <!-- MOLT_AUTO_END -->
 
 Updated: 2026-08-26 01:35 SGT
