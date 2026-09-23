@@ -85,6 +85,7 @@ services:
     container_name: unifiedanalyzer_scheduler
     image: unifiedanalyzer:latest
     init: true
+    stop_grace_period: 120s
     depends_on:
       - analyzer
     command: ["python", "-m", "src.main", "scheduler"]
@@ -139,6 +140,7 @@ services:
       # Telegram merge-review bot (2-button inline keyboard). Set to 1 to enable
       # the callback poller asyncio Task inside the scheduler loop.
       TELEGRAM_MERGE_BOT_ENABLED: "${TELEGRAM_MERGE_BOT_ENABLED:-1}"
+      ANALYZER_INTERNAL_API_URL: "http://analyzer:8002"
     volumes:
       # Live-mount src (no image rebuild — shared Docker vhdx must not grow).
       - "../src:/app/src"

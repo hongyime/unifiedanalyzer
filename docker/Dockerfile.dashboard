@@ -10,7 +10,23 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-# Stage 2 — python API serving the built frontend as static files.
+FROM pgvector/pgvector:pg16 AS postgres-tools
+
+# Stage 2 — build CPU-only Python dependencies separately from runtime tools.
+FROM python:3.12-slim AS dependencies
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/constraints-cpu.txt /app/constraints-cpu.txt
+ENV PIP_CONSTRAINT=/app/constraints-cpu.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m spacy download en_core_web_trf && python -m pip check
+
+# Stage 3 — Python API and media runtime without compiler tooling.
 FROM python:3.12-slim
 WORKDIR /app
 
@@ -20,18 +36,15 @@ WORKDIR /app
 #  - tesseract-ocr       : 6D image/PDF OCR
 #  - postgresql-client   : pg_dump for analyzer DB backups
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libgl1 ffmpeg tesseract-ocr postgresql-client \
+    libglib2.0-0 libgl1 libxcb1 libgomp1 ffmpeg tesseract-ocr postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# NER enrichment (src/pipeline/entity_enrichment.py) — the transformer model
-# is ~450MB plus torch ~700MB. Bakes into the image so the scheduler doesn't
-# hit the network on first run.
-RUN python -m spacy download en_core_web_trf
+COPY --from=dependencies /usr/local/ /usr/local/
+COPY --from=postgres-tools /usr/lib/postgresql/16/bin/pg_dump /usr/local/bin/pg_dump
+COPY --from=postgres-tools /usr/lib/postgresql/16/bin/pg_restore /usr/local/bin/pg_restore
 
 COPY src/ src/
+COPY data/ data/
 COPY --from=frontend /app/frontend/dist/ frontend/dist/
 COPY docker/embed-backfill-loop.sh /app/embed-backfill-loop.sh
 RUN chmod +x /app/embed-backfill-loop.sh
@@ -41,3 +54,4 @@ RUN chmod +x /app/embed-backfill-loop.sh
 EXPOSE 8002
 
 CMD ["python", "-m", "src.main", "serve"]
+LABEL io.unifiedanalyzer.project="unifiedanalyzer"
