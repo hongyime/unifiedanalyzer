@@ -512,12 +512,12 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-09-24 13:45:47 +08:00
+- Updated: 2026-09-24 16:49:51 +08:00
 - Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: deb0d23
+- HEAD: 8c005b1
 - Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->

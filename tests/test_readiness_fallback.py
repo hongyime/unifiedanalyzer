@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
@@ -109,6 +110,45 @@ def test_missing_decision_log_evidence_cannot_pass(evidence: dict[str, int]) -> 
     check = next(item for item in result["checks"] if item["id"] == "decision_log_durable")
     assert check["ok"] is False, "Missing decision durability counters must not be treated as zero"
 
+
+@pytest.mark.asyncio
+async def test_decision_log_query_failure_is_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _FailingDecisionLogConnection:
+        async def fetchval(self, sql: str) -> int:
+            return 1
+
+        async def fetchrow(self, sql: str, *args: str) -> None:
+            if "audit_log" in sql:
+                raise asyncpg.PostgresError('relation "audit_log" does not exist')
+            return None
+
+    class _FailingDecisionLogPool:
+        @asynccontextmanager
+        async def acquire(self) -> AsyncIterator[_FailingDecisionLogConnection]:
+            yield _FailingDecisionLogConnection()
+
+    async def empty_probe(conn: object) -> dict[str, bool]:
+        return {"ok": True}
+
+    async def empty_audit(conn: object, *, sample_limit: int) -> dict[str, bool]:
+        return {"ok": True}
+
+    monkeypatch.setattr(connection, "get_analyzer_pool", _FailingDecisionLogPool)
+    monkeypatch.setattr(connection, "get_collector_pool", _Pool)
+    monkeypatch.setattr(health, "_supabase_export_health", empty_probe)
+    monkeypatch.setattr(health, "_face_processing_health", empty_probe)
+    monkeypatch.setattr(health, "audit_face_bridge_collisions", empty_audit)
+
+    with caplog.at_level(logging.WARNING, logger="src.api.routes.readiness"):
+        result = await readiness._health_status_fast_fallback(TimeoutError(), 20.0)
+
+    assert result.get("decision_log", {}) == {}, "a failed query must not fabricate zero counters"
+    assert any(
+        "decision_log" in record.message.lower() or "audit_log" in record.message.lower()
+        for record in caplog.records
+    ), "a failed decision-log query must be logged, not silently swallowed"
 
 def test_missing_export_backlog_evidence_cannot_pass() -> None:
     export = {

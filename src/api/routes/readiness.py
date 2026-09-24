@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import logging
 import time
 from contextvars import ContextVar
 from functools import partial
@@ -13,6 +14,7 @@ from fastapi.routing import iter_route_contexts
 from src.api.probe_deadline import with_deadline
 
 router = APIRouter(tags=["readiness"])
+logger = logging.getLogger(__name__)
 _primary_health_snapshot: ContextVar[dict[str, Any] | None] = ContextVar(
     "primary_readiness_health_snapshot", default=None,
 )
@@ -241,6 +243,7 @@ async def _health_status_fast_fallback(original_error: Exception | None, timeout
                     """
                 )
             except Exception:
+                logger.exception("decision_log health query failed")
                 decision_log = None
             if decision_log:
                 status["decision_log"] = {
