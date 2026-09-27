@@ -33,12 +33,31 @@ x-runtime: &runtime
     - dev_media:/app/media_derived
     - dev_decisions:/app/decisions
   depends_on:
+    dev-volume-init:
+      condition: service_completed_successfully
     postgres:
       condition: service_healthy
     collector-postgres:
       condition: service_healthy
 
 services:
+  dev-volume-init:
+    image: unifiedanalyzer-dev/runtime:local
+    pull_policy: never
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    entrypoint: [python, -c]
+    command:
+      - "import os; os.chown('/app/media_derived', 1001, 1001); os.chown('/app/decisions', 1001, 1001)"
+    volumes:
+      - dev_media:/app/media_derived
+      - dev_decisions:/app/decisions
+
   postgres:
     image: pgvector/pgvector:pg16
     environment:

@@ -1,3 +1,12 @@
+# Development volume permissions — 2026-09-27
+
+Added a development-only, network-isolated volume initializer using the existing
+local runtime image. It changes only the media and decisions volume roots to the
+application UID; app services wait for successful completion. No rebuild is needed
+for this fix. The dev Docker stage seeds those owners for future dependency builds.
+Static Compose and scope checks pass; runtime verification and publication remain
+in progress. Production stages, worker opt-in and stored file ownership are preserved.
+
 # Container development checkpoint — 2026-09-27
 
 Applied an explicit `compose.dev.yaml` with separate development databases/data,

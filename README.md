@@ -282,6 +282,12 @@ The supplied database password is a local development placeholder, not an accoun
 credential; override `DEV_POSTGRES_PASSWORD` in `.env.dev` if needed.
 Production `.env`, drive mounts, databases, and data volumes are not inherited.
 
+Fresh development media and decision volumes are initialized before application
+services start. The initializer reuses the existing local runtime image, so this
+ownership fix needs no rebuild. It changes only the two development volume-root
+owners; existing stored files and production volumes are untouched. Future
+dependency builds also create these directories with the correct owner.
+
 Python polling reloaders restart application processes after source edits. Vite
 uses polling and proxies API/WebSocket traffic over the development network.
 This supports Windows and SMB mounts where filesystem events may be absent;
