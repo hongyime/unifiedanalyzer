@@ -106,7 +106,7 @@ cp .env.example .env        # set ANALYZER/COLLECTOR DB URLs; SMB_* for drive sc
 # Use the isolated dev setup below; create .env.dev/dev-input first.
 # Build dev images once, then only when dependency manifests change:
 docker compose --env-file .env.dev -f compose.dev.yaml build
-docker compose --env-file .env.dev -f compose.dev.yaml up --no-build
+docker compose --env-file .env.dev -f compose.dev.yaml up --no-build --pull never
 # Dashboard + API:  http://127.0.0.1:8002
 ```
 
@@ -272,7 +272,7 @@ python -c "from pathlib import Path; Path('.env.dev').touch(exist_ok=True); Path
 # Initial dev image build; repeat only when dependency manifests/system packages change:
 docker compose --env-file .env.dev -f compose.dev.yaml build
 # Daily development:
-docker compose --env-file .env.dev -f compose.dev.yaml up --no-build
+docker compose --env-file .env.dev -f compose.dev.yaml up --no-build --pull never
 ~~~
 
 Use `python3` if your Linux installation does not provide `python`.
@@ -292,7 +292,7 @@ No source edit rebuilds an image or recreates a container.
 After a dependency build, refresh **only anonymous dependency volumes**:
 
 ~~~sh
-docker compose --env-file .env.dev -f compose.dev.yaml up --no-build --renew-anon-volumes
+docker compose --env-file .env.dev -f compose.dev.yaml up --no-build --pull never --renew-anon-volumes
 ~~~
 
 Named development database/model/data volumes are retained. Do not use
@@ -308,7 +308,7 @@ configured development stack at your integration data.
 Workers are opt-in, after development schemas/data are ready:
 
 ~~~sh
-docker compose --env-file .env.dev -f compose.dev.yaml --profile workers up --no-build
+docker compose --env-file .env.dev -f compose.dev.yaml --profile workers up --no-build --pull never
 ~~~
 
 The separate stream-alerts profile disables notifications. Worker source edits
@@ -343,10 +343,38 @@ Downloads using GITHUB_TOKEN inside GitHub Actions do not count against transfer
 
 ### SMB and remote Docker hosts
 
-Run Compose from a checkout path that the selected Docker daemon can access.
-A mapped Windows drive is not automatically available inside WSL or on a remote
-Linux Docker host; use that host's mounted share path or a local checkout when
-necessary. Polling handles missing file-change events after the bind mount works;
-it cannot make an inaccessible path visible. The maintenance checks validated
-Compose configuration and Windows/Linux reload fixtures, but did not launch this
-full stack or verify its actual SMB bind mount.
+Use Docker Compose 2.32.2+ and the explicit `compose.watch.yaml` overlay when the
+Docker host cannot bind-mount this checkout. These commands work in PowerShell
+and Linux shells after preparing the private `.env.dev` described above:
+
+~~~sh
+# Explicit initial third-party image acquisition:
+docker compose --env-file .env.dev -f compose.dev.yaml pull postgres collector-postgres
+# One initial development build; repeat only for dependency/system-package changes:
+docker compose --env-file .env.dev -f compose.dev.yaml -f compose.watch.yaml build
+# Source edits synchronize into the same running containers:
+docker compose --env-file .env.dev -f compose.dev.yaml -f compose.watch.yaml up --no-build --pull never --watch
+~~~
+
+The initial dev image includes ordinary source after dependency installation.
+Later edits use `sync` only, with no rebuild actions. Source binds and anonymous
+dependency/build volumes are removed in this overlay; dependencies remain in
+the image. Named development data is retained, and worker/account profiles stay
+opt-in. Private filenames and dependency manifests are excluded from Watch.
+Verify an edit on the actual SMB client because share event delivery varies.
+
+After stopping Watch, remove only the development containers/networks:
+
+~~~sh
+docker compose --env-file .env.dev -f compose.dev.yaml -f compose.watch.yaml down --remove-orphans
+~~~
+
+For disposable tests, use `-p unifiedanalyzer-smoke-dev` consistently and add `--volumes`
+to that test project's final `down`. Keep the reusable dev images so daily startup
+needs no build or pull. Do not delete named volumes containing development data
+you want to retain.
+
+
+The sync overlay uses an empty, dedicated `dev_input` volume instead of mounting
+host media. Its collector database still requires synthetic development schema/data
+for integration features; no production database is inherited.

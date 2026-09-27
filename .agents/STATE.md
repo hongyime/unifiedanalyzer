@@ -686,3 +686,8 @@ Machine-specific values in this document use privacy placeholders.
 ## 2026-09-27: Maintenance CI follow-up
 
 PR #6 now restores the enclosing runner signal callbacks during scheduler teardown and preserves the dashboard ruleset build contract. All five focused Linux regression tests passed in a disposable environment that was removed afterward. The prior full run had 5551 passing tests, two failures addressed here, and 46.49% coverage against its existing 100% gate; the coverage threshold is unchanged. The final full run passes all 5,553 tests (one skipped), with 46.50% coverage. Its only failing CI result is the existing 100% coverage gate; the earlier September 16 run likewise had all 5,501 tests pass and failed at 45.71% coverage. The coverage job remains visibly failing; this is not a claim of a green workflow or production readiness.
+
+
+## 2026-09-27: Explicit SMB Compose Watch
+
+Added initial dev-source seeding after dependency installation and a sync-only overlay for checkouts inaccessible to the Docker host. The overlay removes source binds/anonymous dependency volumes, retains named dev data, preserves worker opt-in, and uses existing no-pull local image policies. Static parsing across all profiles passed; actual initial builds and SMB edit tests are tracked separately. Production stage instructions and dependency declarations are unchanged.

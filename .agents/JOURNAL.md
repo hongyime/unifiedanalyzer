@@ -244,3 +244,5 @@ Added explicit development Compose, bind-mounted polling reload, isolated depend
 - 2026-09-27: Preserve caller signal handlers on scheduler teardown; verify five focused Linux regressions and retain the full-suite coverage requirement.
 
 - 2026-09-27: Replace remaining private host and home identifiers in newer upstream handoffs while preserving recovery instructions.
+
+- 2026-09-27: Add explicit sync-only SMB development with one initial source-seeded image build; preserve private input isolation, worker opt-in and production configuration.
