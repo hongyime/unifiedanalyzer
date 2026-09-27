@@ -20,6 +20,8 @@ RUN useradd -u 1001 -m appuser \
 
 FROM dependencies AS dev
 RUN pip install --no-cache-dir watchfiles==1.3.0
+COPY --chown=appuser:appuser src/ /app/src/
+COPY --chown=appuser:appuser data/ /app/data/
 USER appuser
 EXPOSE 8001
 CMD ["watchfiles", "--target-type", "command", "python -m src.main serve", "/app/src"]
