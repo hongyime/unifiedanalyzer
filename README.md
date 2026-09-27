@@ -103,8 +103,10 @@ The scheduler and face_worker containers accept dynamic resource caps via
 
 ```bash
 cp .env.example .env        # set ANALYZER/COLLECTOR DB URLs; SMB_* for drive scan
-# Build + start all three services (the .env supplies CIFS creds for W:/X:):
-docker compose -f docker/docker-compose.yml --env-file .env up -d --build
+# Use the isolated dev setup below; create .env.dev/dev-input first.
+# Build dev images once, then only when dependency manifests change:
+docker compose --env-file .env.dev -f compose.dev.yaml build
+docker compose --env-file .env.dev -f compose.dev.yaml up --no-build
 # Dashboard + API:  http://127.0.0.1:8002
 ```
 
@@ -143,7 +145,7 @@ InsightFace detect-and-index flow as collector media. Drives are mounted into th
 container:
 
 - **Y: / Z:** — local, bind-mounted read-only at `/mnt/y`, `/mnt/z`.
-- **W: / X:** — SMB shares on the Tailscale host `Prawn-E14`, mounted as **CIFS
+- **W: / X:** — SMB shares on the Tailscale host `your SMB host`, mounted as **CIFS
   volumes** (`docker_wdrive` / `docker_xdrive`). Credentials come from the
   gitignored `.env` (`SMB_HOST`, `SMB_USER`, `SMB_PASS`).
 
@@ -253,3 +255,98 @@ and served by the `analyzer` service.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Isolated container development on Windows, WSL, and Linux
+
+Use the explicit `compose.dev.yaml` on a development host. It creates a separate
+`unifiedanalyzer-dev` project with fresh named data volumes and loopback-only ports.
+The existing deployment Compose file remains separate. Source reaches dev
+containers through bind mounts; Python dependencies live in `/opt/venv`, and an
+anonymous volume shields frontend `node_modules` from the host bind mount.
+
+Run from this repository in PowerShell or a Linux shell:
+
+~~~sh
+# Prepare local settings/input without reading or overwriting an existing env file:
+python -c "from pathlib import Path; Path('.env.dev').touch(exist_ok=True); Path('dev-input').mkdir(exist_ok=True)"
+# Initial dev image build; repeat only when dependency manifests/system packages change:
+docker compose --env-file .env.dev -f compose.dev.yaml build
+# Daily development:
+docker compose --env-file .env.dev -f compose.dev.yaml up --no-build
+~~~
+
+Use `python3` if your Linux installation does not provide `python`.
+Open the frontend at http://localhost:15173 and API at
+http://localhost:18002. Put synthetic development input under `dev-input/`.
+The supplied database password is a local development placeholder, not an account
+credential; override `DEV_POSTGRES_PASSWORD` in `.env.dev` if needed.
+Production `.env`, drive mounts, databases, and data volumes are not inherited.
+
+Python polling reloaders restart application processes after source edits. Vite
+uses polling and proxies API/WebSocket traffic over the development network.
+This supports Windows and SMB mounts where filesystem events may be absent;
+the Docker host must still be able to bind-mount this checkout. Test an edit on
+the actual host, or use a host-local clone if its mapped SMB drive is unavailable.
+No source edit rebuilds an image or recreates a container.
+
+After a dependency build, refresh **only anonymous dependency volumes**:
+
+~~~sh
+docker compose --env-file .env.dev -f compose.dev.yaml up --no-build --renew-anon-volumes
+~~~
+
+Named development database/model/data volumes are retained. Do not use
+`down -v` to refresh dependencies. Dev image tags use `pull_policy: never`; a
+missing image requires the explicit initial build above.
+
+The API initializes its own development schema. The isolated collector database
+starts empty: integration workflows need the collector's development schema and
+synthetic seed data. Its absence remains visible as degraded collector features;
+no production collector is contacted by default. Point only a deliberately
+configured development stack at your integration data.
+
+Workers are opt-in, after development schemas/data are ready:
+
+~~~sh
+docker compose --env-file .env.dev -f compose.dev.yaml --profile workers up --no-build
+~~~
+
+The separate stream-alerts profile disables notifications. Worker source edits
+restart the worker process and can restart in-progress development jobs.
+The dashboard image preserves the existing spaCy NER model; the API-only image
+omits that optional model. Runtime compilers are removed, and vendored
+WhatsMyName rules are included. The historical Dockerfile.hotfix repair libraries
+are now included in the main recipes, so that local repair build is unnecessary.
+
+Production targets are named `production` and publish remotely through
+`.github/workflows/docker-publish.yml` on the default branch or manual dispatch.
+For an optional production download, run the explicit command:
+
+~~~sh
+docker pull ghcr.io/hongyime/unifiedanalyzer/dashboard:latest
+~~~
+
+CI emits latest/default-branch and short-SHA tags (semver metadata on version
+refs). It builds linux/amd64 with provenance/SBOM disabled and validates every
+tagged manifest before retention. Any index, attestation, unknown manifest, or
+registry error stops cleanup. Retention keeps the newest three tagged versions
+plus latest, and three untagged versions; tagged history is bounded separately.
+The package must grant this repository Actions admin access for deletion.
+Do not switch these packages to multi-platform publication without revisiting
+retention. Image sizes are unknown until CI reports compressed layer sizes;
+computer-vision and ML dependencies can exceed the approximate 200 MB target.
+
+Package visibility must be checked on the package itself. Treat 500 MB storage
+and 1 GB/month transfer for private packages only as planning assumptions, and
+verify current [GitHub billing documentation](https://docs.github.com/en/billing/concepts/product-billing/github-packages).
+Downloads using GITHUB_TOKEN inside GitHub Actions do not count against transfer.
+
+### SMB and remote Docker hosts
+
+Run Compose from a checkout path that the selected Docker daemon can access.
+A mapped Windows drive is not automatically available inside WSL or on a remote
+Linux Docker host; use that host's mounted share path or a local checkout when
+necessary. Polling handles missing file-change events after the bind mount works;
+it cannot make an inaccessible path visible. The maintenance checks validated
+Compose configuration and Windows/Linux reload fixtures, but did not launch this
+full stack or verify its actual SMB bind mount.

@@ -1,0 +1,122 @@
+name: unifiedanalyzer-dev
+
+x-runtime: &runtime
+  image: unifiedanalyzer-dev/runtime:local
+  pull_policy: never
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.dashboard
+    target: dev
+  init: true
+  env_file: .env.dev
+  environment: &development-environment
+    API_PORT: "8002"
+    API_HOST: 0.0.0.0
+    ANALYZER_DATABASE_URL: postgres://dev:${DEV_POSTGRES_PASSWORD:-dev-only-change-me}@postgres:5432/unifiedanalyzer
+    COLLECTOR_DATABASE_URL: postgres://dev:${DEV_POSTGRES_PASSWORD:-dev-only-change-me}@collector-postgres:5432/unifiedcollector
+    COLLECTOR_DASHBOARD_URL: http://127.0.0.1:9
+    ANALYZER_APPLY_SCHEMA_ON_STARTUP: "1"
+    RUN_SCHEDULER: "0"
+    TELEGRAM_MERGE_BOT_ENABLED: "0"
+    ANALYZER_DB_BACKUP_ENABLED: "0"
+    MEDIA_DERIVED_PATH: /app/media_derived
+    COLLECTOR_MEDIA_ROOT: /app/collector_root
+    FACE_MODEL_ROOT: /app/media_derived/faces
+    ANALYZER_DECISION_LOG_DIR: /app/decisions
+    DRIVE_SOURCES: "[]"
+    WATCHFILES_FORCE_POLLING: "true"
+    WATCHFILES_POLL_DELAY_MS: "500"
+  volumes:
+    - ./src:/app/src
+    - ./data/wmn-data.json:/app/data/wmn-data.json:ro
+    - ./dev-input:/app/collector_root/media:ro
+    - dev_media:/app/media_derived
+    - dev_decisions:/app/decisions
+  depends_on:
+    postgres:
+      condition: service_healthy
+    collector-postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: unifiedanalyzer
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: ${DEV_POSTGRES_PASSWORD:-dev-only-change-me}
+    volumes:
+      - dev_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d unifiedanalyzer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  collector-postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: unifiedcollector
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: ${DEV_POSTGRES_PASSWORD:-dev-only-change-me}
+    volumes:
+      - dev_collector_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d unifiedcollector"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  analyzer:
+    <<: *runtime
+    ports:
+      - "127.0.0.1:${DEV_API_PORT:-18002}:8002"
+
+  scheduler:
+    <<: *runtime
+    profiles: [workers]
+    environment:
+      <<: *development-environment
+      ANALYZER_APPLY_SCHEMA_ON_STARTUP: "0"
+    command: ["watchfiles", "--target-type", "command", "python -m src.main scheduler", "/app/src"]
+
+  face_worker:
+    <<: *runtime
+    profiles: [workers]
+    environment:
+      <<: *development-environment
+      ANALYZER_APPLY_SCHEMA_ON_STARTUP: "0"
+    command: ["watchfiles", "--target-type", "command", "python -m src.face_worker loop", "/app/src"]
+
+  stream_alert_worker:
+    <<: *runtime
+    profiles: [stream-alerts]
+    environment:
+      <<: *development-environment
+      ANALYZER_APPLY_SCHEMA_ON_STARTUP: "0"
+    command: ["watchfiles", "--target-type", "command", "python -m src.main stream-alerts --no-notify", "/app/src"]
+
+  frontend:
+    image: unifiedanalyzer-dev/frontend:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dashboard
+      target: frontend-dev
+    init: true
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+      DEV_API_TARGET: http://analyzer:8002
+    volumes:
+      - ./frontend:/app/frontend
+      - /app/frontend/node_modules
+    ports:
+      - "127.0.0.1:${DEV_FRONTEND_PORT:-15173}:5173"
+    depends_on:
+      - analyzer
+
+volumes:
+  dev_postgres:
+  dev_collector_postgres:
+  dev_media:
+  dev_decisions:

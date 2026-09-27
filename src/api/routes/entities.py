@@ -557,7 +557,7 @@ async def get_entity(entity_id: str):
         l["platform_username"] for l in links
         if l["platform_username"]
     }) if links else []
-    # email-like: used as ghunt targets (e.g. theodorelcj@gmail.com)
+    # email-like: used as ghunt targets (e.g. person@example.invalid)
     _emails: list[str] = [
         u for u in _usernames
         if "@" in u and "." in u.split("@")[-1]

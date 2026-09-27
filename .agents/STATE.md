@@ -1,3 +1,19 @@
+# Container development checkpoint — 2026-09-27
+
+Applied an explicit `compose.dev.yaml` with separate development databases/data,
+polling source reload, anonymous frontend dependency isolation, opt-in workers,
+and local images that cannot pull implicitly. Added dev/production image stages,
+remote GHCR publication with guarded retention, and Windows/Linux instructions.
+Production deployment configuration changed only to remove host details from
+comments. Existing production readiness findings below remain unresolved.
+
+Validation: Compose parsing and configuration contracts, Vite proxy/polling
+checks, 12 retention tests, and watchfiles process reload fixtures on Windows
+and WSL pass. No image was built/pulled and no application container was started.
+The isolated collector database intentionally starts empty; integration features
+need a development schema and synthetic data. Actual SMB mounts, full app health,
+and image sizes remain to verify on a development host / in CI.
+
 # 2026-09-23 16:00 UTC — Docker restored, restore/build/deploy blocked on host RAM
 
 Docker Desktop was fully restarted twice (killed Docker Desktop UI + `com.docker.backend` + `com.docker.build` procs, `wsl --shutdown`, relaunched Desktop). First restart: daemon accepted `docker ps` in 199s cold, then 2.14–3.64s warm; 32 pre-restart containers self-healed via their own restart policies. Only `unifiedanalyzer_face_worker` did not start — its failure is the CIFS mount `//100.92.164.125/w-drive` (Prawn-E14 SMB share on Tailscale) returning `no such file or directory`, i.e. remote host unavailable; unrelated to the restart. `nebula-sync` initially reported `Restarting (1)` (auth EOF/HTTP 400 against the same 100.92.164.125 host) but is `healthy` again after its own retry loop — its config was NOT touched. Stale prior-session scratch containers `unifiedanalyzer_recovery_controller_20260922` and `unifiedanalyzer_restore_20260922` were removed with `docker rm -f`.
@@ -513,7 +529,7 @@ Operational notes:
 ## Auto State
 
 - Updated: 2026-09-24 16:49:51 +08:00
-- Machine: PRAWN-L390
+- Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
@@ -661,3 +677,7 @@ Updated: 2026-08-29 15:37 SGT — SC1 LIVE + incident notes
 - Threads OK: running, 130 stored/60m. Empty threads vault marker is expected (Threads rides Instagram/Meta session). IG login solid (sessionid, 1149 stored/60m).
 - REAL degraded (not crash-related): whatsapp stale ~37h -> needs QR re-pair; x DLQ 112 old failed media (oldest ~19d) -> self-draining, cosmetic.
 - CTI1 still NOT wired (code-only core only); operator questioned wanting it — pending their decision to keep or drop.
+
+Machine-specific values in this document use privacy placeholders.
+
+2026-09-27: Current upstream changes are preserved in the publication branch. Initial CI, bounded runtime validation and resource teardown are in progress under the user-approved maintenance release.
