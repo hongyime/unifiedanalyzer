@@ -54,7 +54,7 @@ async def test_termination_waits_for_scheduler_cleanup(monkeypatch: pytest.Monke
 @pytest.mark.asyncio
 async def test_scheduler_failure_restores_signal_handlers() -> None:
     # Given an unexpected scheduler failure.
-    previous = signal.getsignal(signal.SIGTERM)
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
 
     async def run() -> None:
         raise RuntimeError("scheduler failed")
@@ -62,4 +62,4 @@ async def test_scheduler_failure_restores_signal_handlers() -> None:
     # When the failure propagates, then the temporary signal handler is removed.
     with pytest.raises((RuntimeError, ExceptionGroup)):
         await run_until_terminated(run)
-    assert signal.getsignal(signal.SIGTERM) == previous
+    assert {sig: signal.getsignal(sig) for sig in previous} == previous

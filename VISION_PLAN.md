@@ -82,7 +82,7 @@ broader **face→entity attribution** would auto-light both. Plus:
 - [x] **Q2 Face clusters → identities → entities** (commit a163c71). Root cause:
   nothing wrote `facetracker.identities`. New `build_identities_from_clusters()`.
   **identities 0 → 1,913**, face_identity_map 0 → 5,349, 5 named to real entities
-  (cluster 84 → "Bryan Seah", 15 faces). Fixes dashboard "Identities: 0".
+  (cluster 84 → "the maintainer", 15 faces). Fixes dashboard "Identities: 0".
   entity_faces still ~50 — the entity BRIDGE is data-coverage-limited (most
   collected media owners are untracked search/github/beeper ids), not a code bug.
 - [x] **Q3 Face quality gate** (commit 87a6963). Env-tunable detector thresholds +
@@ -578,3 +578,5 @@ under-surfaced or unweighted. Goal: turn them into ranked, explainable edges.
 All boxes checked, a rich AND a sparse entity both render a fused
 physical+digital timeline with reciprocal directed interactions and ranked
 explainable edges. Then — and only then — delete this file.
+
+Machine-specific values in this document use privacy placeholders.

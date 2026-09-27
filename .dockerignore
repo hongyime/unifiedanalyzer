@@ -22,7 +22,7 @@ venv
 # — but the vendored OSINT rulesets shipped in data/*.json MUST make it into
 # the image so pipeline phases like wmn_fanout can load them at runtime.
 data/*
-!data/*.json
+!data/wmn-data.json
 !data/README.md
 docs
 
@@ -31,3 +31,24 @@ docs
 Thumbs.db
 .idea
 .vscode
+
+# Exclude local settings, identities, tests, and runtime artifacts from all stages.
+.env*
+**/.env*
+.agents
+.claude
+**/credentials*.json
+**/secrets.*
+**/*.pem
+**/*.key
+tests
+**/tests
+build
+dist
+backups
+media_derived
+decisions
+dev-input
+*.log
+*.db
+*.sqlite*

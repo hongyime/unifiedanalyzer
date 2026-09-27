@@ -209,8 +209,8 @@ services:
       # src/face_worker.py:ingest_drive_media). C: is DELIBERATELY ABSENT —
       # walking C: hydrates OneDrive placeholders and fills the disk (retired
       # facetracker's exact failure; see memory onedrive-hydration-hazard).
-      # Y:/Z: are local. W:/X: are SMB shares on Tailscale host Prawn-E14
-      # (100.92.164.125), mounted as CIFS volumes (see top-level `volumes:`).
+      # Y:/Z: are local. W:/X: are SMB shares on the configured SMB host,
+      # mounted as CIFS volumes (see top-level `volumes:`).
       DRIVE_SOURCES: >-
         [{"path": "/mnt/w", "type": "local"},
          {"path": "/mnt/x", "type": "local"},
@@ -286,7 +286,7 @@ services:
     cpu_shares: 256
     mem_limit: 128m
 
-# CIFS volumes for the W:/X: drives on Tailscale host Prawn-E14. Credentials
+# CIFS volumes for the W:/X: drives on configured SMB host. Credentials
 # come from .env (SMB_HOST/SMB_USER/SMB_PASS, gitignored) — pass
 # `--env-file ../.env` to docker compose so these ${...} refs interpolate.
 # Mounted read-only (ro) — face scanning never writes to the shares.

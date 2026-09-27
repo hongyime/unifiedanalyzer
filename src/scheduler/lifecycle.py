@@ -9,7 +9,16 @@ logger = logging.getLogger(__name__)
 
 
 async def run_until_terminated(run: Callable[[], Awaitable[None]]) -> None:
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
     with ExitStack() as resources:
+        def restore_handlers() -> None:
+            for sig, handler in previous.items():
+                if handler is not None and signal.getsignal(sig) != handler:
+                    signal.signal(sig, handler)
+
+        # Run after the receiver closes: asyncio removes its handlers on exit,
+        # which otherwise loses the enclosing runner's SIGINT callback.
+        resources.callback(restore_handlers)
         try:
             signals = resources.enter_context(anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT))
         except NotImplementedError:
