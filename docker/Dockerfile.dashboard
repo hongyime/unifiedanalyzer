@@ -53,7 +53,7 @@ CMD ["watchfiles", "--target-type", "command", "python -m src.main serve", "/app
 
 FROM dependencies AS production
 COPY src/ src/
-COPY --chown=appuser:appuser data/ data/
+COPY data/ data/
 COPY --from=frontend-build /app/frontend/dist/ frontend/dist/
 COPY docker/embed-backfill-loop.sh /app/embed-backfill-loop.sh
 RUN chmod +x /app/embed-backfill-loop.sh

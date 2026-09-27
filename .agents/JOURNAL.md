@@ -240,3 +240,5 @@ Machine-specific values in this document use privacy placeholders.
 Added explicit development Compose, bind-mounted polling reload, isolated dependency/data volumes, dev/production image stages, guarded GHCR retention and cross-platform instructions. Compose/configuration contracts, Vite configuration checks, retention fixtures, and Windows/WSL reload fixtures passed. No builds, pulls, application starts, commits or pushes were performed; deployment health and real SMB mount behavior are not claimed.
 
 2026-09-27: Current upstream changes are preserved in the publication branch. Initial CI, bounded runtime validation and resource teardown are in progress under the user-approved maintenance release.
+
+- 2026-09-27: Preserve caller signal handlers on scheduler teardown; verify five focused Linux regressions and retain the full-suite coverage requirement.

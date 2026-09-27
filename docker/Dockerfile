@@ -25,7 +25,7 @@ EXPOSE 8001
 CMD ["watchfiles", "--target-type", "command", "python -m src.main serve", "/app/src"]
 FROM dependencies AS production
 COPY src/ src/
-COPY --chown=appuser:appuser data/ data/
+COPY data/ data/
 COPY docker/embed-backfill-loop.sh /app/embed-backfill-loop.sh
 RUN chmod +x /app/embed-backfill-loop.sh
 USER appuser

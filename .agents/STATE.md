@@ -681,3 +681,8 @@ Updated: 2026-08-29 15:37 SGT — SC1 LIVE + incident notes
 Machine-specific values in this document use privacy placeholders.
 
 2026-09-27: Current upstream changes are preserved in the publication branch. Initial CI, bounded runtime validation and resource teardown are in progress under the user-approved maintenance release.
+
+
+## 2026-09-27: Maintenance CI follow-up
+
+PR #6 now restores the enclosing runner signal callbacks during scheduler teardown and preserves the dashboard ruleset build contract. All five focused Linux regression tests passed in a disposable environment that was removed afterward. The prior full run had 5551 passing tests, two failures addressed here, and 46.49% coverage against its existing 100% gate; the coverage threshold is unchanged and remains a release gate.
