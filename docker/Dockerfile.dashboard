@@ -4,6 +4,8 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
 FROM frontend-dependencies AS frontend-dev
+RUN chown -R node:node /app/frontend
+USER node
 EXPOSE 5173
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
 
@@ -39,17 +41,23 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=postgres-tools /usr/lib/postgresql/16/bin/pg_dump /usr/local/bin/pg_dump
 COPY --from=postgres-tools /usr/lib/postgresql/16/bin/pg_restore /usr/local/bin/pg_restore
 
+RUN useradd -u 1001 -m appuser \
+    && mkdir -p /app/data /app/backups /app/logs /home/appuser/.cache \
+    && chown -R appuser:appuser /app /home/appuser
+
 FROM dependencies AS dev
 RUN pip install --no-cache-dir watchfiles==1.3.0
+USER appuser
 EXPOSE 8002
 CMD ["watchfiles", "--target-type", "command", "python -m src.main serve", "/app/src"]
 
 FROM dependencies AS production
 COPY src/ src/
-COPY data/ data/
+COPY --chown=appuser:appuser data/ data/
 COPY --from=frontend-build /app/frontend/dist/ frontend/dist/
 COPY docker/embed-backfill-loop.sh /app/embed-backfill-loop.sh
 RUN chmod +x /app/embed-backfill-loop.sh
+USER appuser
 EXPOSE 8002
 CMD ["python", "-m", "src.main", "serve"]
 LABEL io.unifiedanalyzer.project="unifiedanalyzer"

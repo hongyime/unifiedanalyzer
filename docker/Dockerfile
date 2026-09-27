@@ -14,14 +14,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/venv /opt/venv
 
+RUN useradd -u 1001 -m appuser \
+    && mkdir -p /app/data /app/backups /app/logs /home/appuser/.cache \
+    && chown -R appuser:appuser /app /home/appuser
+
 FROM dependencies AS dev
 RUN pip install --no-cache-dir watchfiles==1.3.0
+USER appuser
 EXPOSE 8001
 CMD ["watchfiles", "--target-type", "command", "python -m src.main serve", "/app/src"]
 FROM dependencies AS production
 COPY src/ src/
-COPY data/ data/
+COPY --chown=appuser:appuser data/ data/
 COPY docker/embed-backfill-loop.sh /app/embed-backfill-loop.sh
 RUN chmod +x /app/embed-backfill-loop.sh
+USER appuser
 EXPOSE 8001
 CMD ["python", "-m", "src.main", "serve"]
