@@ -23,6 +23,13 @@ def _stale_run_heartbeat_minutes() -> int:
         return 30
 
 
+def _startup_delay_seconds() -> int:
+    try:
+        return max(0, int(os.getenv("STARTUP_DELAY_SECONDS", "0")))
+    except (TypeError, ValueError):
+        return 0
+
+
 async def clear_stale_running_locks_before_scheduler_import(pool) -> int:
     """Free only stale run locks before importing the heavy scheduler pipeline."""
     stale_minutes = _stale_run_heartbeat_minutes()
@@ -268,6 +275,10 @@ def main():
         from src.db.connection import init_pools, close_pools, get_analyzer_pool
 
         async def _run():
+            delay = _startup_delay_seconds()
+            if delay:
+                logger.info("Startup delay: sleeping %ds before scheduler pool init", delay)
+                await asyncio.sleep(delay)
             await init_pools(apply_schema_ddl=False)
             try:
                 cleared = await clear_stale_running_locks_before_scheduler_import(get_analyzer_pool())
@@ -858,6 +869,10 @@ def main():
                 return set()
 
         async def _run():
+            delay = _startup_delay_seconds()
+            if delay:
+                logger.info("Startup delay: sleeping %ds before stream-alerts pool init", delay)
+                await asyncio.sleep(delay)
             await init_pools(apply_schema_ddl=False)
             try:
                 while True:

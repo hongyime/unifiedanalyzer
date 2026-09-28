@@ -1145,6 +1145,16 @@ def loop(batch: int, interval: int) -> None:
 def main() -> None:
     import os
     import sys
+    import time
+
+    try:
+        _startup_delay = max(0, int(os.getenv("STARTUP_DELAY_SECONDS", "0")))
+    except (TypeError, ValueError):
+        _startup_delay = 0
+    if _startup_delay:
+        logger.info("Startup delay: sleeping %ds before schema init", _startup_delay)
+        time.sleep(_startup_delay)
+
     logger.info("Face worker (schema=%s)", FACE_DB_SCHEMA)
     tables = init_schema()
     logger.info("facetracker schema tables present: %s", tables)
