@@ -11,6 +11,7 @@ ENV PATH="/opt/venv/bin:${PATH}" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libgl1 libxcb1 libgomp1 ffmpeg tesseract-ocr postgresql-client \
+    cifs-utils util-linux \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/venv /opt/venv
 
@@ -30,6 +31,8 @@ COPY src/ src/
 COPY data/ data/
 COPY docker/embed-backfill-loop.sh /app/embed-backfill-loop.sh
 RUN chmod +x /app/embed-backfill-loop.sh
+COPY docker/face_worker_entrypoint.sh /app/face_worker_entrypoint.sh
+RUN chmod +x /app/face_worker_entrypoint.sh
 USER appuser
 EXPOSE 8001
 CMD ["python", "-m", "src.main", "serve"]
