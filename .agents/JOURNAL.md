@@ -232,6 +232,9 @@
 - 2026-09-24 13:45:47 +08:00 [dev-host-3.example/claude/stop] branch=main head=deb0d23 dirty=0
 - 2026-09-24 16:49:50 +08:00 [dev-host-3.example/claude/stop] branch=main head=8c005b1 dirty=0
 - 2026-09-24 16:49:51 +08:00 [dev-host-3.example/claude/stop] branch=main head=8c005b1 dirty=0
+- 2026-09-24 23:12:33 +08:00 [dev-host-3.example/claude/stop] branch=main head=980001d dirty=0
+- 2026-09-25 14:14:30 +08:00 [dev-host-3.example/claude/stop] branch=main head=980001d dirty=0
+- 2026-09-25 15:55:58 +08:00 [dev-host-3.example/claude/stop] branch=main head=980001d dirty=0
 
 
 Machine-specific values in this document use privacy placeholders.
@@ -248,3 +251,5 @@ Added explicit development Compose, bind-mounted polling reload, isolated depend
 - 2026-09-27: Add explicit sync-only SMB development with one initial source-seeded image build; preserve private input isolation, worker opt-in and production configuration.
 
 - 2026-09-27: Initialize only development media/decision volume-root ownership with the existing local image before app startup; avoid an ownership-only rebuild. Keep production stages, worker profiles and stored file ownership unchanged; static checks pass and runtime proof remains pending.
+
+- 2026-09-28: Cross-repo footprint-reduction pass mirroring one already done on the sibling unifiedcollector repo (shared Postgres, shared Docker Desktop VM). Read-only scope inventory first (background explore agent): 4 services total, only 1 already-disabled-by-default candidate for consolidation (stream_alert_worker->analyzer, skipped - marginal 128m benefit vs real risk of blocking uvicorn's event loop, not worth it); face_worker+scheduler merge explicitly REJECTED per a documented FAISS/OpenMP/numpy/MKL deadlock that hit TWICE when ML threading ran uncapped together (docker-compose.yml comment, 2026-07-08). Found `MEDIA_PDF_WRITE_WORKERS=8` (media_analysis.py:800) looked like an unguarded thread-pool at first glance, but verified via source comment it's a deliberate I/O-latency-hiding pool for slow Z:-drive SMB writes (~4x measured speedup) - correctly left untouched after checking, not just trusted at face value. Real, applied gap: unlike unifiedcollector, this repo had ZERO startup-stagger mechanism at all (grepped src/ for STARTUP_DELAY/stagger, zero hits) - added a `STARTUP_DELAY_SECONDS` env-driven `asyncio.sleep`/`time.sleep` to scheduler (30s), face_worker (60s), and stream_alert_worker (15s), verified live via container logs showing the exact sleep-then-init sequence on all 2 services that actually started. `face_worker` itself could not be live-verified end-to-end - it fails at the Docker daemon's volume-mount stage (W-drive Tailscale SMB share at 100.92.164.125 unreachable) before any Python code runs at all; this is a pre-existing, unrelated infrastructure issue (not caused by and not fixed by this pass) that was already 5+ days old going in.

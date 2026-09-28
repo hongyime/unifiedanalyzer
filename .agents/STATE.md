@@ -537,12 +537,12 @@ Operational notes:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-09-24 16:49:51 +08:00
+- Updated: 2026-09-25 15:55:58 +08:00
 - Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 8c005b1
+- HEAD: 980001d
 - Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
