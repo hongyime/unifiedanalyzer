@@ -72,6 +72,17 @@ _TYPE_WEIGHT = {
     # real person behind an otherwise-anonymous site.
     "whois_owner_email": 0.65,
     "whois_owner_name":  0.30,
+    # Google gaia lookup + Maps reviews (Do Next #1, opt-in). Griffin's
+    # single-highest-leverage pivot from Scam-a-Scammer (2023-05-18):
+    # email -> gaia_id -> Maps review geocluster reveals where the target
+    # lives/works/frequents.
+    "google_gaia_email_match":  0.55,
+    "maps_review_geo_cluster":  0.35,
+    # Coordinated fake-account detection: >=3 users across >=2 platforms
+    # sharing a distinctive 5-8 word bio phrase. Griffin's "LinkedIn Fakes"
+    # (2021-11-16). Not in _CONTEXT_ONLY_SIGNALS — a shared distinctive
+    # phrase is legit identity linking, not just context.
+    "bio_ngram_cluster": 0.45,
     # Threads presence discovered via IG-username probe. Griffin's 2024-10-10
     # post: threads.net/@<ig_username> resolves even when IG doesn't link it.
     # Not a hard anchor on its own (usernames collide), but strong given the

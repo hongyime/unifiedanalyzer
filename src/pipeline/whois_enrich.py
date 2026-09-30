@@ -163,8 +163,17 @@ async def _emit_owner_email_signals(analyzer, collector, whois: WhoisResult) -> 
     if "@" not in normalized:
         return 0
     async with analyzer.acquire() as acon:
+        # Emails live in identity_signals with signal_type in ('commit_email',
+        # 'email_match'), value=email. There is NO entity_emails table.
         rows = await acon.fetch(
-            "SELECT entity_id::text FROM entity_emails WHERE lower(email) = $1 LIMIT 20",
+            """\
+            SELECT DISTINCT entity_id::text AS entity_id
+            FROM identity_signals
+            WHERE signal_type IN ('commit_email','email_match')
+              AND lower(value) = $1
+              AND entity_id IS NOT NULL
+            LIMIT 20
+            """,
             normalized,
         )
     if not rows:
