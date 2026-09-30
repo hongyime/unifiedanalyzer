@@ -63,6 +63,20 @@ _TYPE_WEIGHT = {
     # min-matches guard make a false positive from siblings/lookalikes far less
     # likely per single row.
     "face_pair_knn": 0.60,
+    # Historical-identity signals from _user_changes tables. Generalized
+    # from Griffin's Snapchat-Bitmoji-rollback tip (2022-10-24).
+    "historical_username_match": 0.55,
+    "historical_phone_match":    0.65,
+    # WHOIS-derived identity signals. Griffin's "Beyond WHOIS" (2023-09-25):
+    # owner_email or owner_name on a registered domain often surfaces the
+    # real person behind an otherwise-anonymous site.
+    "whois_owner_email": 0.65,
+    "whois_owner_name":  0.30,
+    # Threads presence discovered via IG-username probe. Griffin's 2024-10-10
+    # post: threads.net/@<ig_username> resolves even when IG doesn't link it.
+    # Not a hard anchor on its own (usernames collide), but strong given the
+    # self-published IG↔Threads pairing that Meta actively encourages.
+    "threads_ig_username_pair": 0.55,
     # Axis-1 MVP: cosine similarity of entity-level timeline_embeddings centroids
     # (multilingual-e5-small over timeline_events.title). Deliberately weak —
     # topical overlap is common among peers in the same industry/subculture, so
