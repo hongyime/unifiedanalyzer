@@ -75,7 +75,10 @@ from src.pipeline.identity_history import run_identity_history
 from src.pipeline.whois_enrich import run_whois_enrich
 from src.pipeline.epieos_probe import run_epieos_probe
 from src.pipeline.bio_clustering import run_bio_clustering
+from src.pipeline.gan_face_screening import run_gan_face_screening
+from src.pipeline.reverse_image_bridge import run_reverse_image_bridge
 from src.pipeline.email_recognition import run_email_recognition
+from src.pipeline.reverse_image_bridge import run_reverse_image_bridge
 from src.pipeline.wmn_fanout import run_wmn_fanout
 from src.pipeline.geocode import geocode_step
 from src.pipeline.run_reporting import production_run_types, probe_phase_names
@@ -262,6 +265,9 @@ _PHASE_RESOURCE_CLASSES = {
     "identity_history": "db",
     "whois_enrich": "notification",
     "epieos_probe": "notification",
+    "bio_clustering": "db",
+    "gan_face_screening": "cpu",
+    "reverse_image_bridge": "notification",
     "email_recognition": "notification",
     "wmn_fanout": "notification",
     "calibration_watchdog": "db",
@@ -569,6 +575,8 @@ def _secondary_phases() -> list[tuple[str, object]]:
         ("whois_enrich", run_whois_enrich),
         ("epieos_probe", run_epieos_probe),
         ("bio_clustering", run_bio_clustering),
+        ("gan_face_screening", run_gan_face_screening),
+        ("reverse_image_bridge", run_reverse_image_bridge),
         ("email_recognition", run_email_recognition),
         ("wmn_fanout", run_wmn_fanout),
         # Calibration cutover watchdog: emits CALIBRATION_READY alert + Telegram

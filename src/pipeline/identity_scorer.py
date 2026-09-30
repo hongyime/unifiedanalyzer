@@ -88,6 +88,20 @@ _TYPE_WEIGHT = {
     # Not a hard anchor on its own (usernames collide), but strong given the
     # self-published IG↔Threads pairing that Meta actively encourages.
     "threads_ig_username_pair": 0.55,
+    # Do Next #4: Two entities each carrying a likely-GAN avatar. Griffin's
+    # LinkedIn-fakes (2021-11-16). Kept as CONTEXT_ONLY in v1 - the noisy-OR
+    # math doesn't tolerate negative weights (would produce score<0), so we
+    # surface this in the operator's breakdown chart but don't move the
+    # probability. Upgrading to a probability-affecting negative signal
+    # needs the noisy-OR to handle negatives first.
+    "likely_synthetic_avatar_pair": 0.30,
+    # Do Next #5: multi-engine reverse image search. Two entities' avatars
+    # producing hits on the same site+path is a strong "this face is
+    # publicly documented alongside the other name" signal. Griffin's
+    # image-geolocation methodology (2021-06-08): "never stop at one engine".
+    "reverse_image_domain_match": 0.30,
+    # Context-only: any hit above threshold. Operator flag, not merge signal.
+    "avatar_public_reappearance": 0.25,
     # Axis-1 MVP: cosine similarity of entity-level timeline_embeddings centroids
     # (multilingual-e5-small over timeline_events.title). Deliberately weak —
     # topical overlap is common among peers in the same industry/subculture, so
@@ -119,6 +133,12 @@ _CONTEXT_ONLY_SIGNALS = frozenset({
     "topical_similarity",
     "social_face_link",
     "shared_life_context",
+    # Do Next #4: GAN-face pair detection. Kept context-only for v1 pending
+    # noisy-OR-with-negatives support in the scorer.
+    "likely_synthetic_avatar_pair",
+    # Do Next #5: reverse-image "appears elsewhere online" flag. Operator
+    # signal, not a merge signal.
+    "avatar_public_reappearance",
 })
 
 _MIN_SCORE = 0.10
