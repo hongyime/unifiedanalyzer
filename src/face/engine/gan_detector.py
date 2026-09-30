@@ -2,13 +2,16 @@
 
 Offline binary classifier: is this avatar likely GAN-generated?
 
-Model choice: CNNDetection (Wang et al. CVPR 2020) exported to ONNX.
-BSD-licensed, ~200 MB, ~200 ms/face on CPU. Strong across StyleGAN2 which
-is what Griffin's LinkedIn-fakes network (2021-11-16) actually used.
+Model source: HuggingFace `prithivMLmods/Deepfake-Detection-Exp-02-22-ONNX`
+(Apache-2.0, ViT-based deepfake-vs-real classifier). Newer-generation
+replacement for the CNNDetection paper Griffin references (2021-11-16); same
+class - offline classifier, no auth, public checkpoint. We use the
+quantized variant (~90 MB) to keep the analyzer container's cache small.
 
 **Enable path**:
-  1. Run scripts/download_gan_model.py once. Writes ~200 MB to
-     ${FACE_MODEL_ROOT}/gan/cnndetection_stylegan2.onnx, verifies SHA-256.
+  1. Run scripts/download_gan_model.py once. Writes ~90 MB to
+     ${FACE_MODEL_ROOT}/gan/deepfake_detector.onnx and records SHA-256
+     in a sidecar for future integrity verification.
   2. Set GAN_DETECTOR_ENABLED=1 in analyzer env.
   3. Pipeline picks it up on the next incremental cycle.
 
@@ -30,8 +33,8 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 FACE_MODEL_ROOT_DEFAULT = "Z:/unifiedanalyzer/media_derived/faces"
-GAN_MODEL_FILENAME_DEFAULT = "cnndetection_stylegan2.onnx"
-GAN_MODEL_VERSION = "cnndetection_stylegan2_v1"
+GAN_MODEL_FILENAME_DEFAULT = "deepfake_detector.onnx"
+GAN_MODEL_VERSION = "prithivMLmods_deepfake_vit_v1"
 
 
 class GanDetectorUnavailable(RuntimeError):
@@ -126,11 +129,17 @@ class GanDetector:
             session = GanDetector._session
             input_name = session.get_inputs()[0].name
             output = session.run(None, {input_name: x})[0]
-            raw = float(np.asarray(output).squeeze())
+            arr = np.asarray(output).squeeze()
         except Exception as exc:
             logger.warning("gan_detector: inference failed: %s", exc)
             return None
-        # Sigmoid if the model outputs a logit (any absolute value > 1).
+        # Binary classifier (2 logits: [real, fake]) -> softmax + take fake prob.
+        if arr.ndim == 1 and arr.shape[0] == 2:
+            e = np.exp(arr - np.max(arr))
+            probs = e / e.sum()
+            return float(probs[1])
+        # Fallback: single scalar logit -> sigmoid.
+        raw = float(arr)
         if abs(raw) > 1:
             return float(1.0 / (1.0 + np.exp(-raw)))
         return max(0.0, min(1.0, raw))

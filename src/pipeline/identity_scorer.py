@@ -67,11 +67,6 @@ _TYPE_WEIGHT = {
     # from Griffin's Snapchat-Bitmoji-rollback tip (2022-10-24).
     "historical_username_match": 0.55,
     "historical_phone_match":    0.65,
-    # WHOIS-derived identity signals. Griffin's "Beyond WHOIS" (2023-09-25):
-    # owner_email or owner_name on a registered domain often surfaces the
-    # real person behind an otherwise-anonymous site.
-    "whois_owner_email": 0.65,
-    "whois_owner_name":  0.30,
     # Google gaia lookup + Maps reviews (Do Next #1, opt-in). Griffin's
     # single-highest-leverage pivot from Scam-a-Scammer (2023-05-18):
     # email -> gaia_id -> Maps review geocluster reveals where the target
@@ -89,12 +84,12 @@ _TYPE_WEIGHT = {
     # self-published IG↔Threads pairing that Meta actively encourages.
     "threads_ig_username_pair": 0.55,
     # Do Next #4: Two entities each carrying a likely-GAN avatar. Griffin's
-    # LinkedIn-fakes (2021-11-16). Kept as CONTEXT_ONLY in v1 - the noisy-OR
-    # math doesn't tolerate negative weights (would produce score<0), so we
-    # surface this in the operator's breakdown chart but don't move the
-    # probability. Upgrading to a probability-affecting negative signal
-    # needs the noisy-OR to handle negatives first.
-    "likely_synthetic_avatar_pair": 0.30,
+    # LinkedIn-fakes (2021-11-16). Now a real NEGATIVE-weight signal
+    # (noisy-OR fixed to handle negatives above): two entities carrying
+    # likely-GAN avatars LOWERS same-person probability. GAN faces are
+    # cheap to produce and often mass-shared across a fake network, so
+    # sharing traits is anti-evidence for identity.
+    "likely_synthetic_avatar_pair": -0.35,
     # Do Next #5: multi-engine reverse image search. Two entities' avatars
     # producing hits on the same site+path is a strong "this face is
     # publicly documented alongside the other name" signal. Griffin's
@@ -133,9 +128,6 @@ _CONTEXT_ONLY_SIGNALS = frozenset({
     "topical_similarity",
     "social_face_link",
     "shared_life_context",
-    # Do Next #4: GAN-face pair detection. Kept context-only for v1 pending
-    # noisy-OR-with-negatives support in the scorer.
-    "likely_synthetic_avatar_pair",
     # Do Next #5: reverse-image "appears elsewhere online" flag. Operator
     # signal, not a merge signal.
     "avatar_public_reappearance",
@@ -323,10 +315,28 @@ async def compute_identity_scores() -> dict:
         if model is not None:
             score = predict_proba(model, pair_feature_vector(scoring_contributions))
         else:
-            prob_none = 1.0
+            # Noisy-OR with negative-weight support (Do Next #4).
+            # Positive signals RAISE same-person probability via the standard
+            # noisy-OR: P(same) = 1 - prod(1 - w*c) for positive (w, c) pairs.
+            # Negative signals LOWER that probability multiplicatively: we
+            # compute a second noisy-OR over |w|*c for negative pairs and
+            # multiply the positive score by (1 - neg_score). This keeps the
+            # result in [0, 1] regardless of signal mix and matches the
+            # intuition that a strong negative can wipe out a weak positive.
+            prob_none_pos = 1.0
+            prob_none_neg = 1.0
             for sig_type, confidence in scoring_contributions:
-                prob_none *= (1 - _TYPE_WEIGHT[sig_type] * confidence)
-            score = 1 - prob_none
+                w = _TYPE_WEIGHT[sig_type]
+                # Clamp confidence to [0, 1] defensively.
+                c = max(0.0, min(1.0, confidence))
+                if w >= 0:
+                    prob_none_pos *= (1 - w * c)
+                else:
+                    prob_none_neg *= (1 - (-w) * c)
+            positive_score = 1 - prob_none_pos
+            negative_score = 1 - prob_none_neg
+            # Negative signals scale positive_score down (never below 0).
+            score = max(0.0, positive_score * (1 - negative_score))
 
         platforms_a = entity_platforms.get(a, set())
         platforms_b = entity_platforms.get(b, set())

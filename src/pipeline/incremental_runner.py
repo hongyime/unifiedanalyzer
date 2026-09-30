@@ -72,7 +72,6 @@ from src.pipeline.email_breach import check_email_breaches
 from src.pipeline.handle_fanout import run_handle_fanout
 from src.pipeline.threads_from_ig import run_threads_from_ig
 from src.pipeline.identity_history import run_identity_history
-from src.pipeline.whois_enrich import run_whois_enrich
 from src.pipeline.epieos_probe import run_epieos_probe
 from src.pipeline.bio_clustering import run_bio_clustering
 from src.pipeline.gan_face_screening import run_gan_face_screening
@@ -263,7 +262,6 @@ _PHASE_RESOURCE_CLASSES = {
     "handle_fanout": "notification",
     "threads_from_ig": "notification",
     "identity_history": "db",
-    "whois_enrich": "notification",
     "epieos_probe": "notification",
     "bio_clustering": "db",
     "gan_face_screening": "cpu",
@@ -572,7 +570,6 @@ def _secondary_phases() -> list[tuple[str, object]]:
         ("handle_fanout", run_handle_fanout),
         ("threads_from_ig", run_threads_from_ig),
         ("identity_history", run_identity_history),
-        ("whois_enrich", run_whois_enrich),
         ("epieos_probe", run_epieos_probe),
         ("bio_clustering", run_bio_clustering),
         ("gan_face_screening", run_gan_face_screening),

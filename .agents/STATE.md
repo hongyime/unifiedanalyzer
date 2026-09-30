@@ -1,3 +1,28 @@
+# Cleanup + smoke-test pass — 2026-09-30 (analyzer side)
+
+Follow-up to today's Do Now / Do Next / Explore batch. Operator asked to enable all opt-in flags, remove Whoxy + SauceNAO entirely (no keys), default GAN model to HuggingFace, and fix the noisy-OR limitation with negative signals. Also smoke-test each new pipeline against live corpus with cleanup tags.
+
+**Analyzer-side changes done this pass:**
+1. `src/pipeline/identity_scorer.py`: noisy-OR now splits pos/neg signals, `score = max(0.0, pos_or * (1 - neg_or))`. `likely_synthetic_avatar_pair` weight `0.30 -> -0.35` and pulled out of `_CONTEXT_ONLY_SIGNALS`. 5-case assertion script all pass.
+2. `src/pipeline/whois_enrich.py` DELETED. Whoxy removed entirely per operator (no API key). `incremental_runner.py` had its import, classifier entry, and phase call stripped. `identity_scorer.py` had 2 whois-owner signal weights and the surrounding comment block removed. Grep confirms zero refs.
+3. `src/pipeline/reverse_image_providers/saucenao.py` DELETED. SauceNAO removed entirely (no API key). `reverse_image_bridge.py` had its import, DEFAULT_ENABLED entry, and `yield SauceNaoProvider()` stanza stripped. Grep confirms zero refs.
+4. `scripts/download_gan_model.py` defaults to HuggingFace `prithivMLmods/Deepfake-Detection-Exp-02-22-ONNX` (Apache-2.0 quantized ViT, 88.7 MB). Sidecar `.sha256` recorded on first-run so subsequent downloads verify integrity. Live download confirmed working.
+5. `src/face/engine/gan_detector.py`: model constants updated (`GAN_MODEL_FILENAME_DEFAULT = "deepfake_detector.onnx"`, `GAN_MODEL_VERSION = "prithivMLmods_deepfake_vit_v1"`). Fixed `score()` to handle the real model output shape: it emits `[batch, 2]` logits (`[real, fake]`), we softmax and return `probs[1]`. Old code assumed a single sigmoid scalar and threw `only 0-dimensional arrays can be converted to Python scalars`. Confirmed working: real NASA photo scored 0.44 (leans real, correct).
+
+**Smoke suite (against live shared Postgres, isolated):**
+- 4a identity_history: 252 rows scanned across 8 tables, 1 real cross-platform username hit.
+- 4d bio_clustering: tokenizer works. bio_ngram_index empty pending refresh worker.
+- 4g reverse_image_bridge: adapter plumbing verified (providers correctly rejected garbage image).
+- 4i GAN detector: model loads, real photo scored 0.44.
+- Remaining smoke tests are collector-side; see collector STATE.md.
+
+**Not yet done (next session):**
+- Turn on env flags: `EPIEOS_ENABLED=1`, `PAYPAL_PROBE_ENABLED=1`, `GAN_DETECTOR_ENABLED=1`, `REVERSE_IMAGE_ENABLED=1` (need operator input on env-file location).
+- Actually run `python scripts/download_gan_model.py` on analyzer host so `${FACE_MODEL_ROOT}/gan/deepfake_detector.onnx` exists before `GAN_DETECTOR_ENABLED=1`.
+- Kick off bio_ngram_index refresh worker against corpus.
+
+---
+
 # Development volume permissions — 2026-09-27
 
 Added a development-only, network-isolated volume initializer using the existing

@@ -1,20 +1,27 @@
-"""Download the CNNDetection ONNX weights used by src/face/engine/gan_detector.py.
+"""Download the deepfake-detector ONNX weights used by
+src/face/engine/gan_detector.py.
 
 Do Next #4 support script. Runs once, then the operator flips
 GAN_DETECTOR_ENABLED=1 and gan_face_screening starts scoring faces.
 
-The URL below is a placeholder for the operator's chosen mirror -
-CNNDetection weights are BSD-licensed and mirrored in several places
-(HuggingFace, university repos). The script:
-  - Refuses to write if a valid file already exists.
-  - Verifies SHA-256 against a hardcoded expected hash (fill in after
-    downloading once).
-  - Never falls back to alternative sources on hash mismatch.
+Default source: HuggingFace `prithivMLmods/Deepfake-Detection-Exp-02-22-ONNX`
+(Apache-2.0, ViT-based deepfake vs. real image classifier). The paper Griffin
+references was CNNDetection (Wang et al. CVPR'20), and this is a
+newer-generation replacement in the same class - offline classifier, no auth,
+public checkpoint. We pick the ``model_quantized.onnx`` variant to keep the
+file small (~90 MB, fits in the analyzer container's cache).
 
 Usage:
-  python scripts/download_gan_model.py \
-      --url <mirror-url> \
-      --sha256 <expected-hash>
+  # First-run: no hash needed. The script records the observed SHA-256 in
+  # a sidecar .sha256 file next to the model.
+  python scripts/download_gan_model.py
+
+  # Later runs: script verifies against the sidecar .sha256 file (or an
+  # explicit --sha256 argument). Refuses to touch anything on mismatch.
+  python scripts/download_gan_model.py
+
+  # Point at a different mirror + expected hash:
+  python scripts/download_gan_model.py --url <mirror-url> --sha256 <hash>
 """
 from __future__ import annotations
 
@@ -29,7 +36,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_ROOT = os.getenv("FACE_MODEL_ROOT", "Z:/unifiedanalyzer/media_derived/faces")
-DEFAULT_FILENAME = "cnndetection_stylegan2.onnx"
+DEFAULT_FILENAME = "deepfake_detector.onnx"
+DEFAULT_URL = (
+    "https://huggingface.co/prithivMLmods/Deepfake-Detection-Exp-02-22-ONNX/"
+    "resolve/main/onnx/model_quantized.onnx"
+)
 
 
 def _sha256_file(path: Path, buf_size: int = 1024 * 1024) -> str:
@@ -43,10 +54,27 @@ def _sha256_file(path: Path, buf_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+def _read_sidecar(path: Path) -> str | None:
+    """Read a recorded SHA-256 from ``<path>.sha256`` if it exists."""
+    sidecar = path.with_suffix(path.suffix + ".sha256")
+    if sidecar.is_file():
+        return sidecar.read_text(encoding="utf-8").strip().split()[0] or None
+    return None
+
+
+def _write_sidecar(path: Path, digest: str) -> None:
+    sidecar = path.with_suffix(path.suffix + ".sha256")
+    sidecar.write_text(digest + "\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", required=True, help="Direct URL to the CNNDetection ONNX weights.")
-    parser.add_argument("--sha256", required=True, help="Expected SHA-256 hex digest of the file.")
+    parser.add_argument("--url", default=DEFAULT_URL,
+                        help=f"Direct URL to the ONNX weights (default: HuggingFace)")
+    parser.add_argument("--sha256", default=None,
+                        help="Expected SHA-256; if omitted, falls back to sidecar "
+                             ".sha256 file; if that's also absent, records the "
+                             "observed hash on first successful download.")
     parser.add_argument("--model-root", default=DEFAULT_MODEL_ROOT,
                         help=f"Model root (default: {DEFAULT_MODEL_ROOT})")
     parser.add_argument("--filename", default=DEFAULT_FILENAME,
@@ -58,15 +86,24 @@ def main() -> int:
 
     dest_dir = Path(args.model_root) / "gan"
     dest = dest_dir / args.filename
+    expected = args.sha256 or _read_sidecar(dest)
 
     if dest.exists() and not args.force:
         actual = _sha256_file(dest)
-        if actual == args.sha256:
+        if expected is None:
+            logger.info(
+                "model already present at %s (sha256=%s). No expected hash on record; "
+                "writing sidecar so future runs can verify.",
+                dest, actual,
+            )
+            _write_sidecar(dest, actual)
+            return 0
+        if actual == expected:
             logger.info("model already present and hash matches: %s", dest)
             return 0
         logger.error(
             "model exists but hash mismatch (got %s, want %s); pass --force to overwrite",
-            actual, args.sha256,
+            actual, expected,
         )
         return 2
 
@@ -74,7 +111,10 @@ def main() -> int:
     logger.info("downloading %s -> %s", args.url, dest)
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
-        with urllib.request.urlopen(args.url) as resp, tmp.open("wb") as f:
+        req = urllib.request.Request(args.url, headers={
+            "User-Agent": "unifiedanalyzer-gan-model-fetch/1.0",
+        })
+        with urllib.request.urlopen(req) as resp, tmp.open("wb") as f:
             while True:
                 chunk = resp.read(1024 * 1024)
                 if not chunk:
@@ -87,13 +127,15 @@ def main() -> int:
         return 3
 
     actual = _sha256_file(tmp)
-    if actual != args.sha256:
-        logger.error("hash mismatch after download: got %s, want %s", actual, args.sha256)
+    if expected is not None and actual != expected:
+        logger.error("hash mismatch after download: got %s, want %s", actual, expected)
         tmp.unlink()
         return 4
 
     tmp.replace(dest)
-    logger.info("SUCCESS: %s (%.1f MB, sha256 verified)", dest, dest.stat().st_size / 1e6)
+    _write_sidecar(dest, actual)
+    logger.info("SUCCESS: %s (%.1f MB, sha256=%s, sidecar written)",
+                dest, dest.stat().st_size / 1e6, actual)
     return 0
 
 

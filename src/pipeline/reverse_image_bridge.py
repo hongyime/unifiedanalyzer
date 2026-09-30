@@ -33,7 +33,6 @@ from src.pipeline.reverse_image_providers.yandex import YandexProvider
 from src.pipeline.reverse_image_providers.tineye import TineyeProvider
 from src.pipeline.reverse_image_providers.google_lens import GoogleLensProvider
 from src.pipeline.reverse_image_providers.bing import BingProvider
-from src.pipeline.reverse_image_providers.saucenao import SauceNaoProvider
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +50,6 @@ _DEFAULT_ENABLED = {
     "tineye": "1",
     "google_lens": "0",
     "bing": "0",
-    "saucenao": "0",
 }
 
 # Circuit breaker: (fail_count, disabled_until_ts)
@@ -94,7 +92,6 @@ def _all_providers() -> Iterable[ReverseImageProvider]:
     yield TineyeProvider()
     yield GoogleLensProvider()
     yield BingProvider()
-    yield SauceNaoProvider()
 
 
 async def _fetch_next_batch(analyzer) -> list[dict]:
