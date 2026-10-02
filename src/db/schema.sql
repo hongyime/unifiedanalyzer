@@ -556,6 +556,30 @@ CREATE TABLE IF NOT EXISTS entity_faces (
 CREATE INDEX IF NOT EXISTS idx_entity_faces_entity ON entity_faces(entity_id);
 CREATE INDEX IF NOT EXISTS idx_entity_faces_face   ON entity_faces(face_id);
 
+-- GAN synthetic-avatar detection (moved from the collector repo 2026-10-02;
+-- entity_faces is analyzer-owned). NULL = never scored; 0.0 = clearly real;
+-- 1.0 = clearly GAN-generated. GanDetector populates these; other methods
+-- leave NULL. Feeds the A5 synthetic-avatar negative-evidence weighting.
+-- GAN ONNX sha256: 5a28be5f56b576f524a8ae3a67e4909b237bdb82b60a71a03d30279e9d283888
+ALTER TABLE entity_faces
+    ADD COLUMN IF NOT EXISTS gan_score REAL NULL,
+    ADD COLUMN IF NOT EXISTS gan_model_version TEXT NULL,
+    ADD COLUMN IF NOT EXISTS gan_scored_at TIMESTAMPTZ NULL;
+
+CREATE INDEX IF NOT EXISTS idx_entity_faces_gan_score_high
+    ON entity_faces(gan_score DESC)
+    WHERE gan_score IS NOT NULL AND gan_score > 0.5;
+
+-- Operator override: manually mark a face real/synthetic after review.
+-- face_id references facetracker.faces.id by value (no cross-schema FK).
+CREATE TABLE IF NOT EXISTS face_gan_overrides (
+    face_id       INTEGER     PRIMARY KEY,
+    is_synthetic  BOOLEAN     NOT NULL,
+    reviewed_by   TEXT        NULL,
+    reviewed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    note          TEXT        NULL
+);
+
 DO $$
 BEGIN
     IF to_regclass('facetracker.faces') IS NOT NULL THEN
