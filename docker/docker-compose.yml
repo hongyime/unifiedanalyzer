@@ -219,18 +219,6 @@ services:
         condition: service_healthy
       analyzer:
         condition: service_started
-    # Runs as root briefly so the entrypoint can attempt the optional W:/X:
-    # CIFS mounts (best-effort - see face_worker_entrypoint.sh), then drops
-    # privileges to appuser via setpriv before the real process starts.
-    user: root
-    cap_add:
-      - SYS_ADMIN
-      # mount.cifs internally drops capabilities before the actual mount
-      # syscall and needs SETPCAP to even attempt that - without it it fails
-      # with "Unable to apply new capability set" before touching the network.
-      - SETPCAP
-      - DAC_READ_SEARCH
-    entrypoint: ["/app/face_worker_entrypoint.sh"]
     # nice the worker so the collectors (Telegram/WA/IG + RabbitMQ/Postgres) win
     # CPU contention. Combined with the hard cpus cap below, face_worker becomes
     # a low-priority background trickle that can't starve the shared box.
@@ -243,11 +231,6 @@ services:
       MEDIA_DERIVED_PATH: /app/media_derived
       COLLECTOR_MEDIA_ROOT: /app/collector_root
       FACE_MODEL_ROOT: /app/media_derived/faces
-      # SMB_HOST/SMB_USER/SMB_PASS reach the container via the env_file
-      # (../.env) already loaded above - NOT redeclared here, since a
-      # ${VAR:-} default in `environment:` resolves via compose's OWN
-      # interpolation (its .env discovery, not env_file's) and would
-      # silently override the real value with an empty string.
       # ---- CPU containment (face_worker is the box's heaviest consumer) ----
       # Cap ML/BLAS/cv2 threading so ONNX/numpy don't fan out to ALL cores (the
       # cause of the 250% spikes). The hard `cpus:` cgroup limit below is the
@@ -260,36 +243,12 @@ services:
       VECLIB_MAXIMUM_THREADS: "${FACE_WORKER_THREADS:-2}"
       FACE_ONNX_THREADS: "${FACE_ONNX_THREADS:-2}"
       # P2-1: cap face_worker's SQLAlchemy engine pools (per engine) so a heavy
-      # drive/collector scan can't monopolise the shared collector Postgres and
-      # starve the analyzer/scheduler. pool_size + max_overflow per create_engine.
+      # collector-media ingest can't monopolise Postgres and starve the
+      # analyzer/scheduler. pool_size + max_overflow per create_engine.
       FACE_DB_POOL_SIZE: "${FACE_DB_POOL_SIZE:-3}"
       FACE_DB_MAX_OVERFLOW: "${FACE_DB_MAX_OVERFLOW:-2}"
       # Stagger cold-start behind analyzer+scheduler (footprint pass, 2026-09-28).
       STARTUP_DELAY_SECONDS: "${FACE_WORKER_STARTUP_DELAY_SECONDS:-60}"
-      # ---- Drive face-scanning (W/X/Y/Z) ----
-      # DriveScanner walks these container paths and feeds image files through
-      # the SAME InsightFace detect->index flow as collector media (see
-      # src/face_worker.py:ingest_drive_media). C: is DELIBERATELY ABSENT —
-      # walking C: hydrates OneDrive placeholders and fills the disk (retired
-      # facetracker's exact failure; see memory onedrive-hydration-hazard).
-      # Y:/Z: are local. W:/X: are SMB shares mounted by face_worker_entrypoint.sh.
-      DRIVE_SOURCES: >-
-        [{"path": "/mnt/w", "type": "local"},
-         {"path": "/mnt/x", "type": "local"},
-         {"path": "/mnt/y", "type": "local"},
-         {"path": "/mnt/z", "type": "local"}]
-      # Prefix-excluded subtrees: the analyzer's own derived face crops (would
-      # be a circular re-detect), collector media already indexed via the
-      # collector path (avoid dupes), and OS junk dirs.
-      # NOTE: $$ escapes a literal $ — docker-compose interpolates single $,
-      # so "$RECYCLE.BIN" must be written "$$RECYCLE.BIN" to survive.
-      EXCLUDE_PATHS: >-
-        ["/mnt/z/unifiedanalyzer", "/mnt/z/unifiedcollector",
-         "/mnt/z/$$RECYCLE.BIN", "/mnt/z/System Volume Information",
-         "/mnt/y/facetracker", "/mnt/y/unifiedcollector",
-         "/mnt/y/$$RECYCLE.BIN", "/mnt/y/System Volume Information",
-         "/mnt/w/$$RECYCLE.BIN", "/mnt/w/System Volume Information",
-         "/mnt/x/$$RECYCLE.BIN", "/mnt/x/System Volume Information"]
     volumes:
       # Live source mount (matches analyzer/scheduler) so code changes to
       # src/face_worker.py + src/face/* take effect on `restart` without an
@@ -297,16 +256,6 @@ services:
       - "../src:/app/src"
       - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
       - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
-      # Whole-drive read-only mounts for face scanning. Read-only: the worker
-      # only reads pixels, never writes to the scanned drives.
-      - "Y:/:/mnt/y:ro"
-      - "Z:/:/mnt/z:ro"
-      # W:/X: are CIFS shares on the configured SMB host, mounted by
-      # face_worker_entrypoint.sh at container start (best-effort - see
-      # comments there) rather than as Docker-managed named volumes. A
-      # missing/renamed share (2026-09-28 incident: w-drive vanished from the
-      # SMB host) now degrades to an empty /mnt/w instead of blocking the
-      # whole container from starting.
     networks:
       - unifiedcollector_default
     restart: unless-stopped

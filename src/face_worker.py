@@ -362,302 +362,6 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
     return stats
 
 
-def ingest_drive_media(limit: int = 200) -> dict:
-    """Index faces from image files on the configured DRIVE_SOURCES (e.g. the
-    W:/X:/Y:/Z: host drives, mounted into this container) into facetracker.images
-    / facetracker.faces.
-
-    This is the filesystem-walk counterpart to ingest_collector_media: instead of
-    pulling rows from the collector's media_items table, it walks the drive trees
-    via DriveScanner and runs the SAME InsightFace detect -> Image/Face write flow.
-    Differences from the collector path:
-      * Source is a filesystem walk (DriveScanner over Settings.drive_sources),
-        scoped + excluded by DRIVE_SOURCES / EXCLUDE_PATHS / EXCLUDE_DIR_NAMES.
-      * No entity bridging — a loose file on a drive has no platform owner, so we
-        do NOT write public.entity_faces (faces are still FAISS/pgvector
-        searchable and clusterable, just not pre-attributed to an entity).
-      * Images only for now. cv2.imread can't decode videos/most RAW, so we
-        filter to Settings.image_extensions. TODO(handoff): add a video-frame
-        path (mirror facetracker manager.py's ffmpeg sampling) if drive videos
-        need indexing.
-
-    SCOPE/SAFETY: DriveScanner fails closed when no drive_sources are configured
-    (see scanner.py D3 scope-lock) — and C: must never be added to DRIVE_SOURCES
-    (OneDrive hydration hazard; see memory + docs/facetracker_merge_plan.md).
-
-    Deduped by images.file_path (the container path), bounded by `limit` per call
-    for resumable batching. Idempotent: an already-indexed path is skipped.
-
-    Axis-3 Change-4: RESUMABLE via drive_scan_state. Files are sorted by
-    (mtime ASC, path ASC) per source root, filtered against the saved cursor
-    (mtime < cursor OR (mtime == cursor AND path <= last_path_walked)), then
-    processed. Every DRIVE_SCAN_STATE_CHECKPOINT_EVERY successful files the
-    (mtime, path) cursor is upserted, so a restart resumes where it left off
-    instead of re-walking. EXCLUDE_PATHS handling is unchanged — the scanner
-    already applies it during the walk.
-
-    We iterate each source with scanner.scan_directory() (single-threaded,
-    breakable generator) rather than scanner.scan_drives() (which spawns daemon
-    producer threads that would leak across repeated loop ticks when we break
-    early on `limit`).
-    """
-    import hashlib
-    from datetime import datetime, timezone
-
-    import cv2
-    from sqlalchemy import create_engine, text
-    from sqlalchemy.orm import sessionmaker
-
-    from src.face.config import Settings
-    from src.face.discovery.scanner import DriveScanner
-    from src.face.engine.detector import FaceDetector
-    from src.face.storage.database import Image as FtImage, Face as FtFace
-
-    stats = {"scanned": 0, "images_indexed": 0, "faces": 0, "skipped": 0}
-    checkpoint_every = int(os.getenv("DRIVE_SCAN_STATE_CHECKPOINT_EVERY", "100"))
-
-    settings = Settings()
-    scanner = DriveScanner(settings)
-    if not scanner.drive_sources:
-        # Fail-closed: no DRIVE_SOURCES -> nothing to do (cheap no-op).
-        return stats
-    image_exts = set(settings.image_extensions)
-
-    analyzer_engine = create_engine(
-        analyzer_sqlalchemy_url(),
-        connect_args={"options": f"-csearch_path={FACE_DB_SCHEMA},public"},
-        pool_pre_ping=True,
-        # P2-1: cap this worker's share of the shared Postgres so a big drive
-        # scan can't exhaust the connection pool the analyzer/scheduler need.
-        pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
-        max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
-    )
-    _wait_for_db(analyzer_engine)
-
-    # Dedupe cursor: every already-indexed file_path (collector + drive).
-    with analyzer_engine.connect() as aconn:
-        done = {r[0] for r in aconn.execute(text("SELECT file_path FROM images")).fetchall()}
-
-    def _load_cursor(drive_path: str) -> tuple[float | None, str | None]:
-        """Fetch (mtime_epoch, last_path) for the given drive root. None,None if
-        no prior scan recorded. TIMESTAMPTZ->epoch keeps the comparison cheap
-        against FileRecord.mtime (a float)."""
-        with analyzer_engine.connect() as _c:
-            row = _c.execute(
-                text("SELECT EXTRACT(EPOCH FROM last_mtime_walked)::double precision AS m, "
-                     "last_path_walked FROM public.drive_scan_state WHERE drive_path = :p"),
-                {"p": drive_path},
-            ).fetchone()
-        if row is None:
-            return None, None
-        return (float(row[0]) if row[0] is not None else None, row[1])
-
-    def _save_cursor(drive_path: str, mtime: float, path: str, added: int) -> None:
-        """Upsert the (mtime, path) cursor + bump files_indexed. Runs inside its
-        own short transaction so a mid-batch checkpoint survives a later crash."""
-        dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
-        with analyzer_engine.begin() as _c:
-            _c.execute(
-                text("""
-                    INSERT INTO public.drive_scan_state
-                        (drive_path, last_mtime_walked, last_path_walked,
-                         files_indexed, updated_at)
-                    VALUES (:p, :m, :lp, :n, NOW())
-                    ON CONFLICT (drive_path) DO UPDATE SET
-                        last_mtime_walked = EXCLUDED.last_mtime_walked,
-                        last_path_walked  = EXCLUDED.last_path_walked,
-                        files_indexed     = public.drive_scan_state.files_indexed + EXCLUDED.files_indexed,
-                        updated_at        = NOW()
-                """),
-                {"p": drive_path, "m": dt, "lp": path, "n": added},
-            )
-
-    detector = None
-    Session = sessionmaker(bind=analyzer_engine)
-
-    def _reached_limit() -> bool:
-        return stats["images_indexed"] >= limit
-
-    try:
-        for source in scanner.drive_sources:
-            if _reached_limit():
-                break
-            src_path = source.get("path") if isinstance(source, dict) else source.path
-
-            cursor_mtime, cursor_last_path = _load_cursor(src_path)
-
-            # Buffer image-only, not-yet-indexed, past-the-cursor records for
-            # this source, then sort by (mtime ASC, path ASC) for deterministic
-            # resumable order. FileRecord is ~200B so even 1M rows = ~200MB —
-            # acceptable for a full walk, and each pass is capped by `limit` so
-            # we usually break out long before finishing.
-            candidates: list = []
-            for batch in scanner.scan_directory(src_path):
-                for record in batch:
-                    if record.extension not in image_exts:
-                        continue
-                    if record.path in done:
-                        continue
-                    # Cursor filter: skip everything strictly before the saved
-                    # (mtime, path) — the walk that produced the cursor already
-                    # processed those. Equal-mtime ties break on path to keep
-                    # the ordering total.
-                    if cursor_mtime is not None:
-                        if record.mtime < cursor_mtime:
-                            continue
-                        if record.mtime == cursor_mtime and (
-                            cursor_last_path is not None
-                            and record.path <= cursor_last_path
-                        ):
-                            continue
-                    candidates.append(record)
-            candidates.sort(key=lambda r: (r.mtime, r.path))
-
-            since_checkpoint = 0
-            for record in candidates:
-                if _reached_limit():
-                    break
-                stats["scanned"] += 1
-
-                img = cv2.imread(record.path)
-                if img is None:
-                    stats["skipped"] += 1
-                    continue
-
-                # Lazy-init detector (first use downloads/loads the ONNX
-                # model). Keep it off the path when nothing decodes.
-                if detector is None:
-                    detector = FaceDetector()
-
-                h, w = img.shape[:2]
-                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                faces = detector.detect(rgb)
-
-                # file_hash / embedding_id need to fit String(64). The path
-                # itself can exceed that, so key off a sha1 of the path
-                # (40 hex chars, leaving room for the ":{idx}" face suffix).
-                path_hash = hashlib.sha1(record.path.encode("utf-8")).hexdigest()
-
-                sess = Session()
-                try:
-                    image_row = FtImage(
-                        file_path=record.path, file_hash=path_hash,
-                        file_size=int(record.size), file_mtime=record.mtime,
-                        width=w, height=h, status="completed", is_video=False,
-                        face_count=len(faces),
-                    )
-                    sess.add(image_row)
-                    sess.flush()  # assign image_row.id
-                    for idx, f in enumerate(faces):
-                        if f.embedding is None:
-                            continue
-                        x1, y1, x2, y2 = [int(v) for v in f.bbox]
-                        face_row = FtFace(
-                            image_id=image_row.id,
-                            embedding_id=f"{path_hash}:{idx}",
-                            bbox_x1=x1 / w, bbox_y1=y1 / h, bbox_x2=x2 / w, bbox_y2=y2 / h,
-                            bbox_px_x1=x1, bbox_px_y1=y1, bbox_px_x2=x2, bbox_px_y2=y2,
-                            quality_score=float(f.quality_score),
-                            laplacian_variance=float(f.laplacian_variance),
-                            face_area_percent=float(f.area_ratio * 100.0),
-                            detection_confidence=float(f.confidence),
-                            embedding_vec=f.embedding.tolist(),
-                        )
-                        sess.add(face_row)
-                        stats["faces"] += 1
-                    sess.commit()
-                    stats["images_indexed"] += 1
-                    since_checkpoint += 1
-                    done.add(record.path)
-                    # Drive originals keep EXIF that social media strips —
-                    # capture GPS + camera serial so the analyzer can emit
-                    # media_gps_colocation / media_device_match for faces on
-                    # this image that are bridged to an entity.
-                    if _store_drive_exif(analyzer_engine, record.path, path_hash):
-                        stats["with_exif"] = stats.get("with_exif", 0) + 1
-                    # Axis-3 Change-4: checkpoint the resumable cursor every
-                    # N successful files so a crash mid-batch loses at most N
-                    # files of work, not the whole walk.
-                    if since_checkpoint >= checkpoint_every:
-                        try:
-                            _save_cursor(src_path, record.mtime, record.path, since_checkpoint)
-                            since_checkpoint = 0
-                        except Exception:
-                            logger.debug(
-                                "drive_scan_state checkpoint write failed (non-fatal)",
-                                exc_info=True,
-                            )
-                except Exception:
-                    sess.rollback()
-                    logger.exception("drive ingest failed for %s", record.path)
-                    stats["skipped"] += 1
-                finally:
-                    sess.close()
-
-            # End-of-source checkpoint: flush whatever's uncheckpointed so the
-            # next tick doesn't re-scan the tail of a partially-drained source.
-            if since_checkpoint and candidates:
-                last = None
-                # Find the last actually-processed record (limit or scan may
-                # have broken early). Iterate in-order over the filtered list
-                # and track the last one whose path is in `done`.
-                for r in candidates:
-                    if r.path in done:
-                        last = r
-                if last is not None:
-                    try:
-                        _save_cursor(src_path, last.mtime, last.path, since_checkpoint)
-                    except Exception:
-                        logger.debug(
-                            "drive_scan_state end-of-source checkpoint failed (non-fatal)",
-                            exc_info=True,
-                        )
-    finally:
-        analyzer_engine.dispose()
-
-    return stats
-
-
-def _store_drive_exif(analyzer_engine, file_path: str, path_hash: str) -> bool:
-    """Extract EXIF GPS + camera-serial device fingerprint from a drive image and
-    upsert a media_analysis row (source='drive', media_item_id=path_hash) so the
-    analyzer can attribute it to an entity via the face bridge and emit signals.
-    Only writes when there's actually GPS or a device serial (most stripped social
-    re-saves have neither — no point bloating the table). Returns True if written.
-
-    Reuses the analyzer's EXIF parser (_extract_exif_gps) so parsing stays single-
-    source. Writes via the face_worker's SQLAlchemy engine into public.media_analysis.
-    """
-    from pathlib import Path as _Path
-    from sqlalchemy import text
-    import json as _json
-    try:
-        from src.pipeline.media_analysis import _extract_exif_gps
-        lat, lon, taken_at, device = _extract_exif_gps(_Path(file_path))
-    except Exception:
-        logger.debug("drive EXIF read failed for %s", file_path, exc_info=True)
-        return False
-    if lat is None and lon is None and not device:
-        return False
-    rj = _json.dumps({"device": device}) if device else None
-    try:
-        with analyzer_engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO public.media_analysis
-                    (media_item_id, source, content_type, analysis_type,
-                     gps_lat, gps_lon, taken_at, result_json, model_version, processed_at)
-                VALUES (:mid, 'drive', 'image', 'exif_gps',
-                        :lat, :lon, :taken, CAST(:rj AS jsonb), 'pillow-exif-v2', NOW())
-                ON CONFLICT (media_item_id, analysis_type) DO UPDATE SET
-                    gps_lat = EXCLUDED.gps_lat, gps_lon = EXCLUDED.gps_lon,
-                    taken_at = EXCLUDED.taken_at, result_json = EXCLUDED.result_json,
-                    model_version = EXCLUDED.model_version, processed_at = NOW()
-            """), {"mid": path_hash, "lat": lat, "lon": lon, "taken": taken_at, "rj": rj})
-        return True
-    except Exception:
-        logger.debug("drive EXIF store failed for %s", file_path, exc_info=True)
-        return False
-
 
 def relink_entity_faces(limit: int | None = None) -> dict:
     """Backfill public.entity_faces for already-indexed collector faces whose
@@ -1061,18 +765,8 @@ def loop(batch: int, interval: int) -> None:
     a tick that finds nothing new (e.g. while collector source media is still
     being restored — task B1) is a cheap no-op. Errors are logged, not fatal.
 
-    Drive scanning: when DRIVE_SOURCES is configured, every `drive_every`th tick
-    also runs ingest_drive_media over the mounted W/X/Y/Z drives. It's on a
-    slower cadence (FACE_WORKER_DRIVE_INTERVAL, default 1h) because a full drive
-    walk — especially over the SMB W:/X: shares — is far heavier than the
-    collector DB query. TODO(handoff): the walk re-stats already-indexed files
-    each pass; add an mtime/cursor optimization if SMB walk cost becomes a
-    problem.
     """
     import time
-    drive_limit = int(os.getenv("FACE_WORKER_DRIVE_BATCH", "200"))
-    drive_interval = int(os.getenv("FACE_WORKER_DRIVE_INTERVAL", "3600"))
-    drive_every = max(1, drive_interval // max(1, interval))
     # Re-attribution cadence: faces are bridged at index time, but entity links
     # keep growing, so periodically re-link already-indexed faces that have since
     # become resolvable. Cheaper than the drive walk; every ~30min by default.
@@ -1085,9 +779,9 @@ def loop(batch: int, interval: int) -> None:
     video_interval = int(os.getenv("FACE_WORKER_VIDEO_INTERVAL", "600"))
     video_every = max(1, video_interval // max(1, interval)) if video_interval > 0 else 0
     logger.info(
-        "Face worker loop: batch=%d interval=%ds | drive_batch=%d drive_every=%d | "
+        "Face worker loop: batch=%d interval=%ds | "
         "relink_every=%d | video_batch=%d video_every=%d ticks",
-        batch, interval, drive_limit, drive_every, relink_every, video_batch, video_every,
+        batch, interval, relink_every, video_batch, video_every,
     )
     tick = 0
     while True:
@@ -1116,14 +810,6 @@ def loop(batch: int, interval: int) -> None:
                     logger.info("entity_faces relink tick: %s", rstats)
             except Exception:
                 logger.exception("entity_faces relink tick failed (will retry next cycle)")
-
-        if tick % drive_every == 0:
-            try:
-                dstats = ingest_drive_media(drive_limit)
-                if dstats.get("scanned") or dstats.get("images_indexed"):
-                    logger.info("drive ingest tick: %s", dstats)
-            except Exception:
-                logger.exception("drive ingest tick failed (will retry next cycle)")
 
         # Q1: video-frame face ingest on its own (slower) cadence. Tracked-owner
         # videos first so entity_faces coverage isn't starved by group-chat video.
@@ -1171,12 +857,6 @@ def main() -> None:
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else 5000
         logger.info("Tracked-entity ingest (limit=%d)…", limit)
         logger.info("tracked ingest stats: %s", ingest_collector_media(limit, tracked_only=True))
-    elif cmd == "scan":
-        # One-shot drive scan over DRIVE_SOURCES (W/X/Y/Z mounts). Used for
-        # testing/manual backfill; the `loop` command runs it on a cadence.
-        limit = int(sys.argv[2]) if len(sys.argv) > 2 else 200
-        logger.info("Drive scan (limit=%d)…", limit)
-        logger.info("drive scan stats: %s", ingest_drive_media(limit))
     elif cmd == "relink":
         # One-shot backfill of public.entity_faces for already-indexed faces whose
         # media_item now resolves to an entity (limit optional; default all).
