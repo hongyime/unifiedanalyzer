@@ -1,3 +1,34 @@
+# Postgres instance split (Option 1) + A1 face rework — 2026-10-02 (analyzer side)
+
+Cross-repo change with C:\unifiedcollector. Splitting the shared Postgres into
+two containers (OOM blast radius) and reworking faces to collector media only.
+Analyzer-side code/config waves are pushed:
+
+- W2 `062facf`: GAN synthetic-avatar columns (`gan_score`, `gan_model_version`,
+  `gan_scored_at`) + `face_gan_overrides` added to `src/db/schema.sql`, moved
+  from the collector (entity_faces is analyzer-owned). One-shot for the live DB:
+  `src/db/migrations/004_add_gan_face_columns.sql` (apply_schema does not glob
+  migrations/ — run it by hand via the pgvector image).
+- W3 `ecc34ee`: new `postgres` service (`unifiedanalyzer_postgres`, host 5434,
+  C: `pgdata` volume, mem_limit 2g, oom_score_adj -300) + all four services
+  depend_on it healthy. `ee3c2cf` documented `ANALYZER_POSTGRES_HOST_PORT`.
+- W5 `0da4eff`: `ANALYZER_DATABASE_URL` repointed to `postgres:5432` in all four
+  services. `COLLECTOR_DATABASE_URL` still points at the shared instance (W7, collector repo).
+- W9 `f20e902`: A1 — removed `ingest_drive_media`/`_store_drive_exif`, the loop
+  drive-tick, the `scan` CLI, and the compose DRIVE_SOURCES/mounts/caps/root/entrypoint.
+  Faces now come only from collector media_items. Tests `767343c`.
+
+Live-DB waves QUEUED until the stack is up (verify with psql/pg_dump inside the
+pgvector/pgvector:pg16 image, no host client):
+- W2-T2: apply `004_add_gan_face_columns.sql` to the live shared unifiedanalyzer DB.
+- W3-T3: start `unifiedanalyzer_postgres`, verify empty DB on 5434.
+- W4: `pg_dump` unifiedanalyzer from the shared instance (5433) -> `pg_restore` into 5434; verify row counts + GAN cols + facetracker + pgvector.
+- W5 live verify: analyzer boots healthy on its own DB; degraded-boot when the collector URL is down (CollectorUnavailableError path).
+- W8: after 48h burn-in, DROP DATABASE unifiedanalyzer from the shared instance (pre-drop backup first).
+- W9-T2/T3: back up then drop ~902k entity_faces + TRUNCATE facetracker, VACUUM; start face_worker and confirm re-ingest from media_items only (no /mnt/ paths).
+
+---
+
 # Cleanup + smoke-test pass — 2026-09-30 (analyzer side)
 
 Follow-up to today's Do Now / Do Next / Explore batch. Operator asked to enable all opt-in flags, remove Whoxy + SauceNAO entirely (no keys), default GAN model to HuggingFace, and fix the noisy-OR limitation with negative signals. Also smoke-test each new pipeline against live corpus with cleanup tags.
