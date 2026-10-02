@@ -10,8 +10,44 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
+  # Analyzer-owned Postgres (split from the shared collector instance, W3).
+  # Previously both apps shared unifiedcollector_postgres; this gives the
+  # analyzer its own instance + volume so an OOM in one no longer kills both.
+  # Mirrors the two-container pattern already used in compose.dev.yaml.
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: unifiedanalyzer_postgres
+    init: true
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-collector}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: unifiedanalyzer
+    ports:
+      # 5434 host-side (collector uses 5433, bare pg uses 5432). Containers
+      # still reach it as postgres:5432 on the shared network.
+      - "${ANALYZER_POSTGRES_HOST_PORT:-5434}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-collector} -d unifiedanalyzer"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - unifiedcollector_default
+    restart: unless-stopped
+    logging: *default-logging
+    # Own instance = own OOM blast radius. 2g ceiling, soft 1g reservation,
+    # oom_score_adj biases the kernel killer away from the DB under pressure.
+    mem_limit: 2g
+    mem_reservation: 1g
+    oom_score_adj: -300
+
   analyzer:
     container_name: unifiedanalyzer_analyzer
+    depends_on:
+      postgres:
+        condition: service_healthy
     # Dashboard image bundles the built frontend + API + scheduler.
     # Auto-starts with Docker Desktop via restart: unless-stopped.
     image: unifiedanalyzer:latest
@@ -87,7 +123,10 @@ services:
     init: true
     stop_grace_period: 120s
     depends_on:
-      - analyzer
+      postgres:
+        condition: service_healthy
+      analyzer:
+        condition: service_started
     command: ["python", "-m", "src.main", "scheduler"]
     # Dynamic (env-tunable) resource caps — bounds the scheduler (entity
     # resolution + recon_bridge tick) without harming a full-resolution run.
@@ -176,7 +215,10 @@ services:
     image: unifiedanalyzer:latest
     init: true
     depends_on:
-      - analyzer
+      postgres:
+        condition: service_healthy
+      analyzer:
+        condition: service_started
     # Runs as root briefly so the entrypoint can attempt the optional W:/X:
     # CIFS mounts (best-effort - see face_worker_entrypoint.sh), then drops
     # privileges to appuser via setpriv before the real process starts.
@@ -289,7 +331,10 @@ services:
     image: unifiedanalyzer:latest
     profiles: ["stream-alerts"]
     depends_on:
-      - analyzer
+      postgres:
+        condition: service_healthy
+      analyzer:
+        condition: service_started
     command: ["python", "-m", "src.main", "stream-alerts", "--poll-interval", "${STREAM_ALERT_POLL_INTERVAL:-30}", "--batch-size", "${STREAM_ALERT_BATCH_SIZE:-1000}", "--term-threshold", "${STREAM_ALERT_TERM_THRESHOLD:-10}"]
     env_file:
       - ../.env
@@ -313,3 +358,8 @@ services:
 networks:
   unifiedcollector_default:
     external: true
+
+volumes:
+  # Analyzer-owned Postgres data (W3). C:-backed named volume, same class as
+  # the collector's unifiedcollector_pgdata. Media/models stay on Z:.
+  pgdata:
