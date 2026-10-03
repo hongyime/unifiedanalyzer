@@ -20,7 +20,7 @@ services:
     init: true
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-collector}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-collector}
       POSTGRES_DB: unifiedanalyzer
     ports:
       # 5434 host-side (collector uses 5433, bare pg uses 5432). Containers
@@ -63,7 +63,7 @@ services:
       # In-container overrides of the host-oriented .env values:
       # reach the collector Postgres by its container name on the shared network
       # (host .env uses localhost:5500, which is only valid on the host).
-      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD}@postgres:5432/unifiedanalyzer
+      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DASHBOARD_URL: http://unifiedcollector_dashboard:8700
       # Derived media lives on Z: on the host; mounted into the container below.
@@ -136,7 +136,7 @@ services:
     env_file:
       - ../.env
     environment:
-      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD}@postgres:5432/unifiedanalyzer
+      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DASHBOARD_URL: http://unifiedcollector_dashboard:8700
       MEDIA_DERIVED_PATH: /app/media_derived
@@ -226,7 +226,7 @@ services:
     env_file:
       - ../.env
     environment:
-      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD}@postgres:5432/unifiedanalyzer
+      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
       MEDIA_DERIVED_PATH: /app/media_derived
       COLLECTOR_MEDIA_ROOT: /app/collector_root
@@ -288,7 +288,7 @@ services:
     env_file:
       - ../.env
     environment:
-      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD}@postgres:5432/unifiedanalyzer
+      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DASHBOARD_URL: http://unifiedcollector_dashboard:8700
       DB_MAX_POOL_SIZE: "${STREAM_ALERT_DB_POOL_SIZE:-3}"
