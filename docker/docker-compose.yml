@@ -214,6 +214,10 @@ services:
     container_name: unifiedanalyzer_face_worker
     image: unifiedanalyzer:latest
     init: true
+    # Runs as root: collector media blobs are root-owned 0600, so appuser cannot
+    # read them. Root is required for collector-media ingest (NOT for drive/CIFS
+    # mounting, which was removed in the A1 pass). No cap_add/entrypoint needed.
+    user: root
     depends_on:
       postgres:
         condition: service_healthy
