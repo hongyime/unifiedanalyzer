@@ -29,8 +29,13 @@ pgvector/pgvector:pg16 image; shared instance host port is 5500, not 5433):
 - W9-T3 DONE (running): face_worker re-ingests from collector media only (/vault, 0 /mnt paths). Full corpus populate is a long-running background process that fills entity_faces over cycles.
 - Two defects found+fixed by live boot: blank POSTGRES_PASSWORD crash-loop (88e6c9f) and user:root removed in W9-T1 broke reading root-owned 0600 collector blobs (4495127).
 
-STILL PENDING:
-- W8: DROP DATABASE unifiedanalyzer from the shared instance (5500). PARKED behind a 48h burn-in gate - do NOT run before ~2026-10-05, and only after confirming the new 5434 instance stayed healthy. Fallback is 20261003_pre_split_unifiedanalyzer.dump.
+W8 DONE 2026-10-03 (burn-in waived by user after confirming the new instance):
+- DROP DATABASE unifiedanalyzer on the shared instance (5500) executed. Verified:
+  shared instance now holds ONLY unifiedcollector; unifiedanalyzer_postgres (5434)
+  holds ONLY unifiedanalyzer (entities=33511 intact). Split is fully clean - the
+  analyzer DB exists in exactly one place. Z: pre-split dump retained as recovery net.
+
+SPLIT COMPLETE. Nothing pending. Face corpus re-ingest continues in the background.
 
 ---
 
