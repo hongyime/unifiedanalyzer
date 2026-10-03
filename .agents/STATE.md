@@ -18,14 +18,19 @@ Analyzer-side code/config waves are pushed:
   drive-tick, the `scan` CLI, and the compose DRIVE_SOURCES/mounts/caps/root/entrypoint.
   Faces now come only from collector media_items. Tests `767343c`.
 
-Live-DB waves QUEUED until the stack is up (verify with psql/pg_dump inside the
-pgvector/pgvector:pg16 image, no host client):
-- W2-T2: apply `004_add_gan_face_columns.sql` to the live shared unifiedanalyzer DB.
-- W3-T3: start `unifiedanalyzer_postgres`, verify empty DB on 5434.
-- W4: `pg_dump` unifiedanalyzer from the shared instance (5433) -> `pg_restore` into 5434; verify row counts + GAN cols + facetracker + pgvector.
-- W5 live verify: analyzer boots healthy on its own DB; degraded-boot when the collector URL is down (CollectorUnavailableError path).
-- W8: after 48h burn-in, DROP DATABASE unifiedanalyzer from the shared instance (pre-drop backup first).
-- W9-T2/T3: back up then drop ~902k entity_faces + TRUNCATE facetracker, VACUUM; start face_worker and confirm re-ingest from media_items only (no /mnt/ paths).
+Live-DB waves EXECUTED 2026-10-03 (verified with psql/pg_dump inside the
+pgvector/pgvector:pg16 image; shared instance host port is 5500, not 5433):
+- W3-T3 DONE: `unifiedanalyzer_postgres` healthy on 5434, DB was empty pre-restore.
+- W2-T2 DONE: `004_add_gan_face_columns.sql` applied to the live shared DB (idempotent; columns already existed from the pre-archive collector run).
+- W4 DONE: restored unifiedanalyzer from shared (5500) into 5434 over the shared network (container-to-container, no host file). Exact row parity: entities=33511, entity_faces=7926, timeline_events=12033539; GAN cols + facetracker + pgvector present; 0 restore errors. Backup: Z:\unifiedanalyzer\backups\db\20261003_pre_split_unifiedanalyzer.dump.
+- W5 DONE (partial): DB wiring verified live (analyzer creds reach 5434, entities=33511; collector URL still shared). Full app-boot health check was blocked earlier by a Docker Z: mount fault, since fixed by a Docker Desktop restart.
+- W7-T2 DONE: a container on unifiedcollector_default reaches `unifiedanalyzer_postgres` by name; account_proximity (106522 rows) readable.
+- W9-T2 DONE: dropped entity_faces(7926) + facetracker.faces(23982)/images(180144) + face_gan_overrides, VACUUMed; schema intact (10 cols, 3 GAN, 6 facetracker tables). Backup: Z:\unifiedanalyzer\backups\db\20261003_pre_face_drop.dump.
+- W9-T3 DONE (running): face_worker re-ingests from collector media only (/vault, 0 /mnt paths). Full corpus populate is a long-running background process that fills entity_faces over cycles.
+- Two defects found+fixed by live boot: blank POSTGRES_PASSWORD crash-loop (88e6c9f) and user:root removed in W9-T1 broke reading root-owned 0600 collector blobs (4495127).
+
+STILL PENDING:
+- W8: DROP DATABASE unifiedanalyzer from the shared instance (5500). PARKED behind a 48h burn-in gate - do NOT run before ~2026-10-05, and only after confirming the new 5434 instance stayed healthy. Fallback is 20261003_pre_split_unifiedanalyzer.dump.
 
 ---
 
