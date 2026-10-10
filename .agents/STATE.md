@@ -73,6 +73,7 @@ for this fix. The dev Docker stage seeds those owners for future dependency buil
 Static Compose and scope checks pass; runtime verification and publication remain
 in progress. Production stages, worker opt-in and stored file ownership are preserved.
 
+
 # Container development checkpoint — 2026-09-27
 
 Applied an explicit `compose.dev.yaml` with separate development databases/data,
@@ -203,6 +204,7 @@ Fresh export/run evidence (02:27 UTC): `/api/indicators/export/supabase/status` 
 Monitoring update (04:08 UTC): restore continues creating timeline-partition constraints, with2021 entries observed in the04:07 log search. Latest index scan reports1155/1792blocks for that index only. Controllers17160/19704/14112 remain alive. No restore/validation/build completion markers exist yet. The monitoring checklist is complete as a progress check, not as recovery acceptance; the six production goals remain open as described above. Leave the existing success-gated chain running and inspect its exit/proof artifacts before taking dependent deployment steps.
 
 ## Previous recovery checkpoint — 2026-09-16 04:17 UTC
+
 
 Current task: finish post-reboot recovery. **Dashboards are reachable; production readiness is still degraded.** Await a quiet maintenance-window decision before pausing additional heavy workers for load isolation/full-backup validation.
 
@@ -756,6 +758,8 @@ Updated: 2026-08-29 15:37 SGT — SC1 LIVE + incident notes
 Machine-specific values in this document use privacy placeholders.
 
 2026-09-27: Current upstream changes are preserved in the publication branch. Initial CI, bounded runtime validation and resource teardown are in progress under the user-approved maintenance release.
+
+2026-09-27: Backported the merged SMB development Watch, CPU-only builder/PostgreSQL16 backup-tool alignment, anyio manifest entry, and isolated development-volume ownership initializer through eight guarded configuration/build/documentation edits. All-profile local Compose checks passed (8 services,9 sync rules,exact two volume-root ownership changes); reverse-byte proof and original HEAD/branch/index preservation passed. The separate published fixture passed20 runtime checks with cleanup using retained images. Older canonical application files and six absent newer modules remain unchanged; canonical-source runtime is a separate pending gate. No image build, app start, protected-file read, canonical commit/push/reset or stash was performed.
 
 
 ## 2026-09-27: Maintenance CI follow-up

@@ -240,12 +240,15 @@
 - 2026-09-25 15:55:58 +08:00 [dev-host-3.example/claude/stop] branch=main head=980001d dirty=0
 
 
+
 Machine-specific values in this document use privacy placeholders.
 
 ## 2026-09-27 — Isolated container development
 Added explicit development Compose, bind-mounted polling reload, isolated dependency/data volumes, dev/production image stages, guarded GHCR retention and cross-platform instructions. Compose/configuration contracts, Vite configuration checks, retention fixtures, and Windows/WSL reload fixtures passed. No builds, pulls, application starts, commits or pushes were performed; deployment health and real SMB mount behavior are not claimed.
 
 2026-09-27: Current upstream changes are preserved in the publication branch. Initial CI, bounded runtime validation and resource teardown are in progress under the user-approved maintenance release.
+
+- 2026-09-27: Backported the merged SMB development Watch, CPU-only builder/PostgreSQL16 backup-tool alignment, anyio manifest entry, and isolated development-volume ownership initializer through eight guarded configuration/build/documentation edits. All-profile local Compose checks passed (8 services,9 sync rules,exact two volume-root ownership changes); reverse-byte proof and original HEAD/branch/index preservation passed. The separate published fixture passed20 runtime checks with cleanup using retained images. Older canonical application files and six absent newer modules remain unchanged; canonical-source runtime is a separate pending gate. No image build, app start, protected-file read, canonical commit/push/reset or stash was performed.
 
 - 2026-09-27: Preserve caller signal handlers on scheduler teardown; verify five focused Linux regressions and retain the full-suite coverage requirement.
 
