@@ -148,6 +148,9 @@ def _send_sync(
         return resp.status == 200, message_id, None if resp.status == 200 else body[:200]
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")[:200]
+        if e.code == 400 and "parse entities" in body and parse_mode:
+            logger.warning("Telegram HTML parse failed, retrying as plain text")
+            return _send_sync(text, parse_mode=None, reply_markup=reply_markup)
         logger.warning("Telegram send failed: %s %s", e.code, body)
         return False, None, f"{e.code} {body}"
     except Exception:
