@@ -732,6 +732,31 @@ CREATE TABLE IF NOT EXISTS timeline_text_features (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS sentiment_results (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id           UUID,
+    entity_id          UUID,
+    language_code      TEXT,
+    language_confidence REAL,
+    vader_compound     REAL,
+    vader_pos          REAL,
+    vader_neu          REAL,
+    vader_neg          REAL,
+    afinn_score        REAL,
+    nrc_emotions       JSONB NOT NULL DEFAULT {},
+    sentiment_label    TEXT,
+    sentiment_confidence REAL,
+    sentiment_flags    JSONB NOT NULL DEFAULT {},
+    method_versions    JSONB NOT NULL DEFAULT {},
+    confidence         FLOAT DEFAULT 1.0,
+    evidence_excerpt   TEXT,
+    processed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sentiment_results_entity_time
+    ON sentiment_results(entity_id, processed_at DESC);
 ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS language_code TEXT;
 ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS language_confidence REAL;
 ALTER TABLE timeline_text_features ADD COLUMN IF NOT EXISTS vader_compound REAL;
