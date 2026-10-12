@@ -56,6 +56,10 @@ class FaceDetectionResult:
         }
 
 
+class FaceInferenceError(Exception):
+    """Raised when the underlying face model fails to run."""
+
+
 class FaceDetector:
     """Detect faces in images using InsightFace RetinaFace."""
 
@@ -255,6 +259,89 @@ class FaceDetector:
         except Exception as e:
             logger.error(f"Face detection failed: {e}")
             return []
+
+    def detect_strict(self, image: np.ndarray, extract_embeddings: bool = True) -> List[FaceDetectionResult]:
+        """Detect faces like :meth:`detect`, propagating inference failures.
+
+        Callers that treat an empty result as a completed no-face analysis
+        should continue using :meth:`detect`. Retryable ingest paths use this
+        method to distinguish inference failures from genuine empty detections.
+        """
+        try:
+            # Get image dimensions
+            height, width = image.shape[:2]
+            image_area = height * width
+
+            # Run detection. Serialized via _detect_lock so concurrent
+            # worker threads can't race inside InsightFace's Python wrapper.
+            with self._detect_lock:
+                faces = self.app.get(image)
+
+            results = []
+            for face in faces:
+                bbox = face.bbox.astype(int)
+                x1, y1, x2, y2 = bbox
+                face_area = (x2 - x1) * (y2 - y1)
+                area_ratio = face_area / image_area
+                if area_ratio < self.MIN_AREA_RATIO:
+                    logger.debug(f"Face filtered: area_ratio {area_ratio:.3f} < {self.MIN_AREA_RATIO}")
+                    continue
+
+                if self.MAX_ASPECT_RATIO > 0:
+                    bw = max(1, x2 - x1)
+                    bh = max(1, y2 - y1)
+                    aspect = max(bw / bh, bh / bw)
+                    if aspect > self.MAX_ASPECT_RATIO:
+                        logger.debug(f"Face filtered: aspect {aspect:.2f} > {self.MAX_ASPECT_RATIO}")
+                        continue
+
+                confidence = face.det_score if hasattr(face, 'det_score') else 1.0
+                if confidence < self.MIN_CONFIDENCE:
+                    logger.debug(f"Face filtered: confidence {confidence:.3f} < {self.MIN_CONFIDENCE}")
+                    continue
+
+                landmark = face.kps if hasattr(face, 'kps') else np.zeros((5, 2))
+                face_crop = image[max(0, y1):min(height, y2), max(0, x1):min(width, x2)]
+                if face_crop.size > 0:
+                    laplacian_var = self.quality_scorer.compute_laplacian_variance(face_crop)
+                    if laplacian_var < self.MIN_LAPLACIAN_VARIANCE:
+                        logger.debug(f"Face filtered: laplacian {laplacian_var:.1f} < {self.MIN_LAPLACIAN_VARIANCE}")
+                        continue
+
+                    normalized_area = min(area_ratio / 0.2, 1.0)
+                    quality_score = self.quality_scorer.compute_quality_score(
+                        laplacian_var, normalized_area, confidence
+                    )
+                else:
+                    laplacian_var = 0
+                    quality_score = 0
+
+                result = FaceDetectionResult(
+                    bbox=bbox,
+                    landmark=landmark,
+                    confidence=confidence,
+                    quality_score=quality_score,
+                    area_ratio=area_ratio,
+                    laplacian_variance=laplacian_var,
+                )
+
+                if extract_embeddings and hasattr(face, 'embedding') and face.embedding is not None:
+                    embedding = face.embedding.astype(np.float32)
+                    norm = np.linalg.norm(embedding)
+                    if norm > 0:
+                        embedding = embedding / norm
+                    result.embedding = embedding
+                else:
+                    result.embedding = None
+
+                results.append(result)
+
+            logger.debug(f"Detected {len(results)} faces passing filters")
+            return results
+
+        except Exception as e:
+            logger.error(f"Face detection failed: {e}")
+            raise FaceInferenceError(f"Face detection failed: {e}") from e
 
     def detect_raw(self, image: np.ndarray) -> List[Dict]:
         """

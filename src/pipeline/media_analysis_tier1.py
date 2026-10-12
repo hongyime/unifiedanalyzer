@@ -282,9 +282,12 @@ async def analyze_media_faces(limit: int | None = None) -> dict:
             ["pdf_image", "video_frame"], "face_detection", limit=batch_limit - len(items)
         )
 
+    logger.info("6F face detection: fetched %d items to process", len(items))
+    if not items:
+        return stats
+
     detector = cv2.FaceDetectorYN_create(str(_FACE_DETECTOR_MODEL), "", (320, 320))
     recognizer = cv2.FaceRecognizerSF_create(str(_FACE_RECOGNIZER_MODEL), "")
-    logger.info("6F face detection: fetched %d items to process", len(items))
 
     def _face_loop(items_: list[dict]) -> tuple[list[dict], list[dict], int]:
         """CPU-bound: cv2 YuNet detection + SFace embedding per image. Runs

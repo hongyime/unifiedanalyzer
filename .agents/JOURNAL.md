@@ -259,3 +259,16 @@ Added explicit development Compose, bind-mounted polling reload, isolated depend
 - 2026-09-27: Initialize only development media/decision volume-root ownership with the existing local image before app startup; avoid an ownership-only rebuild. Keep production stages, worker profiles and stored file ownership unchanged; static checks pass and runtime proof remains pending.
 
 - 2026-09-28: Cross-repo footprint-reduction pass mirroring one already done on the sibling unifiedcollector repo (shared Postgres, shared Docker Desktop VM). Read-only scope inventory first (background explore agent): 4 services total, only 1 already-disabled-by-default candidate for consolidation (stream_alert_worker->analyzer, skipped - marginal 128m benefit vs real risk of blocking uvicorn's event loop, not worth it); face_worker+scheduler merge explicitly REJECTED per a documented FAISS/OpenMP/numpy/MKL deadlock that hit TWICE when ML threading ran uncapped together (docker-compose.yml comment, 2026-07-08). Found `MEDIA_PDF_WRITE_WORKERS=8` (media_analysis.py:800) looked like an unguarded thread-pool at first glance, but verified via source comment it's a deliberate I/O-latency-hiding pool for slow Z:-drive SMB writes (~4x measured speedup) - correctly left untouched after checking, not just trusted at face value. Real, applied gap: unlike unifiedcollector, this repo had ZERO startup-stagger mechanism at all (grepped src/ for STARTUP_DELAY/stagger, zero hits) - added a `STARTUP_DELAY_SECONDS` env-driven `asyncio.sleep`/`time.sleep` to scheduler (30s), face_worker (60s), and stream_alert_worker (15s), verified live via container logs showing the exact sleep-then-init sequence on all 2 services that actually started. `face_worker` itself could not be live-verified end-to-end - it fails at the Docker daemon's volume-mount stage (W-drive Tailscale SMB share at 100.92.164.125 unreachable) before any Python code runs at all; this is a pre-existing, unrelated infrastructure issue (not caused by and not fixed by this pass) that was already 5+ days old going in.
+
+- 2026-10-12: Output-identical audit+optimize pass on unifiedanalyzer (prawn-3410, Codex).
+  Phase 1 mapped architecture + data flow, found 8 bugs / 7 optimization candidates.
+  Phase 2 implemented 10 output-identical changes (face_worker detector cache, scoped
+  dedupe, FaceInferenceError, paged video query, transient ffmpeg retry, scoped
+  fetch_unprocessed_media, idle YuNet/SFace skip, vectorized topical_similarity,
+  Telegram parse_mode fix, engine-dispose finally). 25 live checks passed incl.
+  old-vs-new equivalence on production data. face_worker + scheduler restarted
+  healthy; analyzer/postgres untouched. Deferred (change success-path outputs):
+  PDF batch signal erasure, recon cursor, window starvation, timeline/stream-alert
+  keyset ties, incremental perceptual/clustering. Noted: scheduler restarted
+  04:20Z + 06:55Z (exit 0, external cause undetermined); stale-lock cleaner
+  self-heals (STALE_RUN_HEARTBEAT_MINUTES=90).

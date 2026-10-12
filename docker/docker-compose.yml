@@ -18,6 +18,7 @@ services:
     image: pgvector/pgvector:pg16
     container_name: unifiedanalyzer_postgres
     init: true
+    shm_size: 1gb
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-collector}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-collector}
@@ -63,7 +64,7 @@ services:
       # In-container overrides of the host-oriented .env values:
       # reach the collector Postgres by its container name on the shared network
       # (host .env uses localhost:5500, which is only valid on the host).
-      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@postgres:5432/unifiedanalyzer
+      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@unifiedanalyzer_postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DASHBOARD_URL: http://unifiedcollector_dashboard:8700
       # Derived media lives on Z: on the host; mounted into the container below.
@@ -96,11 +97,11 @@ services:
       # this bind lets local UI fixes go live without rebuilding the large image.
       - "../frontend/dist:/app/frontend/dist:ro"
       # Collector media (read-only) for thumbnails of real media items.
-      - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
+      - "/media/seagate-expansion/unifiedcollector/media:/app/collector_root/media:ro"
       # Derived artifacts (PDF images / video frames / ONNX models) on Z:.
-      - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
+      - "/media/seagate-expansion/unifiedanalyzer/media_derived:/app/media_derived"
       # Append-only analyzer decision logs on Z:.
-      - "Z:/unifiedanalyzer/decisions:/app/decisions"
+      - "/media/seagate-expansion/unifiedanalyzer/decisions:/app/decisions"
     networks:
       - unifiedcollector_default
     restart: unless-stopped
@@ -136,14 +137,14 @@ services:
     env_file:
       - ../.env
     environment:
-      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@postgres:5432/unifiedanalyzer
+      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@unifiedanalyzer_postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DASHBOARD_URL: http://unifiedcollector_dashboard:8700
       MEDIA_DERIVED_PATH: /app/media_derived
       COLLECTOR_MEDIA_ROOT: /app/collector_root
       FACE_MODEL_ROOT: /app/media_derived/faces
       # Scheduled analyzer DB dumps land on the host at
-      # Z:/unifiedanalyzer/backups/db via the bind mount below.
+      # /media/seagate-expansion/unifiedanalyzer/backups/db via the bind mount below.
       ANALYZER_DB_BACKUP_ENABLED: "${ANALYZER_DB_BACKUP_ENABLED:-0}"
       ANALYZER_DB_BACKUP_DIR: /app/backups/db
       ANALYZER_DB_BACKUP_HOUR_UTC: "${ANALYZER_DB_BACKUP_HOUR_UTC:-2}"
@@ -185,10 +186,10 @@ services:
     volumes:
       # Live-mount src (no image rebuild — shared Docker vhdx must not grow).
       - "../src:/app/src"
-      - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
-      - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
-      - "Z:/unifiedanalyzer/backups/db:/app/backups/db"
-      - "Z:/unifiedanalyzer/decisions:/app/decisions"
+      - "/media/seagate-expansion/unifiedcollector/media:/app/collector_root/media:ro"
+      - "/media/seagate-expansion/unifiedanalyzer/media_derived:/app/media_derived"
+      - "/media/seagate-expansion/unifiedanalyzer/backups/db:/app/backups/db"
+      - "/media/seagate-expansion/unifiedanalyzer/decisions:/app/decisions"
     networks:
       - unifiedcollector_default
     restart: unless-stopped
@@ -230,7 +231,7 @@ services:
     env_file:
       - ../.env
     environment:
-      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@postgres:5432/unifiedanalyzer
+      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@unifiedanalyzer_postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
       MEDIA_DERIVED_PATH: /app/media_derived
       COLLECTOR_MEDIA_ROOT: /app/collector_root
@@ -258,8 +259,8 @@ services:
       # src/face_worker.py + src/face/* take effect on `restart` without an
       # image rebuild (Q1 video ingest + Q3 detector gate). dist stays baked.
       - "../src:/app/src"
-      - "Z:/unifiedcollector/media:/app/collector_root/media:ro"
-      - "Z:/unifiedanalyzer/media_derived:/app/media_derived"
+      - "/media/seagate-expansion/unifiedcollector/media:/app/collector_root/media:ro"
+      - "/media/seagate-expansion/unifiedanalyzer/media_derived:/app/media_derived"
     networks:
       - unifiedcollector_default
     restart: unless-stopped
@@ -292,7 +293,7 @@ services:
     env_file:
       - ../.env
     environment:
-      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@postgres:5432/unifiedanalyzer
+      ANALYZER_DATABASE_URL: postgres://${POSTGRES_USER:-collector}:${POSTGRES_PASSWORD:-collector}@unifiedanalyzer_postgres:5432/unifiedanalyzer
       COLLECTOR_DATABASE_URL: postgres://collector:collector@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DASHBOARD_URL: http://unifiedcollector_dashboard:8700
       DB_MAX_POOL_SIZE: "${STREAM_ALERT_DB_POOL_SIZE:-3}"

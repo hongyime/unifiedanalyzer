@@ -125,6 +125,62 @@ _FACE_CONTENT_TYPES = ("image", "profile_photo")
 # still get indexed for search, but their faces are not labelled as the owner.
 _OWNER_ATTRIBUTION_MAX_FACES = int(os.getenv("FACE_WORKER_OWNER_ATTRIBUTION_MAX_FACES", "1"))
 
+# Face models are expensive to initialize. Keep independent process-lifetime
+# instances because the video path uses a different minimum-area threshold.
+_IMAGE_FACE_DETECTOR = None
+_IMAGE_FACE_DETECTOR_KEY = None
+_VIDEO_FACE_DETECTOR = None
+_VIDEO_FACE_DETECTOR_KEY = None
+_INFERENCE_FAILED_PATHS: set[str] = set()
+
+
+def _get_cached_face_detector(
+    *, video: bool = False, model_name: str = "buffalo_l",
+    providers: tuple[str, ...] | None = None, root: str | None = None,
+):
+    """Lazily build or reuse the detector matching the active configuration."""
+    global _IMAGE_FACE_DETECTOR, _IMAGE_FACE_DETECTOR_KEY
+    global _VIDEO_FACE_DETECTOR, _VIDEO_FACE_DETECTOR_KEY
+
+    if providers is None:
+        providers = ("CPUExecutionProvider",)
+    if root is None:
+        root = os.getenv("FACE_MODEL_ROOT", "Z:/unifiedanalyzer/media_derived/faces")
+
+    thresholds = (
+        float(os.getenv("FACE_MIN_AREA_RATIO", "0.05")),
+        float(os.getenv("FACE_MIN_LAPLACIAN_VARIANCE", "100")),
+        float(os.getenv("FACE_MIN_CONFIDENCE", "0.5")),
+        float(os.getenv("FACE_MAX_ASPECT_RATIO", "0") or 0),
+        float(os.getenv("FACE_VIDEO_MIN_AREA_RATIO", "0.01")) if video else None,
+        os.getenv("FACE_ONNX_THREADS", "0"),
+    )
+    key = (model_name, tuple(providers), root, thresholds)
+    detector = _VIDEO_FACE_DETECTOR if video else _IMAGE_FACE_DETECTOR
+    cached_key = _VIDEO_FACE_DETECTOR_KEY if video else _IMAGE_FACE_DETECTOR_KEY
+    if detector is not None and cached_key == key:
+        return detector
+
+    from src.face.engine.detector import FaceDetector
+
+    detector = FaceDetector(model_name=model_name, providers=list(providers), root=root)
+    detector.MIN_AREA_RATIO = thresholds[4] if video else thresholds[0]
+    detector.MIN_LAPLACIAN_VARIANCE = thresholds[1]
+    detector.MIN_CONFIDENCE = thresholds[2]
+    detector.MAX_ASPECT_RATIO = thresholds[3]
+    if video:
+        _VIDEO_FACE_DETECTOR, _VIDEO_FACE_DETECTOR_KEY = detector, key
+    else:
+        _IMAGE_FACE_DETECTOR, _IMAGE_FACE_DETECTOR_KEY = detector, key
+    return detector
+
+
+def _is_transient_video_extraction_error(error: BaseException) -> bool:
+    """Whether ffmpeg extraction failed for a retryable process or I/O reason."""
+    import subprocess
+
+    return isinstance(error, (subprocess.TimeoutExpired, OSError))
+
 
 def _build_entity_lookup(analyzer_conn) -> dict:
     """(source, platform_id|username[, lowercased]) -> analyzer entity_id.
@@ -173,7 +229,7 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
     from sqlalchemy import create_engine, text
     from sqlalchemy.orm import sessionmaker
 
-    from src.face.engine.detector import FaceDetector
+    from src.face.engine.detector import FaceInferenceError
     from src.face.storage.database import Image as FtImage, Face as FtFace
     from src.pipeline.media_common import (
         resolve_media_path, _MEDIA_CONFINEMENT_ROOT, MEDIA_DERIVED_PATH,
@@ -202,164 +258,191 @@ def ingest_collector_media(limit: int = 50, tracked_only: bool = False) -> dict:
         pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
         max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
     )
-    _wait_for_db(analyzer_engine)
-    _wait_for_db(collector_engine)
-
-    # Already-indexed collector file_paths (dedupe cursor).
-    with analyzer_engine.connect() as aconn:
-        done = {r[0] for r in aconn.execute(text("SELECT file_path FROM images")).fetchall()}
-        done_media_ids = {
-            r[0] for r in aconn.execute(text(
-                "SELECT file_hash FROM images "
-                "WHERE file_hash IS NOT NULL "
-                "AND COALESCE(status, 'completed') IN ('completed', 'failed')"
-            )).fetchall()
-        }
-        entity_lookup = _build_entity_lookup(aconn)
-
     try:
-        scan_window = max(limit, int(os.getenv("FACE_COLLECTOR_MEDIA_SCAN_WINDOW", str(max(limit * 20, 1000)))))
-    except (TypeError, ValueError):
-        scan_window = max(limit * 20, 1000)
+        _wait_for_db(analyzer_engine)
+        _wait_for_db(collector_engine)
 
-    # Candidate collector media. Keep this query bounded; on production
-    # Collector DBs the full image/profile-photo set is large enough to starve
-    # API startup and scheduler heartbeats under concurrent Analyzer workers.
-    with collector_engine.connect() as cconn:
-        rows = cconn.execute(
-            text(
-                "SELECT id::text AS id, source, entity_id, content_type, file_path "
-                "FROM media_items WHERE content_type = ANY(:cts) AND file_path IS NOT NULL "
-                "ORDER BY collected_at DESC "
-                "LIMIT :scan_window"
-            ),
-            {"cts": list(_FACE_CONTENT_TYPES), "scan_window": scan_window},
-        ).fetchall()
+        # Entity lookup is shared by the tracked-only filter and attribution.
+        with analyzer_engine.connect() as aconn:
+            entity_lookup = _build_entity_lookup(aconn)
 
-    # tracked_only: drop candidates whose owner doesn't resolve to an analyzer
-    # entity, so the (expensive) detector time is spent only on media that can
-    # actually populate public.entity_faces. entity_lookup was built above from
-    # entity_platform_links (keyed by both platform_id and lowercased username).
-    if tracked_only:
-        rows = [
-            r for r in rows
-            if entity_lookup.get((r.source, r.entity_id))
-            or (entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None)
-        ]
-
-    detector = None
-    Session = sessionmaker(bind=analyzer_engine)
-
-    # #36: tombstone genuinely-missing/unreadable files so they aren't re-scanned
-    # every tick (e.g. the ~150 lemon8 images lost when Z was reformatted retried
-    # forever). We only tombstone when the media ROOT is mounted — if the whole
-    # root is absent the drive is merely offline and the files may return, so we
-    # skip without tombstoning ("graceful offline"). Checked once per call, not
-    # per-file, to avoid stat spam.
-    media_root_online = _MEDIA_CONFINEMENT_ROOT.exists()
-    derived_root_online = MEDIA_DERIVED_PATH.exists()
-    stats["tombstoned"] = 0
-
-    def _tombstone(file_path: str, file_hash: str, reason: str) -> None:
-        s = Session()
         try:
-            s.add(FtImage(
-                file_path=file_path, file_hash=file_hash, file_size=0,
-                file_mtime=0.0, width=0, height=0, status="missing",
-                is_video=False, face_count=0,
-            ))
-            s.commit()
-            stats["tombstoned"] += 1
-        except Exception:
-            s.rollback()  # already tombstoned/indexed — fine
-        finally:
-            s.close()
-        done.add(file_path)
+            scan_window = max(limit, int(os.getenv("FACE_COLLECTOR_MEDIA_SCAN_WINDOW", str(max(limit * 20, 1000)))))
+        except (TypeError, ValueError):
+            scan_window = max(limit * 20, 1000)
 
-    for r in rows:
-        if stats["images_indexed"] >= limit:
-            break
-        if r.file_path in done or r.id in done_media_ids:
-            continue
-        stats["scanned"] += 1
-        disk = resolve_media_path(r.file_path)
-        if disk is None:
-            stats["skipped"] += 1
-            # Root mounted but file absent => genuinely gone: tombstone. Root
-            # missing => drive offline: skip, retry when it returns.
-            root_online = derived_root_online if "media_derived" in r.file_path else media_root_online
-            if root_online:
-                _tombstone(r.file_path, r.id, "file_gone")
-            continue
-        img = cv2.imread(str(disk))
-        if img is None:
-            stats["skipped"] += 1
-            _tombstone(r.file_path, r.id, "unreadable")  # drive present, file corrupt
-            continue
+        # Candidate collector media. Keep this query bounded; on production
+        # Collector DBs the full image/profile-photo set is large enough to starve
+        # API startup and scheduler heartbeats under concurrent Analyzer workers.
+        with collector_engine.connect() as cconn:
+            rows = cconn.execute(
+                text(
+                    "SELECT id::text AS id, source, entity_id, content_type, file_path "
+                    "FROM media_items WHERE content_type = ANY(:cts) AND file_path IS NOT NULL "
+                    "ORDER BY collected_at DESC "
+                    "LIMIT :scan_window"
+                ),
+                {"cts": list(_FACE_CONTENT_TYPES), "scan_window": scan_window},
+            ).fetchall()
 
-        # Lazy-init detector (downloads model on first use; keep off the path
-        # when there's nothing to process).
-        if detector is None:
-            detector = FaceDetector()
+        # Scope dedupe membership to this unchanged candidate window. File paths
+        # deliberately include every status, including missing-file tombstones.
+        paths = [r.file_path for r in rows]
+        media_ids = [r.id for r in rows]
+        with analyzer_engine.connect() as aconn:
+            done = set()
+            done_media_ids = set()
+            if paths:
+                done = {
+                    r[0] for r in aconn.execute(
+                        text("SELECT file_path FROM images WHERE file_path = ANY(:paths)"),
+                        {"paths": paths},
+                    ).fetchall()
+                }
+            if media_ids:
+                done_media_ids = {
+                    r[0] for r in aconn.execute(
+                        text(
+                            "SELECT file_hash FROM images WHERE file_hash = ANY(:ids) "
+                            "AND file_hash IS NOT NULL "
+                            "AND COALESCE(status, 'completed') IN ('completed', 'failed')"
+                        ),
+                        {"ids": media_ids},
+                    ).fetchall()
+                }
 
-        h, w = img.shape[:2]
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        faces = detector.detect(rgb)
+        # tracked_only: drop candidates whose owner doesn't resolve to an analyzer
+        # entity, so the (expensive) detector time is spent only on media that can
+        # actually populate public.entity_faces. entity_lookup was built above from
+        # entity_platform_links (keyed by both platform_id and lowercased username).
+        if tracked_only:
+            rows = [
+                r for r in rows
+                if entity_lookup.get((r.source, r.entity_id))
+                or (entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None)
+            ]
 
-        eid = entity_lookup.get((r.source, r.entity_id)) or (
-            entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None
-        )
-        can_attribute_owner = bool(eid) and len(faces) <= _OWNER_ATTRIBUTION_MAX_FACES
-        if eid and faces and not can_attribute_owner:
-            stats["owner_link_skipped_group"] += 1
+        detector = None
+        Session = sessionmaker(bind=analyzer_engine)
 
-        sess = Session()
-        try:
-            image_row = FtImage(
-                file_path=r.file_path, file_hash=r.id, file_size=int(disk.stat().st_size),
-                file_mtime=disk.stat().st_mtime, width=w, height=h,
-                status="completed", is_video=False, face_count=len(faces),
+        # #36: tombstone genuinely-missing/unreadable files so they aren't re-scanned
+        # every tick (e.g. the ~150 lemon8 images lost when Z was reformatted retried
+        # forever). We only tombstone when the media ROOT is mounted — if the whole
+        # root is absent the drive is merely offline and the files may return, so we
+        # skip without tombstoning ("graceful offline"). Checked once per call, not
+        # per-file, to avoid stat spam.
+        media_root_online = _MEDIA_CONFINEMENT_ROOT.exists()
+        derived_root_online = MEDIA_DERIVED_PATH.exists()
+        stats["tombstoned"] = 0
+
+        def _tombstone(file_path: str, file_hash: str, reason: str) -> None:
+            s = Session()
+            try:
+                s.add(FtImage(
+                    file_path=file_path, file_hash=file_hash, file_size=0,
+                    file_mtime=0.0, width=0, height=0, status="missing",
+                    is_video=False, face_count=0,
+                ))
+                s.commit()
+                stats["tombstoned"] += 1
+            except Exception:
+                s.rollback()  # already tombstoned/indexed — fine
+            finally:
+                s.close()
+            done.add(file_path)
+
+        for r in rows:
+            if stats["images_indexed"] >= limit:
+                break
+            if (r.file_path in done or r.id in done_media_ids
+                    or r.file_path in _INFERENCE_FAILED_PATHS):
+                continue
+            stats["scanned"] += 1
+            disk = resolve_media_path(r.file_path)
+            if disk is None:
+                stats["skipped"] += 1
+                # Root mounted but file absent => genuinely gone: tombstone. Root
+                # missing => drive offline: skip, retry when it returns.
+                root_online = derived_root_online if "media_derived" in r.file_path else media_root_online
+                if root_online:
+                    _tombstone(r.file_path, r.id, "file_gone")
+                continue
+            img = cv2.imread(str(disk))
+            if img is None:
+                stats["skipped"] += 1
+                _tombstone(r.file_path, r.id, "unreadable")  # drive present, file corrupt
+                continue
+
+            # Lazy-init detector (downloads model on first use; keep off the path
+            # when there's nothing to process).
+            if detector is None:
+                detector = _get_cached_face_detector()
+
+            h, w = img.shape[:2]
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            try:
+                faces = detector.detect_strict(rgb)
+            except FaceInferenceError:
+                logger.exception("face inference failed for media_item %s", r.id)
+                stats["inference_failed"] = stats.get("inference_failed", 0) + 1
+                _INFERENCE_FAILED_PATHS.add(r.file_path)
+                continue
+
+            eid = entity_lookup.get((r.source, r.entity_id)) or (
+                entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None
             )
-            sess.add(image_row)
-            sess.flush()  # assign image_row.id
-            for idx, f in enumerate(faces):
-                if f.embedding is None:
-                    continue
-                x1, y1, x2, y2 = [int(v) for v in f.bbox]
-                face_row = FtFace(
-                    image_id=image_row.id,
-                    embedding_id=f"{r.id}:{idx}",
-                    bbox_x1=x1 / w, bbox_y1=y1 / h, bbox_x2=x2 / w, bbox_y2=y2 / h,
-                    bbox_px_x1=x1, bbox_px_y1=y1, bbox_px_x2=x2, bbox_px_y2=y2,
-                    quality_score=float(f.quality_score),
-                    laplacian_variance=float(f.laplacian_variance),
-                    face_area_percent=float(f.area_ratio * 100.0),
-                    detection_confidence=float(f.confidence),
-                    embedding_vec=f.embedding.tolist(),
-                )
-                sess.add(face_row)
-                sess.flush()  # assign face_row.id
-                stats["faces"] += 1
-                if can_attribute_owner:
-                    sess.execute(text(
-                        "INSERT INTO public.entity_faces (entity_id, face_id, media_item_id, confidence, method) "
-                        "VALUES (:e, :f, :m, :c, 'media_attribution') ON CONFLICT (entity_id, face_id) DO NOTHING"
-                    ), {"e": eid, "f": face_row.id, "m": r.id, "c": float(f.quality_score)})
-                    stats["linked"] += 1
-            sess.commit()
-            stats["images_indexed"] += 1
-            done.add(r.file_path)
-            done_media_ids.add(r.id)
-        except Exception:
-            sess.rollback()
-            logger.exception("ingest failed for media_item %s", r.id)
-            stats["skipped"] += 1
-        finally:
-            sess.close()
+            can_attribute_owner = bool(eid) and len(faces) <= _OWNER_ATTRIBUTION_MAX_FACES
+            if eid and faces and not can_attribute_owner:
+                stats["owner_link_skipped_group"] += 1
 
-    analyzer_engine.dispose()
-    collector_engine.dispose()
-    return stats
+            sess = Session()
+            try:
+                image_row = FtImage(
+                    file_path=r.file_path, file_hash=r.id, file_size=int(disk.stat().st_size),
+                    file_mtime=disk.stat().st_mtime, width=w, height=h,
+                    status="completed", is_video=False, face_count=len(faces),
+                )
+                sess.add(image_row)
+                sess.flush()  # assign image_row.id
+                for idx, f in enumerate(faces):
+                    if f.embedding is None:
+                        continue
+                    x1, y1, x2, y2 = [int(v) for v in f.bbox]
+                    face_row = FtFace(
+                        image_id=image_row.id,
+                        embedding_id=f"{r.id}:{idx}",
+                        bbox_x1=x1 / w, bbox_y1=y1 / h, bbox_x2=x2 / w, bbox_y2=y2 / h,
+                        bbox_px_x1=x1, bbox_px_y1=y1, bbox_px_x2=x2, bbox_px_y2=y2,
+                        quality_score=float(f.quality_score),
+                        laplacian_variance=float(f.laplacian_variance),
+                        face_area_percent=float(f.area_ratio * 100.0),
+                        detection_confidence=float(f.confidence),
+                        embedding_vec=f.embedding.tolist(),
+                    )
+                    sess.add(face_row)
+                    sess.flush()  # assign face_row.id
+                    stats["faces"] += 1
+                    if can_attribute_owner:
+                        sess.execute(text(
+                            "INSERT INTO public.entity_faces (entity_id, face_id, media_item_id, confidence, method) "
+                            "VALUES (:e, :f, :m, :c, 'media_attribution') ON CONFLICT (entity_id, face_id) DO NOTHING"
+                        ), {"e": eid, "f": face_row.id, "m": r.id, "c": float(f.quality_score)})
+                        stats["linked"] += 1
+                sess.commit()
+                stats["images_indexed"] += 1
+                done.add(r.file_path)
+                done_media_ids.add(r.id)
+            except Exception:
+                sess.rollback()
+                logger.exception("ingest failed for media_item %s", r.id)
+                stats["skipped"] += 1
+            finally:
+                sess.close()
+
+        return stats
+    finally:
+        analyzer_engine.dispose()
+        collector_engine.dispose()
 
 
 
@@ -530,7 +613,7 @@ def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
     from sqlalchemy import create_engine, text
     from sqlalchemy.orm import sessionmaker
 
-    from src.face.engine.detector import FaceDetector
+    from src.face.engine.detector import FaceInferenceError
     from src.face.storage.database import Image as FtImage, Face as FtFace
     from src.pipeline.media_common import resolve_media_path, _MEDIA_CONFINEMENT_ROOT
 
@@ -564,196 +647,245 @@ def ingest_video_frames(limit: int = 20, tracked_only: bool = False) -> dict:
         pool_size=int(os.getenv("FACE_DB_POOL_SIZE", "3")),
         max_overflow=int(os.getenv("FACE_DB_MAX_OVERFLOW", "2")),
     )
-    _wait_for_db(analyzer_engine)
-    _wait_for_db(collector_engine)
+    try:
+        _wait_for_db(analyzer_engine)
+        _wait_for_db(collector_engine)
 
-    with analyzer_engine.connect() as aconn:
-        done = {r[0] for r in aconn.execute(text("SELECT file_path FROM images")).fetchall()}
-        done_media_ids = {
-            r[0] for r in aconn.execute(text(
-                "SELECT file_hash FROM images "
-                "WHERE file_hash IS NOT NULL "
-                "AND COALESCE(status, 'completed') IN ('completed', 'failed')"
-            )).fetchall()
-        }
-        entity_lookup = _build_entity_lookup(aconn)
+        with analyzer_engine.connect() as aconn:
+            entity_lookup = _build_entity_lookup(aconn)
 
-    # Candidate videos. Restrict source when FACE_VIDEO_SOURCES is set.
-    with collector_engine.connect() as cconn:
-        if _VIDEO_FACE_SOURCES:
-            rows = cconn.execute(
-                text("SELECT id::text AS id, source, entity_id, content_type, file_path "
-                     "FROM media_items WHERE content_type = 'video' AND file_path IS NOT NULL "
-                     "AND source = ANY(:srcs) ORDER BY collected_at DESC"),
-                {"srcs": list(_VIDEO_FACE_SOURCES)},
-            ).fetchall()
-        else:
-            rows = cconn.execute(
-                text("SELECT id::text AS id, source, entity_id, content_type, file_path "
-                     "FROM media_items WHERE content_type = 'video' AND file_path IS NOT NULL "
-                     "ORDER BY collected_at DESC")
-            ).fetchall()
+        detector = None
+        done: set[str] = set()
+        done_media_ids: set[str] = set()
+        Session = sessionmaker(bind=analyzer_engine)
 
-    if tracked_only:
-        rows = [
-            r for r in rows
-            if entity_lookup.get((r.source, r.entity_id))
-            or (entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None)
-        ]
-
-    detector = None
-    Session = sessionmaker(bind=analyzer_engine)
-
-    def _extract_frames(video_path: Path, outdir: Path) -> list[tuple[int, Path]]:
-        """ffmpeg keyframe sample -> [(sec, frame_path)]. Falls back to first
-        frame for clips shorter than the sampling interval."""
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", str(video_path),
-             "-vf", f"fps=1/{_VIDEO_FRAME_INTERVAL_SEC}",
-             "-frames:v", str(_VIDEO_FRAME_MAX), "-loglevel", "error",
-             str(outdir / "frame_%03d.jpg")],
-            capture_output=True, timeout=180,
-        )
-        frames = []
-        for fp in sorted(outdir.glob("frame_*.jpg")):
-            try:
-                idx = int(fp.stem.split("_")[1])
-            except (ValueError, IndexError):
-                continue
-            frames.append(((idx - 1) * _VIDEO_FRAME_INTERVAL_SEC, fp))
-        if not frames:
-            first = outdir / "fallback.jpg"
+        def _extract_frames(video_path: Path, outdir: Path) -> list[tuple[int, Path]]:
+            """ffmpeg keyframe sample -> [(sec, frame_path)]. Falls back to first
+            frame for clips shorter than the sampling interval."""
             subprocess.run(
-                ["ffmpeg", "-y", "-i", str(video_path), "-frames:v", "1",
-                 "-loglevel", "error", str(first)],
+                ["ffmpeg", "-y", "-i", str(video_path),
+                 "-vf", f"fps=1/{_VIDEO_FRAME_INTERVAL_SEC}",
+                 "-frames:v", str(_VIDEO_FRAME_MAX), "-loglevel", "error",
+                 str(outdir / "frame_%03d.jpg")],
                 capture_output=True, timeout=180,
             )
-            if first.exists():
-                frames.append((0, first))
-        return frames
-
-    for r in rows:
-        if stats["videos_indexed"] >= limit:
-            break
-        if r.file_path in done or r.id in done_media_ids:
-            continue
-        stats["scanned"] += 1
-        disk = resolve_media_path(r.file_path)
-        if disk is None:
-            stats["skipped"] += 1
-            continue
-
-        eid = entity_lookup.get((r.source, r.entity_id)) or (
-            entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None
-        )
-
-        with tempfile.TemporaryDirectory(prefix="vidframes_") as td:
-            outdir = Path(td)
-            try:
-                frames = _extract_frames(disk, outdir)
-            except Exception:
-                logger.debug("ffmpeg failed for %s", disk, exc_info=True)
-                frames = []
-            if not frames:
-                stats["no_frames"] += 1
-                # Tombstone so a genuinely un-sampleable video isn't retried
-                # forever (mirrors the image-path tombstone policy).
-                s = Session()
+            frames = []
+            for fp in sorted(outdir.glob("frame_*.jpg")):
                 try:
-                    s.add(FtImage(
-                        file_path=r.file_path, file_hash=r.id, file_size=0,
-                        file_mtime=0.0, width=0, height=0, status="failed",
-                        is_video=True, video_frames=0, face_count=0,
-                    ))
-                    s.commit()
-                except Exception:
-                    s.rollback()
-                finally:
-                    s.close()
-                done.add(r.file_path)
-                done_media_ids.add(r.id)
-                continue
-
-            if detector is None:
-                detector = FaceDetector()
-                # Relax the area gate for the video path (see _VIDEO_MIN_AREA_RATIO).
-                # Keep the detector's other thresholds (confidence, sharpness).
-                detector.MIN_AREA_RATIO = _VIDEO_MIN_AREA_RATIO
-
-            # Detect across all frames; collect (frame_sec, w, h, faces).
-            per_frame = []
-            total_faces = 0
-            for sec, fp in frames:
-                img = cv2.imread(str(fp))
-                if img is None:
+                    idx = int(fp.stem.split("_")[1])
+                except (ValueError, IndexError):
                     continue
-                h, w = img.shape[:2]
-                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                fs = detector.detect(rgb)
-                per_frame.append((sec, w, h, fs))
-                total_faces += len(fs)
-            stats["frames"] += len(per_frame)
-
-            # Use the first decoded frame's dims as the Image's canonical size.
-            if not per_frame:
-                stats["skipped"] += 1
-                continue
-            _sec0, w0, h0, _ = per_frame[0]
-            can_attribute_owner = bool(eid) and total_faces <= _OWNER_ATTRIBUTION_MAX_FACES
-            if eid and total_faces and not can_attribute_owner:
-                stats["owner_link_skipped_group"] += 1
-
-            sess = Session()
-            try:
-                image_row = FtImage(
-                    file_path=r.file_path, file_hash=r.id,
-                    file_size=int(disk.stat().st_size), file_mtime=disk.stat().st_mtime,
-                    width=w0, height=h0, status="completed", is_video=True,
-                    video_frames=len(per_frame), face_count=total_faces,
+                frames.append(((idx - 1) * _VIDEO_FRAME_INTERVAL_SEC, fp))
+            if not frames:
+                first = outdir / "fallback.jpg"
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", str(video_path), "-frames:v", "1",
+                     "-loglevel", "error", str(first)],
+                    capture_output=True, timeout=180,
                 )
-                sess.add(image_row)
-                sess.flush()
-                for sec, w, h, fs in per_frame:
-                    for idx, f in enumerate(fs):
-                        if f.embedding is None:
-                            continue
-                        x1, y1, x2, y2 = [int(v) for v in f.bbox]
-                        face_row = FtFace(
-                            image_id=image_row.id,
-                            embedding_id=f"{r.id}:{sec}:{idx}",
-                            bbox_x1=x1 / w, bbox_y1=y1 / h, bbox_x2=x2 / w, bbox_y2=y2 / h,
-                            bbox_px_x1=x1, bbox_px_y1=y1, bbox_px_x2=x2, bbox_px_y2=y2,
-                            quality_score=float(f.quality_score),
-                            laplacian_variance=float(f.laplacian_variance),
-                            face_area_percent=float(f.area_ratio * 100.0),
-                            detection_confidence=float(f.confidence),
-                            embedding_vec=f.embedding.tolist(),
-                            frame_number=sec, video_path=r.file_path,
-                        )
-                        sess.add(face_row)
-                        sess.flush()
-                        stats["faces"] += 1
-                        if can_attribute_owner:
-                            sess.execute(text(
-                                "INSERT INTO public.entity_faces (entity_id, face_id, media_item_id, confidence, method) "
-                                "VALUES (:e, :f, :m, :c, 'media_attribution') ON CONFLICT (entity_id, face_id) DO NOTHING"
-                            ), {"e": eid, "f": face_row.id, "m": r.id, "c": float(f.quality_score)})
-                            stats["linked"] += 1
-                sess.commit()
-                stats["videos_indexed"] += 1
-                done.add(r.file_path)
-                done_media_ids.add(r.id)
-            except Exception:
-                sess.rollback()
-                logger.exception("video ingest failed for media_item %s", r.id)
-                stats["skipped"] += 1
-            finally:
-                sess.close()
+                if first.exists():
+                    frames.append((0, first))
+            return frames
 
-    analyzer_engine.dispose()
-    collector_engine.dispose()
-    logger.info("ingest_video_frames: %s", stats)
-    return stats
+        # Keyset pages retain every candidate while bounding Python memory. Adding
+        # id DESC makes equal-collected_at order deterministic where it was formerly
+        # unspecified. collected_at is non-null in media_items.
+        cursor_ts = None
+        cursor_id = None
+        page_size = max(limit * 20, 1000)
+        while stats["videos_indexed"] < limit:
+            query = (
+                "SELECT id::text AS id, source, entity_id, content_type, file_path, collected_at "
+                "FROM media_items WHERE content_type = 'video' AND file_path IS NOT NULL"
+            )
+            params = {"page_size": page_size}
+            if _VIDEO_FACE_SOURCES:
+                query += " AND source = ANY(:srcs)"
+                params["srcs"] = list(_VIDEO_FACE_SOURCES)
+            if cursor_ts is not None:
+                query += " AND (collected_at, id) < (:cursor_ts, CAST(:cursor_id AS uuid))"
+                params["cursor_ts"] = cursor_ts
+                params["cursor_id"] = cursor_id
+            query += " ORDER BY collected_at DESC, id DESC LIMIT :page_size"
+            with collector_engine.connect() as cconn:
+                rows = cconn.execute(text(query), params).fetchall()
+            if not rows:
+                break
+            page_count = len(rows)
+            cursor_ts, cursor_id = rows[-1].collected_at, rows[-1].id
+
+            # Scope these lookups to this candidate page and preserve membership
+            # from every image status for paths, and only completed/failed IDs.
+            paths = [r.file_path for r in rows]
+            media_ids = [r.id for r in rows]
+            with analyzer_engine.connect() as aconn:
+                page_done = set()
+                page_done_media_ids = set()
+                if paths:
+                    page_done = {
+                        r[0] for r in aconn.execute(
+                            text("SELECT file_path FROM images WHERE file_path = ANY(:paths)"),
+                            {"paths": paths},
+                        ).fetchall()
+                    }
+                if media_ids:
+                    page_done_media_ids = {
+                        r[0] for r in aconn.execute(
+                            text(
+                                "SELECT file_hash FROM images WHERE file_hash = ANY(:ids) "
+                                "AND file_hash IS NOT NULL "
+                                "AND COALESCE(status, 'completed') IN ('completed', 'failed')"
+                            ),
+                            {"ids": media_ids},
+                        ).fetchall()
+                    }
+            done.update(page_done)
+            done_media_ids.update(page_done_media_ids)
+
+            if tracked_only:
+                rows = [
+                    r for r in rows
+                    if entity_lookup.get((r.source, r.entity_id))
+                    or (entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None)
+                ]
+
+            for r in rows:
+                if stats["videos_indexed"] >= limit:
+                    break
+                if (r.file_path in done or r.id in done_media_ids
+                        or r.file_path in _INFERENCE_FAILED_PATHS):
+                    continue
+                stats["scanned"] += 1
+                disk = resolve_media_path(r.file_path)
+                if disk is None:
+                    stats["skipped"] += 1
+                    continue
+
+                eid = entity_lookup.get((r.source, r.entity_id)) or (
+                    entity_lookup.get((r.source, r.entity_id.lower())) if r.entity_id else None
+                )
+
+                with tempfile.TemporaryDirectory(prefix="vidframes_") as td:
+                    outdir = Path(td)
+                    try:
+                        frames = _extract_frames(disk, outdir)
+                    except Exception as exc:
+                        if _is_transient_video_extraction_error(exc):
+                            logger.warning("Transient ffmpeg extraction failure for media_item %s", r.id, exc_info=True)
+                            stats["transient_skipped"] = stats.get("transient_skipped", 0) + 1
+                            continue
+                        logger.debug("ffmpeg failed for %s", disk, exc_info=True)
+                        frames = []
+                    if not frames:
+                        stats["no_frames"] += 1
+                        # Tombstone so a genuinely un-sampleable video isn't retried
+                        # forever (mirrors the image-path tombstone policy).
+                        s = Session()
+                        try:
+                            s.add(FtImage(
+                                file_path=r.file_path, file_hash=r.id, file_size=0,
+                                file_mtime=0.0, width=0, height=0, status="failed",
+                                is_video=True, video_frames=0, face_count=0,
+                            ))
+                            s.commit()
+                        except Exception:
+                            s.rollback()
+                        finally:
+                            s.close()
+                        done.add(r.file_path)
+                        done_media_ids.add(r.id)
+                        continue
+
+                    if detector is None:
+                        detector = _get_cached_face_detector(video=True)
+
+                    # Detect across all frames; collect (frame_sec, w, h, faces).
+                    per_frame = []
+                    total_faces = 0
+                    inference_failed = False
+                    for sec, fp in frames:
+                        img = cv2.imread(str(fp))
+                        if img is None:
+                            continue
+                        h, w = img.shape[:2]
+                        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        try:
+                            fs = detector.detect_strict(rgb)
+                        except FaceInferenceError:
+                            logger.exception("face inference failed for media_item %s", r.id)
+                            stats["inference_failed"] = stats.get("inference_failed", 0) + 1
+                            _INFERENCE_FAILED_PATHS.add(r.file_path)
+                            inference_failed = True
+                            break
+                        per_frame.append((sec, w, h, fs))
+                        total_faces += len(fs)
+                    stats["frames"] += len(per_frame)
+                    if inference_failed:
+                        continue
+
+                    # Use the first decoded frame's dims as the Image's canonical size.
+                    if not per_frame:
+                        stats["skipped"] += 1
+                        continue
+                    _sec0, w0, h0, _ = per_frame[0]
+                    can_attribute_owner = bool(eid) and total_faces <= _OWNER_ATTRIBUTION_MAX_FACES
+                    if eid and total_faces and not can_attribute_owner:
+                        stats["owner_link_skipped_group"] += 1
+
+                    sess = Session()
+                    try:
+                        image_row = FtImage(
+                            file_path=r.file_path, file_hash=r.id,
+                            file_size=int(disk.stat().st_size), file_mtime=disk.stat().st_mtime,
+                            width=w0, height=h0, status="completed", is_video=True,
+                            video_frames=len(per_frame), face_count=total_faces,
+                        )
+                        sess.add(image_row)
+                        sess.flush()
+                        for sec, w, h, fs in per_frame:
+                            for idx, f in enumerate(fs):
+                                if f.embedding is None:
+                                    continue
+                                x1, y1, x2, y2 = [int(v) for v in f.bbox]
+                                face_row = FtFace(
+                                    image_id=image_row.id,
+                                    embedding_id=f"{r.id}:{sec}:{idx}",
+                                    bbox_x1=x1 / w, bbox_y1=y1 / h, bbox_x2=x2 / w, bbox_y2=y2 / h,
+                                    bbox_px_x1=x1, bbox_px_y1=y1, bbox_px_x2=x2, bbox_px_y2=y2,
+                                    quality_score=float(f.quality_score),
+                                    laplacian_variance=float(f.laplacian_variance),
+                                    face_area_percent=float(f.area_ratio * 100.0),
+                                    detection_confidence=float(f.confidence),
+                                    embedding_vec=f.embedding.tolist(),
+                                    frame_number=sec, video_path=r.file_path,
+                                )
+                                sess.add(face_row)
+                                sess.flush()
+                                stats["faces"] += 1
+                                if can_attribute_owner:
+                                    sess.execute(text(
+                                        "INSERT INTO public.entity_faces (entity_id, face_id, media_item_id, confidence, method) "
+                                        "VALUES (:e, :f, :m, :c, 'media_attribution') ON CONFLICT (entity_id, face_id) DO NOTHING"
+                                    ), {"e": eid, "f": face_row.id, "m": r.id, "c": float(f.quality_score)})
+                                    stats["linked"] += 1
+                        sess.commit()
+                        stats["videos_indexed"] += 1
+                        done.add(r.file_path)
+                        done_media_ids.add(r.id)
+                    except Exception:
+                        sess.rollback()
+                        logger.exception("video ingest failed for media_item %s", r.id)
+                        stats["skipped"] += 1
+                    finally:
+                        sess.close()
+            if page_count < page_size:
+                break
+
+        logger.info("ingest_video_frames: %s", stats)
+        return stats
+    finally:
+        analyzer_engine.dispose()
+        collector_engine.dispose()
 
 
 def loop(batch: int, interval: int) -> None:

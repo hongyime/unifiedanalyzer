@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import subprocess
+import uuid
 from collections import defaultdict
 from pathlib import Path
 
@@ -162,13 +163,6 @@ async def fetch_unprocessed_media(
     analyzer = get_analyzer_pool()
     collector = get_collector_pool()
 
-    async with analyzer.acquire() as conn:
-        done_rows = await conn.fetch(
-            "SELECT media_item_id FROM media_analysis WHERE analysis_type = $1 AND parent_media_item_id IS NULL",
-            analysis_type,
-        )
-    done_ids = {r["media_item_id"] for r in done_rows}
-
     result: list[dict] = []
     async with collector.acquire() as conn:
         for source, content_type in source_content_pairs:
@@ -207,6 +201,19 @@ async def fetch_unprocessed_media(
                         FROM media_items WHERE content_type = $1
                         ORDER BY collected_at DESC
                     """, content_type)
+            candidate_ids = [r["id"] for r in rows]
+            if candidate_ids:
+                async with analyzer.acquire() as analyzer_conn:
+                    done_rows = await analyzer_conn.fetch(
+                        "SELECT media_item_id FROM media_analysis "
+                        "WHERE analysis_type = $1 AND parent_media_item_id IS NULL "
+                        "AND media_item_id = ANY($2::text[])",
+                        analysis_type,
+                        candidate_ids,
+                    )
+                done_ids = {r["media_item_id"] for r in done_rows}
+            else:
+                done_ids = set()
             for r in rows:
                 if r["id"] in done_ids:
                     continue

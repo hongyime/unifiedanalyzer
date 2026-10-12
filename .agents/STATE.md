@@ -1,5 +1,18 @@
 # Postgres instance split (Option 1) + A1 face rework — 2026-10-02 (analyzer side)
 
+## Latest repository action — 2026-10-12
+
+- Audit + output-identical optimization pass (Codex on prawn-3410). 10 changes:
+  scoped face-dedupe lookups, process-lifetime InsightFace detector cache,
+  FaceInferenceError (no false zero-face on inference failure), keyset-paged
+  video candidates, transient ffmpeg-failure retry, scoped fetch_unprocessed_media
+  done lookup, skip idle YuNet/SFace model load, vectorized topical_similarity
+  O(E^2) pair loop, Telegram parse_mode retry fix, engine dispose in finally.
+  25 live verification checks passed (old-vs-new equivalence on prod data).
+  face_worker + scheduler restarted healthy. One commit on main.
+
+- Pushed `13af51c` to `origin/main`. A pre-existing uncommitted edit remains in `docker/docker-compose.yml`.
+
 Cross-repo change with C:\unifiedcollector. Splitting the shared Postgres into
 two containers (OOM blast radius) and reworking faces to collector media only.
 Analyzer-side code/config waves are pushed:

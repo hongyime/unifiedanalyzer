@@ -33,6 +33,57 @@ import os
 logger = logging.getLogger(__name__)
 
 
+def _collect_topical_similarity_pairs(
+    entity_ids_sorted: list[str], n_events_map: dict[str, int], sims,
+    dismissed: set[tuple[str, str]], threshold: float,
+) -> tuple[list[tuple], dict[str, int]]:
+    """Build pairs in the same row-major order without scanning each score in Python."""
+    import numpy as np
+
+    stats = {
+        "pairs_scored": 0,
+        "below_threshold_skipped": 0,
+        "dismissed_skipped": 0,
+    }
+    new_signals: list[tuple] = []
+    E = len(entity_ids_sorted)
+    for i in range(E):
+        a = entity_ids_sorted[i]
+        row = sims[i, i + 1:]
+        # The old loop compared float(score) to a Python float threshold.
+        # Promote the row before comparing so float32 threshold rounding does
+        # not admit scores that the old Python comparison rejected. Negating
+        # the '<' test also preserves the old behavior for NaN scores.
+        above = np.flatnonzero(~(row.astype(np.float64) < threshold))
+        stats["pairs_scored"] += row.size
+        stats["below_threshold_skipped"] += row.size - above.size
+        for rel in above.tolist():
+            j = i + 1 + int(rel)
+            b = entity_ids_sorted[j]
+            if (a, b) in dismissed:
+                stats["dismissed_skipped"] += 1
+                continue
+            score = float(row[int(rel)])
+            value_json = json.dumps({
+                "n_events_a": n_events_map[a],
+                "n_events_b": n_events_map[b],
+                "model": "intfloat/multilingual-e5-small",
+            })
+            new_signals.append((
+                a,
+                "topical_similarity",
+                "analyzer",
+                "timeline_embeddings",
+                None,
+                None,
+                None,
+                b,
+                value_json,
+                round(score, 4),
+            ))
+    return new_signals, stats
+
+
 async def emit_topical_similarity_signals() -> dict:
     """Emit topical_similarity identity_signals rows.
 
@@ -137,40 +188,10 @@ async def emit_topical_similarity_signals() -> dict:
     sims = C @ C.T
     np.fill_diagonal(sims, -1.0)  # so max isn't self
 
-    new_signals: list[tuple] = []
-    E = len(entity_ids_sorted)
-    for i in range(E):
-        a = entity_ids_sorted[i]
-        for j in range(i + 1, E):
-            b = entity_ids_sorted[j]
-            stats["pairs_scored"] += 1
-            score = float(sims[i, j])
-            if score < threshold:
-                stats["below_threshold_skipped"] += 1
-                continue
-            key = (a, b) if a < b else (b, a)
-            if key in dismissed:
-                stats["dismissed_skipped"] += 1
-                continue
-
-            value_json = json.dumps({
-                "n_events_a": n_events_map[a],
-                "n_events_b": n_events_map[b],
-                "model": "intfloat/multilingual-e5-small",
-            })
-            # entity_a < entity_b by outer/inner loop order (already sorted).
-            new_signals.append((
-                key[0],
-                "topical_similarity",
-                "analyzer",         # source_platform
-                "timeline_embeddings",  # source_table
-                None,               # source_column
-                None,               # source_record_id
-                None,               # target_platform (per spec: NULL)
-                key[1],             # target_record_id = entity_b uuid text
-                value_json,
-                round(score, 4),
-            ))
+    new_signals, pair_stats = _collect_topical_similarity_pairs(
+        entity_ids_sorted, n_events_map, sims, dismissed, threshold,
+    )
+    stats.update(pair_stats)
 
     async with analyzer.acquire() as conn:
         await conn.execute(
