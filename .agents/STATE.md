@@ -1,8 +1,13 @@
+# Active task — Supabase indicator scheduler (2026-10-13)
+Status: Manual production export succeeded (30/30, limit 100), last_sync.txt updated, and Bryan user crontab installed; commit and push remain.
+Evidence: The analyzer has an after-cycle export hook but no independent cadence or host marker writer. The configured mode is postgres_direct with a batch size of 100.
+Decision: Use a 15-minute Bryan-user crontab entry that calls the existing scheduler-container CLI and writes last_sync.txt only after success. A full-resolution run is active, so the container is left running.
+
 # Postgres instance split (Option 1) + A1 face rework — 2026-10-02 (analyzer side)
 
 ## Latest repository action — 2026-10-12
 
-- Audit + output-identical optimization pass (Codex on prawn-3410). 10 changes:
+- Audit + output-identical optimization pass (Codex on dev-host-3.example). 10 changes:
   scoped face-dedupe lookups, process-lifetime InsightFace detector cache,
   FaceInferenceError (no false zero-face on inference failure), keyset-paged
   video candidates, transient ffmpeg-failure retry, scoped fetch_unprocessed_media
