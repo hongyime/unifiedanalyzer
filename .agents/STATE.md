@@ -1,5 +1,5 @@
 # Active task — Supabase indicator scheduler (2026-10-13)
-Status: Manual production export succeeded (30/30, limit 100), last_sync.txt updated, and Bryan user crontab installed; commit and push remain.
+Status: Manual export succeeded (30/30, limit 100); scheduled ticks at 00:15, 00:30, and 00:45 SGT succeeded (0/0). last_sync.txt is 2026-10-12T16:45:09Z. Commit 1b95d87 is pushed to main; the 15-minute Bryan crontab remains installed.
 Evidence: The analyzer has an after-cycle export hook but no independent cadence or host marker writer. The configured mode is postgres_direct with a batch size of 100.
 Decision: Use a 15-minute Bryan-user crontab entry that calls the existing scheduler-container CLI and writes last_sync.txt only after success. A full-resolution run is active, so the container is left running.
 
