@@ -1,6 +1,12 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
+CREATE TABLE IF NOT EXISTS pipeline_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS entities (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tier VARCHAR(20) NOT NULL DEFAULT 'primary',

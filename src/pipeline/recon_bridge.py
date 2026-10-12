@@ -5,7 +5,7 @@ and writes weak `identity_signals` rows into the analyzer DB, joined to
 `entities` via `entity_platform_links.platform_username` (case-insensitive,
 active links only).
 
-**Opt-in, manually operated.** Not wired into the scheduler. Run via:
+**Scheduler-integrated and manually operable.** Run manually via:
 
     python -m src.pipeline.recon_bridge --dry-run   # report only
     python -m src.pipeline.recon_bridge             # write signals
@@ -40,6 +40,7 @@ import logging
 import re
 import sys
 from typing import Any
+from uuid import UUID
 
 from src.db.connection import (
     close_pools,
@@ -71,6 +72,7 @@ _ECHO_MODULES = {"SpiderFoot UI", "sfp__stor_stdout"}
 # Extract URL from ACCOUNT_EXTERNAL_OWNED payloads that look like
 # "SiteName (Category: cat)\n<SFURL>https://...</SFURL>"
 _SFURL_RE = re.compile(r"<SFURL>([^<]+)</SFURL>")
+_CURSOR_KEY = "recon_bridge_since_id"
 
 
 def _extract_value(obs_type: str, raw_value: str) -> str:
@@ -80,6 +82,39 @@ def _extract_value(obs_type: str, raw_value: str) -> str:
         if match:
             return match.group(1).strip()
     return (raw_value or "").strip()
+
+
+async def _load_cursor(analyzer_conn) -> str | None:
+    return await analyzer_conn.fetchval(
+        "SELECT value FROM pipeline_state WHERE key = $1",
+        _CURSOR_KEY,
+    )
+
+
+async def _store_cursor(analyzer_conn, cursor: str) -> None:
+    await analyzer_conn.execute(
+        """
+        INSERT INTO pipeline_state (key, value, updated_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        _CURSOR_KEY,
+        cursor,
+    )
+
+
+async def _cursor_exists(collector_conn, cursor: str) -> bool:
+    try:
+        valid_cursor = str(UUID(cursor))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return bool(
+        await collector_conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM recon_observations WHERE id = $1::uuid)",
+            valid_cursor,
+        )
+    )
 
 
 async def _fetch_recon_rows(collector_conn, since_id: str | None, limit: int) -> list[dict[str, Any]]:
@@ -182,15 +217,25 @@ async def bridge_recon_observations(
     """
     collector_pool = get_collector_pool()
     analyzer_pool = get_analyzer_pool()
+    explicit_since_id = since_id is not None
+    cursor = since_id
+    if not explicit_since_id:
+        async with analyzer_pool.acquire() as an_conn:
+            cursor = await _load_cursor(an_conn)
+
+    async with collector_pool.acquire() as coll_conn:
+        if not explicit_since_id and cursor is not None and not await _cursor_exists(coll_conn, cursor):
+            logger.warning("recon_bridge cursor %s is missing from collector; restarting from NULL", cursor)
+            cursor = None
+        rows = await _fetch_recon_rows(coll_conn, cursor, limit)
+
     inserted = 0
     orphaned = 0
     already = 0
     skipped_echo = 0  # kept for future filtering; SQL already excludes
+    insert_failures = 0
     per_type: dict[str, int] = {}
     samples: list[dict[str, Any]] = []
-
-    async with collector_pool.acquire() as coll_conn:
-        rows = await _fetch_recon_rows(coll_conn, since_id, limit)
 
     async with analyzer_pool.acquire() as an_conn:
         for row in rows:
@@ -247,10 +292,19 @@ async def bridge_recon_observations(
                 )
                 inserted += 1
             except Exception as exc:  # noqa: BLE001
+                insert_failures += 1
                 logger.warning(
                     "recon_bridge insert failed for obs=%s target=%s: %s",
                     row["obs_id"], row["target_value"], exc,
                 )
+
+        # Rows arrive in ascending UUID order. Only checkpoint a fully
+        # successful write tick; failed inserts remain available for retry.
+        # Explicit --since-id runs are isolated and never alter saved state.
+        if not dry_run and rows and insert_failures == 0:
+            cursor = rows[-1]["obs_id"]
+            if not explicit_since_id:
+                await _store_cursor(an_conn, cursor)
 
     return {
         "dry_run": dry_run,
@@ -260,6 +314,8 @@ async def bridge_recon_observations(
         "already_bridged": already,
         "orphaned_no_entity": orphaned,
         "skipped_echo_modules": skipped_echo,
+        "insert_failures": insert_failures,
+        "cursor": cursor,
         "by_signal_type": per_type,
         "samples": samples,
     }
@@ -305,7 +361,10 @@ def main() -> None:
         "--since-id",
         type=str,
         default=None,
-        help="Only consider recon_observations.id > this UUID (for incremental runs).",
+        help=(
+            "Only consider recon_observations.id > this UUID; overrides the saved "
+            "cursor for this run and does not update it."
+        ),
     )
     args = parser.parse_args()
     sys.exit(asyncio.run(_cli(args)))

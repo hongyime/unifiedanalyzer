@@ -695,6 +695,39 @@ def _extract_office_text(path, kind: str) -> str:
     return ""
 
 
+async def _build_entity_text_corpus(
+    analysis_type: str,
+    entity_lookup: dict[tuple[str, str], str],
+) -> dict[str, list[tuple[str, str]]]:
+    """Reload every saved text row used to rebuild this analysis type's signals."""
+    analyzer = get_analyzer_pool()
+    async with analyzer.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT media_item_id, source, extracted_text
+            FROM media_analysis
+            WHERE analysis_type = $1
+              AND extracted_text IS NOT NULL
+              AND extracted_text <> ''
+            """,
+            analysis_type,
+        )
+
+    item_entities = await fetch_media_item_entities([r["media_item_id"] for r in rows])
+    entity_texts: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for row in rows:
+        item_entity = item_entities.get(row["media_item_id"])
+        if not item_entity:
+            continue
+        media_entity_id = item_entity[1]
+        source = row["source"]
+        entity_id = lookup_entity(entity_lookup, source, media_entity_id)
+        text = row["extracted_text"]
+        if entity_id and text:
+            entity_texts[entity_id].append((source, text))
+    return entity_texts
+
+
 async def analyze_media_pdf_text(limit: int | None = None) -> dict:
     stats: dict = {"processed": 0}
     if not _drive_available():
@@ -702,8 +735,6 @@ async def analyze_media_pdf_text(limit: int | None = None) -> dict:
         return {**stats, "skipped": "drive_unavailable"}
 
     items = await fetch_unprocessed_media(_PDF_CONTENT_TYPES, "pdf_text", limit=limit)
-    entity_lookup = await build_entity_lookup()
-    entity_texts: dict[str, list[tuple[str, str]]] = defaultdict(list)
 
     rows = []
     for item in items:
@@ -724,21 +755,14 @@ async def analyze_media_pdf_text(limit: int | None = None) -> dict:
             "result_json": {"skipped": "invalid_pdf_header"} if invalid_pdf_header else None,
             "model_version": "pypdf-v1",
         })
-        if text:
-            eid = lookup_entity(entity_lookup, item["source"], item["entity_id"])
-            if eid:
-                entity_texts[eid].append((item["source"], text))
-
     await upsert_media_analysis(rows)
     stats["processed"] = len(rows)
 
     # Idle-cycle skip: nothing new this cycle -> leave existing pdf_text contact
     # signals untouched (also avoids the needless delete+reinsert).
-    # TODO(continuing agent): emit_media_contact_signals rebuilds from THIS
-    # batch's entity_texts only, so steady-state cycles overwrite prior pdf_text
-    # signals rather than accumulating. Fine during a full backfill (one pass);
-    # if incremental coverage matters, rescan all pdf_text rows here instead.
     if stats["processed"]:
+        entity_lookup = await build_entity_lookup()
+        entity_texts = await _build_entity_text_corpus("pdf_text", entity_lookup)
         lookups = await build_contact_lookups()
         stats.update(await emit_media_contact_signals(entity_texts, lookups, "pdf_text"))
     logger.info("6C PDF text: %s", stats)
@@ -754,8 +778,6 @@ async def analyze_media_office_text(limit: int | None = None) -> dict:
         return {**stats, "skipped": "drive_unavailable"}
 
     items = await fetch_unprocessed_media(_OFFICE_CONTENT_TYPES, "office_text", limit=limit)
-    entity_lookup = await build_entity_lookup()
-    entity_texts: dict[str, list[tuple[str, str]]] = defaultdict(list)
 
     rows = []
     for item in items:
@@ -771,14 +793,11 @@ async def analyze_media_office_text(limit: int | None = None) -> dict:
             "result_json": None,
             "model_version": "office-v1",
         })
-        if text:
-            eid = lookup_entity(entity_lookup, item["source"], item["entity_id"])
-            if eid:
-                entity_texts[eid].append((item["source"], text))
-
     await upsert_media_analysis(rows)
     stats["processed"] = len(rows)
     if stats["processed"]:
+        entity_lookup = await build_entity_lookup()
+        entity_texts = await _build_entity_text_corpus("office_text", entity_lookup)
         lookups = await build_contact_lookups()
         stats.update(await emit_media_contact_signals(entity_texts, lookups, "office_text"))
     logger.info("6C office text: %s", stats)
