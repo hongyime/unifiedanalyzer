@@ -1,11 +1,12 @@
-# Active task — UnifiedAnalyzer Final Plan (2026-10-14, updated) & Stability Gate
-Status: Plan only. No build until Bryan approves this plan. Codebase and running service baselines verified. Stability gate is active: UnifiedCollector is actively upgrading (HEAD moving, uncommitted native scraping and extension changes in progress, new platform DDLs not yet published). Analyzer holds in "Plan only" state.
+# Active task — Phase 0: Contract Freeze & Stability Gate (Completed 2026-10-14)
+Status: Phase 0 completed and verified. Bryan explicitly approved unifiedanalyzer_final_plan.md. Collector contract pinned and documented at docs/collector-contract.md against Collector HEAD c97391af. Contract check tests in tests/test_collector_contract.py pass (7/7). Stability gate remains active: UnifiedCollector is in-flight on Phase 5 native platform scraping and has uncommitted working tree diffs; Analyzer holds before Phases 1–7 until Collector lands all phases, passes 15-minute soak, and publishes DDLs.
 Evidence:
-- Collector stability check: ~/Projects/unifiedcollector is active and uncommitted (untracked migration 20261014_add_native_platform_scraping.sql, modified background/content/app scripts). No DDL files exist in src/db/schemas/ for Bluesky, Pinterest, Snapchat, Airbnb, or Search.
-- Analyzer gap check: 0 references in src/ or tests/ to telegram_poll_votes, telegram_join_leave_events, search_documents, pinterest_boards, pinterest_pins, snapchat_stories, snapchat_spotlights, snapchat_highlights, airbnb_listings, airbnb_hosts, airbnb_reviews, or bluesky_*.
-- Analyzer service names: 0 references across src/, frontend/src/, tests/, docker/ to legacy collector_light, collector_lowrisk, or instagram_ingest. browser_ingest_events is already wired.
-- Baseline runtime: analyzer (8002), scheduler (full_resolution run active, fresh heartbeat), face_worker (192,040 images, 26,713 faces indexed), and postgres (5434) healthy.
-Decision: Await Bryan's approval on the final plan and wait for UnifiedCollector to land all phases, publish DDLs, and pass the 15-minute soak gate before executing Phase 0 contract freeze and build phases.
+- Contract frozen: docs/collector-contract.md documents all 45 Analyzer-read Collector tables, key columns, and 17-page dashboard baseline.
+- Contract checking: src/pipeline/collector_contract.py and tests/test_collector_contract.py pass (7/7 pure fixture tests).
+- Baseline counts: 5,535 test functions across 242 test files; 17 registered dashboard pages in App.tsx; ledger sources verified.
+- Stability gate check: ~/Projects/unifiedcollector HEAD is c97391af with uncommitted Phase 5 native scrape changes. New platform DDLs are not yet published.
+Decision: Phase 0 is complete. Hold before executing Phases 1–7 until Collector finishes landing phases on main, completes 15-minute soak, and publishes DDLs.
+
 
 # Prior task — Supabase indicator scheduler (2026-10-13)
 Status: Manual export succeeded (30/30, limit 100); scheduled ticks at 00:15, 00:30, and 00:45 SGT succeeded (0/0). last_sync.txt is 2026-10-12T16:45:09Z. Commit 1b95d87 is pushed to main; the 15-minute Bryan crontab remains installed.
