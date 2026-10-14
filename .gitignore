@@ -293,8 +293,5 @@ dev-input/
 !.deepsource.toml
 skills/
 skills-lock.json
-docs/*
-!docs/collector-contract.md
-
-
+docs/
 # End AI / editor dot directories (managed via sourcerepo)
