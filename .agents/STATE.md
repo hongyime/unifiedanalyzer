@@ -1,7 +1,17 @@
-# Active task — Supabase indicator scheduler (2026-10-13)
+# Active task — UnifiedAnalyzer Final Plan (2026-10-14, updated) & Stability Gate
+Status: Plan only. No build until Bryan approves this plan. Codebase and running service baselines verified. Stability gate is active: UnifiedCollector is actively upgrading (HEAD moving, uncommitted native scraping and extension changes in progress, new platform DDLs not yet published). Analyzer holds in "Plan only" state.
+Evidence:
+- Collector stability check: ~/Projects/unifiedcollector is active and uncommitted (untracked migration 20261014_add_native_platform_scraping.sql, modified background/content/app scripts). No DDL files exist in src/db/schemas/ for Bluesky, Pinterest, Snapchat, Airbnb, or Search.
+- Analyzer gap check: 0 references in src/ or tests/ to telegram_poll_votes, telegram_join_leave_events, search_documents, pinterest_boards, pinterest_pins, snapchat_stories, snapchat_spotlights, snapchat_highlights, airbnb_listings, airbnb_hosts, airbnb_reviews, or bluesky_*.
+- Analyzer service names: 0 references across src/, frontend/src/, tests/, docker/ to legacy collector_light, collector_lowrisk, or instagram_ingest. browser_ingest_events is already wired.
+- Baseline runtime: analyzer (8002), scheduler (full_resolution run active, fresh heartbeat), face_worker (192,040 images, 26,713 faces indexed), and postgres (5434) healthy.
+Decision: Await Bryan's approval on the final plan and wait for UnifiedCollector to land all phases, publish DDLs, and pass the 15-minute soak gate before executing Phase 0 contract freeze and build phases.
+
+# Prior task — Supabase indicator scheduler (2026-10-13)
 Status: Manual export succeeded (30/30, limit 100); scheduled ticks at 00:15, 00:30, and 00:45 SGT succeeded (0/0). last_sync.txt is 2026-10-12T16:45:09Z. Commit 1b95d87 is pushed to main; the 15-minute Bryan crontab remains installed.
 Evidence: The analyzer has an after-cycle export hook but no independent cadence or host marker writer. The configured mode is postgres_direct with a batch size of 100.
 Decision: Use a 15-minute Bryan-user crontab entry that calls the existing scheduler-container CLI and writes last_sync.txt only after success. A full-resolution run is active, so the container is left running.
+
 
 # Postgres instance split (Option 1) + A1 face rework — 2026-10-02 (analyzer side)
 
