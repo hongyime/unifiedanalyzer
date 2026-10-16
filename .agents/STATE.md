@@ -1,11 +1,14 @@
-# Active task — Phase 0: Contract Freeze & Stability Gate (Completed 2026-10-14)
-Status: Phase 0 completed and verified. Bryan explicitly approved unifiedanalyzer_final_plan.md. Collector contract pinned and documented at docs/collector-contract.md against Collector HEAD c97391af. Contract check tests in tests/test_collector_contract.py pass (7/7). Stability gate remains active: UnifiedCollector is in-flight on Phase 5 native platform scraping and has uncommitted working tree diffs; Analyzer holds before Phases 1–7 until Collector lands all phases, passes 15-minute soak, and publishes DDLs.
+# Active task — Phase 1: Track Collector Phase 1 (Next up)
+Handoff: .agents/handoffs/2026-10-14-unifiedanalyzer-final-plan.md contains the complete Bryan-approved 10-phase plan and verified gap analysis.
+Status: Phase 0 is COMPLETED (commit e75a85d). Pinned Collector HEAD c97391af in docs/collector-contract.md; contract validator in src/pipeline/collector_contract.py and tests in tests/test_collector_contract.py (7/7 passed).
+Next task: Phase 1 — verify Analyzer health/coverage/readiness and data-quality ledger reflect renamed Collector split services (collector_exposure, collector_lemon8, collector_search, collector_strava, browser_ingest) without hardcoded legacy names.
 Evidence:
 - Contract frozen: docs/collector-contract.md documents all 45 Analyzer-read Collector tables, key columns, and 17-page dashboard baseline.
 - Contract checking: src/pipeline/collector_contract.py and tests/test_collector_contract.py pass (7/7 pure fixture tests).
 - Baseline counts: 5,535 test functions across 242 test files; 17 registered dashboard pages in App.tsx; ledger sources verified.
-- Stability gate check: ~/Projects/unifiedcollector HEAD is c97391af with uncommitted Phase 5 native scrape changes. New platform DDLs are not yet published.
-Decision: Phase 0 is complete. Hold before executing Phases 1–7 until Collector finishes landing phases on main, completes 15-minute soak, and publishes DDLs.
+- Collector HEAD at eca8e429 (Phase 1 split e5ffeeef and Phase 2 Lemon8 c97391af already landed on Collector main).
+Decision: Phase 0 is complete. Incoming agent resumes at Phase 1 following .agents/handoffs/2026-10-14-unifiedanalyzer-final-plan.md.
+
 
 
 # Prior task — Supabase indicator scheduler (2026-10-13)
